@@ -1,0 +1,18 @@
+{
+  "name": "turnhelm",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "files": ["dist/src", "examples"],
+  "bin": {
+    "turnhelm": "./dist/src/cli.js",
+    "turnhelm-hook": "./dist/src/hook-entry.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "test:live": "npm run build && node --test dist/test/live.integration.js"
+  },
+  "engines": { "node": ">=22" },
+  "devDependencies": { "@types/node": "latest", "typescript": "latest" }
+}

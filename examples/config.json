@@ -1,0 +1,17 @@
+{
+  "backend": "laya",
+  "layaUrl": "http://127.0.0.1:8765",
+  "fallbackProfile": "deep",
+  "profiles": {
+    "fast": {
+      "description": "Small localized edits",
+      "model": "gpt-6-luna",
+      "effort": "low"
+    },
+    "deep": {
+      "description": "Complex debugging and review",
+      "model": "gpt-6-sol",
+      "effort": "high"
+    }
+  }
+}
