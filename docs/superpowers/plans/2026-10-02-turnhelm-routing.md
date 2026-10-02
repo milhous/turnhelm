@@ -36,6 +36,13 @@
 - `docs/validation/2026-10-02-routing-trial.md`: real TUI baseline/Hook evidence, only after the trial.
 - Task 6 may delete only the Phase A execution helper/test; it keeps `src/route.ts`, `src/systemone.ts`, `turnhelm route`, and `turnhelm-hook`.
 
+**Current execution status (2026-10-02):** Tasks 1–3 are complete. The Task 4
+schema probe with Codex CLI 0.160.0 and the available `gpt-6.1-sol` model
+created a hosted `collab_tool_call` but produced no `PreToolUse` `Agent` event,
+even with a temporary trust-bypass probe. Task 4 is blocked; do not implement
+or install a spawn Hook until a future runtime exposes a Hook-covered local
+spawn path.
+
 ---
 
 ### Task 1: Bootstrap and validate configuration
@@ -417,7 +424,7 @@
 - `augmentSpawnInput(input, schema, decision): unknown | null` where `null` means emit no Hook output and preserve the original call.
 - `formatPreToolUseOutput(updatedInput): object` returns the documented `permissionDecision: "allow"`/`updatedInput` shape.
 
-- [ ] **Step 1: Discover the installed spawn schema before coding the adapter.** Create a temporary `/tmp/turnhelm-agent-shape.mjs` command that reads the Hook JSON from stdin, prints only `{hook_event_name, tool_name, shape(tool_input)}` to stderr, where `shape` recursively preserves object keys and primitive type names but replaces all values. In a trusted test repo, run a temporary `PreToolUse` matcher `^Agent$` while making Codex perform one user-requested spawn. Record the Codex version and observed task/model/effort paths in the validation notes; never record values. If `tool_name` is not `Agent` or the fields are not stable, stop Phase B and leave the adapter pass-through.
+- [ ] **Step 1: Discover the installed spawn schema before coding the adapter.** The 2026-10-02 probe already ran with Codex CLI 0.160.0 and explicit `gpt-6.1-sol`: the child appeared as hosted `collab_tool_call`, no `PreToolUse` `Agent` event arrived, and no schema file was produced. Treat this as the current gate failure; do not guess fields or continue to Step 2. Re-run this step only after a Codex release exposes a Hook-covered local spawn path.
 
 - [ ] **Step 2: Write pure adapter tests using the observed schema.** The tests must cover direct route, profile route with no explicit fields, explicit model, explicit effort, missing task path, long task, unknown tool input, and exact preservation of unrelated fields. Use an injected `ClassifierDecision`; do not fake Jev/Laya.
 

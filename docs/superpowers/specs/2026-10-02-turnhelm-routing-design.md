@@ -94,6 +94,17 @@ reviews and trusts it through `/hooks`. The Hook is configured as:
 There is no `UserPromptSubmit`, `Stop`, `PostToolUse`, `PermissionRequest`, PTY
 interception, App Server client, daemon, or custom TUI.
 
+### Current runtime compatibility
+
+The first real probe against Codex CLI 0.160.0 used the currently available
+`gpt-6.1-sol` model and explicitly requested one read-only subagent. Codex
+created the child as a `collab_tool_call`, but emitted no `PreToolUse` `Agent`
+event—even for the temporary probe with Hook trust bypassed. No stable
+spawn-argument schema was therefore observed. This runtime does not support
+the planned local Hook augmentation path. Do not implement or install
+`spawn-hook` until a future Codex release exposes the spawn as a Hook-covered
+local tool; keep Phase A as the supported implementation.
+
 ### Adapter contract
 
 Codex's public Hook documentation identifies the `Agent` tool path and permits
@@ -177,13 +188,18 @@ Codex-launched tools.
    client, `turnhelm route` diagnostics, and `turnhelm-hook`. This is a
    separate refactor, not a success side effect.
 
+Current execution status: Task 1, Task 2, and Task 3 are complete. The Phase B
+schema gate is blocked by the runtime finding above; no Phase B adapter source
+or Hook installation is allowed in this run.
+
 ## Out of scope
 
 No forced delegation, one-subagent mandate, UserPromptSubmit routing, automatic
 fallback in Phase B, automatic Phase A removal, Codex auth/config migration,
 proxy integration, App Server client, custom TUI, plugin packaging, model
-catalog scraping, transcript parsing, PTY interception, parallel-agent
-orchestration, or silent model fallback.
+catalog scraping, transcript parsing, PTY interception, wrapping hosted
+`collab_tool_call` items, parallel-agent orchestration, or silent model
+fallback.
 
 ## Source notes
 
