@@ -25,7 +25,7 @@
 
 - `package.json`, `package-lock.json`, `tsconfig.json`, `.gitignore`: minimal TypeScript CLI and two executable bins (`turnhelm`, `turnhelm-hook`).
 - `src/config.ts`: strict config loading and profile validation.
-- `src/systemone.ts`: one real Jev/Laya HTTP request and response validation.
+- `src/systemone.ts`: one real Jev/Laya HTTP request and response validation; Laya is pinned to `typed-decisions` for coding-task classification.
 - `src/route.ts`: classifier decision plus Phase A fallback policy.
 - `src/codex.ts`, `src/cli.ts`: safe Phase A Codex subprocess and diagnostics.
 - `src/spawn-hook.ts`, `src/hook-entry.ts`: spawn input extraction, minimal patching, and fail-open Hook process.
@@ -184,10 +184,11 @@
 ### Task 2: Real decision client and two routing policies
 
 **Files:**
-- Create: `src/systemone.ts`, `src/route.ts`, `test/route.test.ts`, `test/live.integration.ts`
+- Create: `src/systemone.ts`, `src/route.ts`, `test/route.test.ts`, `test/systemone.test.ts`, `test/live.integration.ts`
 
 **Interfaces:**
 - `chooseProfile(config, prompt): Promise<string>` returns only a backend choice.
+- `buildSystemOneRequest(config, prompt): Record<string, unknown>` is a pure request builder used to pin the tested Laya checkpoint.
 - `classifyTask(prompt, config): Promise<ClassifierDecision>` returns `{ kind: "direct" }` or `{ kind: "profile"; profileId; profile }`.
 - `resolvePhaseARoute(prompt, config): Promise<RouteDecision>` applies Phase A fallback rules.
 - `RouteDecision` is `{ kind: "direct"; source }` or `{ kind: "profile"; source; profileId; profile }`.
@@ -216,23 +217,52 @@
     });
     ~~~
 
-- [ ] **Step 2: Run `npm test` and observe the expected missing-module failure.** Do not proceed by weakening the tests.
+- [ ] **Step 2: Write the checkpoint-selection regression test before changing the client.** Add `test/systemone.test.ts`:
 
-- [ ] **Step 3: Implement `src/systemone.ts`.** Send one choice question to the real endpoint, use `jev-latest` only for Jev, omit `model` for Laya, use a four-second timeout, and validate only a choice answer. Never log request/response bodies or headers:
+    ~~~ts
+    import test from "node:test";
+    import assert from "node:assert/strict";
+    import { parseConfig } from "../src/config.js";
+    import { buildSystemOneRequest } from "../src/systemone.js";
+
+    const config = parseConfig({
+      backend: "laya",
+      layaUrl: "http://127.0.0.1:8765",
+      profiles: { fast: { description: "Small edits", model: "gpt-6-luna", effort: "low" } }
+    });
+
+    test("Laya uses the coding-task checkpoint", () => {
+      const request = buildSystemOneRequest(config, "Rename the README heading only.");
+      assert.equal(request.model, "typed-decisions");
+    });
+
+    test("Jev uses its hosted alias", () => {
+      const request = buildSystemOneRequest({ ...config, backend: "jev" }, "Classify this task.");
+      assert.equal(request.model, "jev-latest");
+    });
+    ~~~
+
+- [ ] **Step 3: Run `npm test` and observe the expected missing builder failure.** Do not change the live labels to hide the previously observed Laya mismatch.
+
+- [ ] **Step 4: Implement `src/systemone.ts`.** Send one choice question to the real endpoint, use `jev-latest` for Jev and `typed-decisions` for Laya, use a four-second timeout, and validate only a choice answer. Never log request/response bodies or headers. The live probe showed language auto-routing was the root cause of the Laya mismatch:
 
     ~~~ts
     import type { Config } from "./config.js";
     const object = (value: unknown): value is Record<string, unknown> =>
       typeof value === "object" && value !== null && !Array.isArray(value);
 
-    export async function chooseProfile(config: Config, prompt: string): Promise<string> {
+    export function buildSystemOneRequest(config: Config, prompt: string): Record<string, unknown> {
       const criteria: Record<string, string> = { direct: "No coding, debugging, review, or file-change work" };
       for (const [id, profile] of Object.entries(config.profiles)) criteria[id] = profile.description;
-      const body: Record<string, unknown> = {
+      return {
         state: prompt,
+        model: config.backend === "jev" ? "jev-latest" : "typed-decisions",
         questions: { route: { type: "choice", instructions: "Choose the best route for this coding assistant request.", criteria } }
       };
-      if (config.backend === "jev") body.model = "jev-latest";
+    }
+
+    export async function chooseProfile(config: Config, prompt: string): Promise<string> {
+      const body = buildSystemOneRequest(config, prompt);
       const key = config.backend === "jev" ? process.env.TYPESAFE_API_KEY : process.env.LAYA_API_KEY;
       if (config.backend === "jev" && !key) throw new Error("TYPESAFE_API_KEY is required");
       const headers: Record<string, string> = { "content-type": "application/json" };
@@ -250,7 +280,7 @@
     }
     ~~~
 
-- [ ] **Step 4: Implement `src/route.ts` with separate Phase A policy.** Backend errors and unknown choices throw from `classifyTask`; only `resolvePhaseARoute` catches them for an explicit fallback. Phase B will catch and pass through instead.
+- [ ] **Step 5: Implement `src/route.ts` with separate Phase A policy.** Backend errors and unknown choices throw from `classifyTask`; only `resolvePhaseARoute` catches them for an explicit fallback. Phase B will catch and pass through instead.
 
     ~~~ts
     import type { Config, Profile } from "./config.js";
@@ -286,7 +316,7 @@
     }
     ~~~
 
-- [ ] **Step 5: Add the real live integration test.** Use six pre-labelled synthetic Chinese/English prompts, repeated four times per backend (24 actual calls). Assert exact expected route and `source === "classifier"`; print p50/p95 only. If either real service is unavailable, fail/blocked rather than switching to a fixture.
+- [ ] **Step 6: Add the real live integration test.** Use six pre-labelled synthetic Chinese/English prompts, repeated four times per backend (24 actual calls). Assert exact expected route and `source === "classifier"`; print p50/p95 only. If either real service is unavailable, fail/blocked rather than switching to a fixture.
 
     ~~~ts
     import test from "node:test";
@@ -315,9 +345,9 @@
     });
     ~~~
 
-- [ ] **Step 6: Provision real Laya only after approval.** Run `uv venv --seed --python 3.12 .live-laya-venv`, install `laya[serve]==0.3.22` and `pip-audit`, run `.live-laya-venv/bin/python -m pip_audit --local`, then start `LAYA_HOST=127.0.0.1 LAYA_PORT=8765 LAYA_PRELOAD=1 LAYA_MODELS=english,multilingual .live-laya-venv/bin/laya-serve`. Confirm `curl --fail --silent http://127.0.0.1:8765/health`, set `TYPESAFE_API_KEY` without printing it, copy `examples/config.json` to `.turnhelm-live.json`, and run `TURNHELM_CONFIG="$PWD/.turnhelm-live.json" npm run test:live`.
+- [ ] **Step 7: Provision real Laya only after approval.** Run `uv venv --seed --python 3.12 .live-laya-venv`, install `laya[serve]==0.3.22` and `pip-audit`, run `.live-laya-venv/bin/python -m pip_audit --local`, then start `LAYA_HOST=127.0.0.1 LAYA_PORT=8765 LAYA_PRELOAD=1 LAYA_MODELS=typed-decisions .live-laya-venv/bin/laya-serve`. Confirm `curl --fail --silent http://127.0.0.1:8765/health`, set `TYPESAFE_API_KEY` without printing it, copy `examples/config.json` to `.turnhelm-live.json`, and run `TURNHELM_CONFIG="$PWD/.turnhelm-live.json" npm run test:live`.
 
-- [ ] **Step 7: Verify and commit.** Run `npm test && npm audit --audit-level=high && git diff --check`, inspect the diff, and commit as `feat(classifier): route tasks with real system one services`.
+- [ ] **Step 8: Verify and commit.** Run `npm test && npm audit --audit-level=high && git diff --check`, inspect the diff, and commit as `feat(classifier): route tasks with real system one services`.
 
 ### Task 3: Phase A Codex CLI execution
 

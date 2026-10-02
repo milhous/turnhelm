@@ -38,9 +38,11 @@ other configuration. Backward compatibility is not a design goal.
   `TYPESAFE_API_KEY`; Turnhelm never stores that key. Laya may use
   `LAYA_API_KEY`.
 - Jev and Laya share one narrow HTTP decision client using their real
-  `/v1/systemone` endpoints. Normalize only the selected choice and required
-  usage/latency data. Do not transfer confidence thresholds between Jev and
-  Laya.
+  `/v1/systemone` endpoints. Jev uses `jev-latest`; Laya uses the explicit
+  `typed-decisions` checkpoint rather than language auto-routing because this
+  classifier labels coding/agent tasks. Normalize only the selected choice and
+  required usage/latency data. Do not transfer confidence thresholds between
+  Jev and Laya.
 - Prompt text, tool arguments, and backend output are untrusted. Never log
   raw prompts, tool arguments, backend text, or credentials. Hook developer
   output is a fixed template containing only validated profile values.
@@ -145,7 +147,8 @@ Codex-launched tools.
    exact-input preservation, profile patching, and fail-open behavior. These
    tests may inject route decisions into pure functions; they must not pretend
    to be Jev/Laya integration tests.
-2. **Live backend gate:** call a real local `laya[serve]` endpoint and the real
+2. **Live backend gate:** call a real local `laya[serve]` endpoint with only
+   `typed-decisions` preloaded and the real
    Jev endpoint with synthetic Chinese and English prompts. Use at least 24
    calls per backend, record p50/p95 latency, and fail the live command on
    unexpected labelled choices. If Laya, Jev, credentials, or model access is
