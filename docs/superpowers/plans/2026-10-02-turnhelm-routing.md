@@ -18,6 +18,7 @@
 - Prompts over 2,000 characters use Phase A fallback policy; Phase B passes an unrecognized/long spawn through unchanged.
 - Keep Laya on `127.0.0.1` or `::1`. Do not log prompts, tool arguments, backend output, or secrets.
 - Phase A removes `TYPESAFE_API_KEY`, `LAYA_API_KEY`, and `TURNHELM_CONFIG` from the spawned Codex environment; Phase B does not claim classifier-key isolation inside native TUI.
+- Keep Phase A through the entire Phase B pilot and promotion; retire its execution wrapper only in the separate approval-gated Task 6.
 - Before each commit, inspect `git diff`, run `git diff --check`, and run `npm audit --audit-level=high` once `package.json` exists.
 
 ## File map
@@ -33,6 +34,7 @@
 - `examples/config.json`, `examples/hooks.json`: inactive examples.
 - `README.md`: setup, Phase A commands, and opt-in Phase B behavior.
 - `docs/validation/2026-10-02-routing-trial.md`: real TUI baseline/Hook evidence, only after the trial.
+- Task 6 may delete only the Phase A execution helper/test; it keeps `src/route.ts`, `src/systemone.ts`, `turnhelm route`, and `turnhelm-hook`.
 
 ---
 
@@ -496,6 +498,40 @@
     ~~~
 
     Do not edit `~/.codex/config.toml` or auth data. If the user Hook already has a Turnhelm/agent-routing handler, stop rather than duplicate it. Re-run the second-repository topology test after promotion. Do not remove `turnhelm codex` or `turnhelm route`.
+
+### Task 6: Optional retirement of the Phase A execution wrapper
+
+**Files:**
+- Modify: `src/cli.ts`, `README.md`
+- Delete: `src/codex.ts`, `test/codex.test.ts` only after the explicit retirement gate
+- Keep: `src/config.ts`, `src/systemone.ts`, `src/route.ts`, `src/spawn-hook.ts`, `src/hook-entry.ts`, `turnhelm route`, and `turnhelm-hook`
+
+**Interfaces:**
+- `turnhelm route "<task>"` remains the diagnostic interface.
+- The native TUI plus the reviewed spawn Hook becomes the only automatic B execution path.
+
+- [ ] **Step 1: Confirm every retirement condition.** Require a passing Task 5 report in the primary and second repository, no active `turnhelm codex` use in repository/CI scripts, and explicit user acceptance that tasks handled by the main TUI thread will no longer be routed by Turnhelm. If any condition is false, stop and keep A.
+- [ ] **Step 2: Scan for callers before deleting anything.** Run `rg -n --hidden --glob '!node_modules' --glob '!dist' 'turnhelm codex|dist/src/codex|runCodex|buildCodexArgs' .`; review every match and migrate or remove only Turnhelm-owned references. Do not edit unrelated user files.
+- [ ] **Step 3: Write the failing retirement test.** Add `test/transition.test.ts`:
+
+    ~~~ts
+    import test from "node:test";
+    import assert from "node:assert/strict";
+    import { spawnSync } from "node:child_process";
+    import { fileURLToPath } from "node:url";
+
+    test("codex execution command is retired while route remains", () => {
+      const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
+      const result = spawnSync(process.execPath, [cli, "codex", "ignored"], { encoding: "utf8" });
+      assert.equal(result.status, 2);
+      assert.match(result.stderr, /usage: turnhelm route/);
+    });
+    ~~~
+
+    Run `npm test` and observe the expected failure before removing the command.
+- [ ] **Step 4: Remove only automatic Phase A execution.** Delete `src/codex.ts` and `test/codex.test.ts`; change `src/cli.ts` to accept only `route`, return exit code 2 for `codex`, and retain the shared classifier/config. Do not remove the Hook bin or backend clients.
+- [ ] **Step 5: Update README.md.** Remove `turnhelm codex` execution instructions. Keep `turnhelm route`, config setup, real Jev/Laya testing, and the statement that native TUI spawn routing does not affect tasks with no spawn.
+- [ ] **Step 6: Verify and commit.** Run `npm test && npm run test:live` against real Jev and Laya, `npm audit --audit-level=high`, and `git diff --check`; review that no `~/.codex` or auth path changed. Commit as `refactor(cli): retire one-shot execution after spawn routing`.
 
 ## Source references
 

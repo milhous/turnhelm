@@ -68,6 +68,12 @@ backend call; with no fallback it exits before Codex starts. These conservative
 rules apply only to Phase A's explicit command, not to Phase B's existing
 spawn calls.
 
+Phase A remains available throughout the Phase B pilot and after user-level
+Hook promotion. A successful Phase B trial does not automatically replace it:
+Phase B cannot route a task that the main thread handles without spawning, and
+Phase A remains useful for scripts, CI, explicit preflight routing, and
+environments where Hooks are disabled or untrusted.
+
 The spawned Codex process removes only classifier-specific environment keys
 (`TYPESAFE_API_KEY`, `LAYA_API_KEY`, and `TURNHELM_CONFIG`); it does not alter
 Codex authentication keys or configuration.
@@ -159,16 +165,22 @@ Codex-launched tools.
 5. **Promotion gate:** record latency, token usage, routing misses, and any
    topology difference. Only after an explicit go decision may the user merge a
    `turnhelm-hook` PreToolUse entry into their existing user Hook file. Do not
-   remove Phase A; it remains the diagnostic and one-shot path. Remove the
-   project-local trial Hook before enabling the user-level copy.
+   remove Phase A during this gate; it remains the diagnostic and one-shot path.
+   Remove the project-local trial Hook before enabling the user-level copy.
+6. **Optional Phase A retirement gate:** retire only the `turnhelm codex`
+   execution wrapper after B has passed the primary and second-repository
+   topology tests, no repository/CI usage remains, and the user explicitly
+   accepts losing root-task routing. Keep the shared classifier, Jev/Laya
+   client, `turnhelm route` diagnostics, and `turnhelm-hook`. This is a
+   separate refactor, not a success side effect.
 
 ## Out of scope
 
 No forced delegation, one-subagent mandate, UserPromptSubmit routing, automatic
-fallback in Phase B, Codex auth/config migration, proxy integration, App Server
-client, custom TUI, plugin packaging, model catalog scraping, transcript
-parsing, PTY interception, parallel-agent orchestration, or silent model
-fallback.
+fallback in Phase B, automatic Phase A removal, Codex auth/config migration,
+proxy integration, App Server client, custom TUI, plugin packaging, model
+catalog scraping, transcript parsing, PTY interception, parallel-agent
+orchestration, or silent model fallback.
 
 ## Source notes
 
