@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { loadConfig } from "../src/config.js";
+import { loadConfig, parseConfig } from "../src/config.js";
 import { classifyTask } from "../src/route.js";
 
 const cases = [
@@ -14,9 +14,18 @@ const cases = [
 
 const percentile = (values: number[], p: number) => values.sort((a, b) => a - b)[Math.ceil(values.length * p) - 1];
 
+// Smoke coverage only: six labelled bilingual cases, repeated four times (24 calls per backend).
 for (const backend of ["laya", "jev"] as const) {
   test("real " + backend + " routes labelled prompts", async () => {
-    const config = { ...loadConfig(), backend };
+    if (backend === "jev" && process.env.TURNHELM_ALLOW_HOSTED_JEV !== "1") {
+      throw new Error("real jev live test requires TURNHELM_ALLOW_HOSTED_JEV=1");
+    }
+    const base = loadConfig();
+    const config = parseConfig({
+      ...base,
+      backend,
+      ...(backend === "jev" ? { hostedJev: { enabled: true } } : {})
+    });
     const times: number[] = [];
     for (let repeat = 0; repeat < 4; repeat++) {
       for (const [prompt, expected] of cases) {

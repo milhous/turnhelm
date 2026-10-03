@@ -36,3 +36,10 @@ Turnhelm must not guess the `spawn_agent` argument schema or implement
 Phase A is the supported implementation.
 
 No raw prompts, tool arguments, credentials, or model outputs are stored here.
+
+## Phase A auto-mode note (2026-10-03)
+
+Phase A auto mode is the supported local-first path: it tries Laya first and
+uses hosted Jev only when `hostedJev.enabled` is true and
+`TURNHELM_ALLOW_HOSTED_JEV=1`. Native subagent Hook/Gateway routing remains
+unsupported.

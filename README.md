@@ -17,15 +17,3 @@ Codex. Run `turnhelm codex "task"` for read-only Codex execution, or
 `turnhelm codex --write "task"` for workspace-write. A backend failure uses
 only the configured `fallbackProfile`; without one, the task stops before
 Codex runs. Model-access failures do not trigger another model.
-
-## Phase B pilot
-
-Phase B is opt-in. A reviewed `PreToolUse` Hook runs only when native Codex has
-already decided to spawn an agent. It may add an allowlisted model and effort
-to an otherwise unspecified spawn. It does not create agents, change parallel
-orchestration, alter explicit settings, or affect tasks with no spawn. Backend
-and Hook failures pass through the original spawn unchanged.
-
-Do not install the Hook globally until the real TUI baseline and Hook comparison
-passes in the validation plan. Never add a `UserPromptSubmit` Hook for
-delegation.
