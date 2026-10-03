@@ -29,6 +29,11 @@ after the gateway design is implemented. Phase A may remain temporarily as a
 development smoke harness, but it is not a product contract and is removed
 after the gateway promotion gates pass.
 
+The implementation is intentionally small: one launcher, one in-process
+gateway, one typed-decision client, and one bounded in-memory route map. There
+is no daemon, database, queue, dashboard, persistent cache, automatic retry,
+or general provider abstraction.
+
 ## Goals
 
 1. Keep the Codex CLI/TUI binary, rendering, permissions, sessions, and native
@@ -76,9 +81,9 @@ after the gateway promotion gates pass.
 - Turnhelm must not write or mutate `~/.codex/config.toml`, profiles,
   `auth.json`, or generated model catalogs. Codex may perform its own normal
   runtime/session writes; those are not Turnhelm-managed configuration.
-- Turnhelm never reads, stores, or prints Codex authentication tokens. The
-  upstream authorization header is passed through as opaque bytes and is not
-  included in logs.
+- Turnhelm never stores, prints, or makes routing decisions from Codex
+  authentication tokens. The upstream authorization header is forwarded as an
+  opaque value and is not included in logs.
 - `TYPESAFE_API_KEY` is visible only to the gateway process. It is removed
   from the Codex child environment. Laya stays on loopback and may use
   `LAYA_API_KEY` only in the gateway environment.
@@ -88,11 +93,12 @@ after the gateway promotion gates pass.
 - An explicit non-sentinel `model` or explicit reasoning effort is immutable.
   Native Codex precedence remains authoritative: explicit spawn settings win
   over defaults and inherited settings.
-- Unknown Codex versions, request shapes, headers, or model/effort paths are
-  rejected by the startup protocol gate. During a session, non-sentinel
-  requests with unknown shapes are passed through unchanged; a malformed
-  sentinel request is never forwarded upstream and is terminated locally. The
-  gateway must never guess a field name.
+- Unknown Codex versions, request shapes, headers, or model/effort paths fail
+  the startup protocol gate. Turnhelm then launches stock Codex without the
+  routing sentinel. During a supported session, non-sentinel requests with
+  unknown shapes are passed through unchanged; a malformed sentinel request is
+  never forwarded upstream and is terminated locally. The gateway must never
+  guess a field name.
 - Raw prompts, request bodies, response bodies, authorization headers, Jev
   responses, and Laya responses are never logged or persisted.
 
@@ -124,21 +130,32 @@ modified or shadowed.
 
 ### Session startup
 
-1. Validate the Turnhelm configuration and the installed Codex version.
-2. Select a free loopback port and generate a 256-bit random session token.
-3. Start the gateway with a private environment containing routing keys and
+1. Validate the Turnhelm configuration and run the installed-Codex protocol
+   preflight. The preflight must prove the child-only provider override, the
+   virtual model sentinel, the upstream endpoint, the thread id, the request
+   class, and the model/effort paths without writing Codex configuration.
+2. If preflight fails, launch stock Codex without routing and do not start the
+   gateway.
+3. Select a free loopback port and generate a 256-bit random session token.
+4. Start the gateway with a private environment containing routing keys and
    configuration. Do not create a key file.
-4. Wait for the authenticated health check. If it fails, terminate the
+5. Wait for the authenticated health check. If it fails, terminate the
    gateway and launch stock Codex without routing environment variables.
-5. Launch stock Codex with a child-only provider base URL and the virtual
+6. Launch stock Codex with a child-only provider base URL and the virtual
    model sentinel `turnhelm/auto`. The exact environment/profile mechanism is
    selected only after a real TUI smoke proves that no user Codex file is
    written and the existing login remains usable.
-6. On Codex exit, stop the gateway, clear the child environment, and erase
+7. On Codex exit, stop the gateway, clear the child environment, and erase
    in-memory route state.
 
 The launcher must preserve the original exit status and signal behavior of the
 Codex process.
+
+The preflight is a go/no-go gate, not a best-effort compatibility layer. If a
+stock TUI cannot accept the sentinel and child-only provider override without
+Turnhelm writing Codex configuration or credentials, this design is not
+implemented for that Codex release. Do not add a Hook, PTY shim, catalog
+patch, or second provider to work around the failure.
 
 ### Request classification boundary
 
@@ -158,8 +175,8 @@ input is:
 `threadId` must come from a Codex-provided thread identifier. A cache key,
 transcript hash, or prompt text is not a substitute. `requestClass` may use
 Codex headers/metadata only when that shape has been captured by the current
-version's protocol probe. If any required field is absent or has a different
-type, the request is forwarded unchanged.
+version's protocol probe. The launcher cannot enter routed mode unless those
+fields and the sentinel path were proven by preflight.
 
 The gateway routes only requests that satisfy all of the following:
 
@@ -168,6 +185,11 @@ The gateway routes only requests that satisfy all of the following:
 - the thread has no existing route, so this is its first routable request;
 - task text is present, bounded, and contains no tool result or transcript;
 - no explicit effort was supplied.
+
+If the sentinel request carries an explicit effort, the gateway uses the
+configured baseline model and preserves that explicit effort; it does not call
+a classifier. This is the only supported sentinel request with an explicit
+effort.
 
 For a thread with an existing route, the gateway reuses the route and does not
 call Jev or Laya again. Continuations, tool calls, compaction, titles,
@@ -212,6 +234,7 @@ startup. Secrets are environment-only:
 
 - `TYPESAFE_API_KEY` for optional hosted Jev;
 - `LAYA_API_KEY` for an authenticated local Laya server;
+- `TURNHELM_ALLOW_HOSTED_JEV=1` for the explicit per-session hosted Jev opt-in;
 - `TURNHELM_CONFIG` for an explicit configuration path used by tests or a
   controlled launcher.
 
@@ -222,10 +245,11 @@ startup. Secrets are environment-only:
 2. Local Laya receives the bounded task text using the explicit
    `typed-decisions` checkpoint over the Jev-compatible `POST /v1/systemone`
    contract. Laya is the default and preferred production classifier.
-3. Hosted Jev is called only when the session explicitly enables hosted
-   routing and a deterministic privacy gate classifies the bounded task text
-   as safe to leave the machine. Jev never receives the full Codex request,
-   system prompt, tool output, file content, or credentials.
+3. Hosted Jev is disabled by default. It may be called only when the
+   configuration enables it, `TURNHELM_ALLOW_HOSTED_JEV=1` is present for the
+   session, and the bounded text is the current root-user task. Subagent task
+   text, tool output, continuation text, file content, system prompts, and
+   credentials are always local-only.
 4. The backend answer is validated as a typed choice. Backend-specific
    confidence calibration is allowed, but Laya and Jev thresholds must never
    be copied between one another.
@@ -236,18 +260,15 @@ The hot path does not run an ensemble. Parallel Laya + Jev calls double
 classifier latency and hosted-data exposure without being required for a
 three-profile route. Ensemble evaluation belongs in an offline benchmark only.
 
-### Privacy gate
+### Hosted-data policy
 
-The privacy gate is deny-by-default for hosted Jev. It rejects task text that
-contains code fences, credential/secret patterns, access tokens, private key
-markers, patch/diff blocks, file contents, repository paths, tool output,
-environment assignments, or an unbounded length. Rejection selects local Laya
-and does not report the text to Jev.
-
-The gate is a data-loss boundary, not a security classifier. If it cannot
-prove that the bounded task text is safe, it denies hosted routing. The user
-must opt in to hosted Jev for a session; there is no silent opt-in because a
-classifier timed out.
+There is no heuristic content scrubber in the hot path. Such a scrubber would
+create a false sense of privacy and add an unbounded maintenance surface.
+Hosted Jev is an explicit, per-session opt-in for root-user task text only.
+The launcher must display that opt-in in its diagnostic line, and the gateway
+must enforce the source and size boundary above. Users who cannot permit any
+task text to leave the machine leave hosted Jev disabled; local Laya remains
+the complete routing path.
 
 ### Thread stickiness
 
@@ -266,19 +287,21 @@ different existing model. An explicit child model/effort bypasses the router.
 The router is fail-open with respect to ordinary Codex execution:
 
 - Laya timeout, Jev timeout, HTTP failure, malformed answer, unknown profile,
-  privacy rejection, or cache failure: use the configured baseline for a
+  hosted-data opt-out, or cache failure: use the configured baseline for a
   valid sentinel request, and forward non-sentinel requests unchanged.
 - A malformed sentinel request is a protocol fault. It is closed locally
   without retry or field guessing; the launcher must have prevented this by
   passing the protocol gate before starting a routed TUI session.
 - Gateway health failure before TUI startup: run stock Codex without routing.
-- Gateway crash during a session: surface one local diagnostic and stop
-  rewriting; do not retry a request against another model.
+- Gateway crash during a session: surface one local diagnostic and terminate
+  the routed Codex child with the gateway's failure status. Do not restart the
+  child against another model or silently fall back mid-turn; the user may
+  rerun plain Codex.
 - Upstream authorization or provider errors: forward the provider error;
   Turnhelm does not change credentials or permissions.
 - Port collision, token mismatch, malformed JSON, oversized body, or invalid
-  streaming framing: close the local connection and leave the user's normal
-  Codex invocation available.
+  streaming framing: fail before or at the affected request and leave the
+  user's normal Codex invocation available.
 
 Fail-open means no automatic model downgrade beyond the configured session
 baseline, no forced escalation, no new subagent, and no change to the approval
@@ -297,8 +320,9 @@ or sandbox policy.
    effort, status, and latency.
 5. No prompt, transcript, tool output, response body, or classifier response
    may be written to disk. Temporary files are not needed by the gateway.
-6. Hosted Jev calls use a separate bounded payload builder; forwarding code or
-   a complete Codex body to Jev is a test failure.
+6. Hosted Jev calls use a separate bounded root-task payload builder;
+   forwarding code, a subagent task, or a complete Codex body to Jev is a test
+   failure.
 7. The gateway validates all model and effort strings against configuration
    before rewriting. Decision output is data, never a shell command or URL.
 8. The launcher must clean up the gateway on normal exit, signals, startup
@@ -310,7 +334,8 @@ or sandbox policy.
   excluding upstream latency.
 - Warm local Laya routing: p95 <= 100 ms for a bounded task.
 - Hosted Jev routing: p95 <= 750 ms when explicitly enabled; it must never be
-  invoked for continuations or private-task requests.
+  invoked for continuations, subagent tasks, or sessions without the explicit
+  opt-in.
 - At most one classifier request per thread lifetime unless the thread is
   explicitly restarted.
 - The route cache is bounded to 1,024 entries and a six-hour TTL; eviction is
@@ -364,7 +389,7 @@ Test the new gateway without a fake Jev/Laya integration claim:
 - exact preservation of non-routing request fields;
 - model/effort rewrite only on the pinned path;
 - route stickiness and bounded eviction;
-- privacy gate denial cases;
+- hosted-Jev source/opt-in boundary cases;
 - no-secret/no-raw-payload diagnostics;
 - fail-open behavior for every protocol and backend error.
 
@@ -384,13 +409,15 @@ field names, headers, and version identifiers. Verify:
 - the child-only provider override works;
 - the stock TUI remains usable;
 - the sentinel reaches the gateway;
+- the upstream endpoint is derived without reading or writing Codex auth;
 - the current thread id and request class are stable;
 - the model and effort paths can be rewritten without touching other fields;
 - streaming responses remain valid;
 - no Codex file or credential changes occur.
 
 If any item fails, the gateway is not promoted and the stock Codex path is
-used. Do not guess a new schema.
+used. Do not guess a new schema or add a compatibility branch for an
+unsupported release.
 
 ### Native orchestration gate
 

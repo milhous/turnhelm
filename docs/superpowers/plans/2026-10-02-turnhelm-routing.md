@@ -1,4 +1,7 @@
-# Turnhelm Routing Implementation Plan
+# Turnhelm Routing Implementation Plan (superseded)
+
+> Superseded by `docs/superpowers/plans/2026-10-03-turnhelm-gateway-routing.md`.
+> This Hook-based plan is historical and must not be executed.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
