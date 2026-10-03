@@ -42,6 +42,39 @@ test("missing Codex is a generic controlled rejection", { timeout: 20_000 }, asy
   assert.deepEqual(JSON.parse(result.stdout), { error: "Codex could not start" });
 });
 
+test("descriptor-exhausted Codex spawn rejects without an unhandled process error", { timeout: 20_000 }, async t => {
+  const directory = await mkdtemp(join(tmpdir(), "turnhelm-fd-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const moduleUrl = new URL("../src/codex.js", import.meta.url).href;
+  // The FD limit affects only this harness; PATH is empty of executables.
+  const result = await execute("/bin/sh", ["-c", 'ulimit -n 64 && exec "$@"', "turnhelm-fd",
+    process.execPath, "--input-type=module", "--eval", `
+      import { openSync, closeSync } from "node:fs";
+      import { runCodex } from ${JSON.stringify(moduleUrl)};
+      // Initialize lazy stdio handles before exhausting the local FD table.
+      process.stdout.write("");
+      process.stderr.write("");
+      const descriptors = [];
+      try {
+        try {
+          while (true) descriptors.push(openSync("/dev/null", "r"));
+        } catch (error) {
+          if (error.code !== "EMFILE") throw error;
+        }
+        try {
+          await runCodex({ kind: "direct", source: "classifier" }, "test task", false);
+          throw new Error("spawn unexpectedly succeeded");
+        } catch (error) {
+          console.log(JSON.stringify({ error: error.message }));
+        }
+      } finally {
+        for (const descriptor of descriptors) closeSync(descriptor);
+      }
+    `], { env: { ...process.env, PATH: directory }, timeout: 10_000 });
+  assert.equal(result.stderr, "");
+  assert.deepEqual(JSON.parse(result.stdout), { error: "Codex could not start" });
+});
+
 test("profile route uses one-run model and effort", () => {
   assert.deepEqual(
     buildCodexArgs({
