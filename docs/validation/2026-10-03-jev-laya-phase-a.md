@@ -9,6 +9,7 @@ npm test
 TURNHELM_ALLOW_HOSTED_JEV=1 npm run test:live
 npm audit --audit-level=high
 git diff --check
+git status --short
 ```
 
 Run the live command only with approved real services and credentials. It must

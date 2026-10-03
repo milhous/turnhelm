@@ -27,14 +27,17 @@ for (const backend of ["laya", "jev"] as const) {
       ...(backend === "jev" ? { hostedJev: { enabled: true } } : {})
     });
     const times: number[] = [];
+    const selected = new Map<string, number>();
     for (let repeat = 0; repeat < 4; repeat++) {
       for (const [prompt, expected] of cases) {
         const start = performance.now();
         const result = await classifyTask(prompt, config);
         times.push(performance.now() - start);
-        assert.equal(result.kind === "direct" ? "direct" : result.profileId, expected);
+        const selectedProfile = result.kind === "direct" ? "direct" : result.profileId;
+        selected.set(selectedProfile, (selected.get(selectedProfile) ?? 0) + 1);
+        assert.equal(selectedProfile, expected);
       }
     }
-    console.info(backend + " calls=24 p50_ms=" + percentile(times, 0.5).toFixed(1) + " p95_ms=" + percentile(times, 0.95).toFixed(1));
+    console.info(backend + " calls=24 selected_profiles=" + ["direct", "fast", "deep"].map((id) => id + ":" + (selected.get(id) ?? 0)).join(",") + " p50_ms=" + percentile(times, 0.5).toFixed(1) + " p95_ms=" + percentile(times, 0.95).toFixed(1));
   });
 }
