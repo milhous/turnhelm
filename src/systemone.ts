@@ -27,7 +27,7 @@ const hostedJevAllowed = (config: Config) => config.hostedJev.enabled && process
 async function callDecision(config: Config, prompt: string, backend: "laya" | "jev"): Promise<string> {
   if (backend === "jev" && !hostedJevAllowed(config)) throw new Error("hosted Jev is not enabled");
   const key = backend === "jev" ? process.env.TYPESAFE_API_KEY : process.env.LAYA_API_KEY;
-  if (config.backend === "jev" && !key) throw new Error("TYPESAFE_API_KEY is required");
+  if (backend === "jev" && !key) throw new Error("TYPESAFE_API_KEY is required");
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (key) headers.authorization = "Bearer " + key;
   const base = backend === "jev" ? "https://api.typesafe.ai" : config.layaUrl;

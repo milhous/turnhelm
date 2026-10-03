@@ -61,3 +61,23 @@ test("direct Jev requires both hosted opt-ins before fetch", async () => {
   finally { if (previous === undefined) delete process.env.TURNHELM_ALLOW_HOSTED_JEV; else process.env.TURNHELM_ALLOW_HOSTED_JEV = previous; }
   assert.equal(calls, 0);
 });
+
+test("auto rejects Jev fallback before fetch when its key is missing", async () => {
+  const calls: string[] = [];
+  const oldOptIn = process.env.TURNHELM_ALLOW_HOSTED_JEV;
+  const oldKey = process.env.TYPESAFE_API_KEY;
+  process.env.TURNHELM_ALLOW_HOSTED_JEV = "1";
+  delete process.env.TYPESAFE_API_KEY;
+  try {
+    await withFetch(async input => {
+      calls.push(String(input));
+      return new Response("unavailable", { status: 503 });
+    }, async () => {
+      await assert.rejects(() => chooseProfile(parseConfig({ ...base, backend: "auto", hostedJev: { enabled: true } }), "Investigate the race."));
+    });
+  } finally {
+    if (oldOptIn === undefined) delete process.env.TURNHELM_ALLOW_HOSTED_JEV; else process.env.TURNHELM_ALLOW_HOSTED_JEV = oldOptIn;
+    if (oldKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = oldKey;
+  }
+  assert.equal(calls.length, 1);
+});
