@@ -73,10 +73,11 @@ CLI characterization used temporary config/executable fixtures and ephemeral
 loopback HTTP only; neither real Codex nor a hosted service was invoked. The
 source gate covers every production module without including test files.
 
-## Final boundary hardening result (2026-10-03)
+## Initial final-boundary hardening result (2026-10-03, historical)
 
-No new live calls were made. This supersedes the initial offline receipt above
-for current code, not the dated authorized live smoke evidence.
+No new live calls were made. At this checkpoint, this superseded the initial
+offline receipt above, not the dated authorized live smoke evidence. The
+absent-stdin follow-up below is the current-code receipt.
 
 - Focused RED: build passed; CLI/Codex/System One tests passed 130/152, with 22
   expected failures for explicit CommonJS fixture parsing, unhandled stdin
@@ -105,3 +106,25 @@ child codes while refusing success after failed transfer. Fixtures are explicitl
 CommonJS-safe and all child executions remain temporary fixtures, never real Codex.
 The four-second classifier abort and existing fallback/opt-in policy are unchanged.
 Independent review and remote integration remain controller-owned gates.
+
+## Final boundary result including absent-stdin follow-up (2026-10-03)
+
+The controller reproduced a remaining queued ChildProcess `EMFILE` crash when
+spawn returned no stdin. A finite-timeout, FD-limited isolated harness with
+empty executable PATH reproduced the correct error (focused Codex RED: 5/6).
+Process error listener installation now precedes the absent-stdin guard, and
+both missing executable and unavailable stdin reject with the same generic
+error. Local harness descriptors are closed; the parent FD limit is unchanged.
+
+- Focused Codex GREEN: 6/6; combined CLI/Codex/System One GREEN: 153/153.
+- Hermetic `npm test` and `npm run test:coverage`: 190/190 each on exact
+  Node 22.8.0/bundled npm 10.8.2, official Node 24.21.0/npm 11.17.0, and native
+  Node 26.5.0/npm 11.17.0; zero failed/skipped/cancelled.
+- Aggregate source coverage on all targets: 99.25% lines / 93.71% branches /
+  100% functions. Codex module: 100% / 100% / 100%; other modules remain at
+  the values in the preceding historical receipt, all above 80%.
+- Dependency audit: zero vulnerabilities; diff whitespace checks passed.
+
+Earlier RED/GREEN and live receipts remain historical evidence. No new live
+calls, real Codex, controller integration updates, or remote publication were
+performed for this same-category follow-up.

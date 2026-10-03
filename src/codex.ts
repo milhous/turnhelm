@@ -23,12 +23,12 @@ export async function runCodex(route: RouteDecision, prompt: string, write: bool
     stdio: ["pipe", "inherit", "inherit"],
     env: codexEnvironment()
   });
-  if (!child.stdin) throw new Error("Codex stdin unavailable");
+  let processFailed = false;
+  child.once("error", () => { processFailed = true; });
+  if (!child.stdin) throw new Error("Codex could not start");
   const stdin = child.stdin;
   return await new Promise<number>((resolve, reject) => {
     let inputFailed = false;
-    let processFailed = false;
-    child.once("error", () => { processFailed = true; });
     stdin.on("error", () => { inputFailed = true; });
     // close follows stdio shutdown, including pending stdin errors.
     child.once("close", code => {

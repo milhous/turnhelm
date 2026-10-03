@@ -44,9 +44,9 @@ env -u TYPESAFE_API_KEY -u LAYA_API_KEY -u TURNHELM_ALLOW_HOSTED_JEV npm run tes
 npm audit --audit-level=high
 ```
 
-The 2026-10-03 final boundary verification passed 189/189 tests on exact Node
+The 2026-10-03 final boundary verification passed 190/190 tests on exact Node
 22.8.0 (bundled npm 10.8.2), Node 24.21.0, and Node 26.5.0; source coverage was
-99.25% lines, 93.06% branches, and 100% functions on each target. No new live
+99.25% lines, 93.71% branches, and 100% functions on each target. No new live
 calls were made; see [dated validation](docs/validation/2026-10-03-jev-laya-phase-a.md).
 
 Coverage includes every production module in `dist/src/**`, including CLI

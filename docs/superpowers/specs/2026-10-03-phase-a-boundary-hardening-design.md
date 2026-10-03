@@ -26,12 +26,16 @@ ephemeral loopback fixtures and a temporary executable, preserving child
 coverage. The authorized live smoke evidence is unchanged; no new live calls
 were made. Independent review and publication remain controller-owned gates.
 
-Final boundary verification passed 189/189 hermetic tests and coverage tests on
+Final boundary verification passed 190/190 hermetic tests and coverage tests on
 exact Node 22.8.0 with bundled npm 10.8.2, official Node 24.21.0, and native
 Node 26.5.0. Aggregate source lines/branches/functions were
-99.25%/93.06%/100% on every target; every production module exceeded 80%.
+99.25%/93.71%/100% on every target; every production module exceeded 80%.
 The focused RED receipt was 130/152, with 22 expected boundary/fixture failures;
-GREEN was 152/152 on all three targets. Dependency audit remained clean.
+Initial GREEN was 152/152 on all three targets. A same-category absent-stdin
+follow-up reproduced unhandled queued EMFILE after rejection (5/6 Codex RED),
+then installed the process listener before the guard. Current focused GREEN is
+153/153 on every target; Codex source branch coverage is now 100%.
+Dependency audit remained clean.
 The exact-minimum verification closes the earlier implicit-module fixture gap.
 
 CLI characterization also exposed `.join(" ").trim()` normalizing original
@@ -98,8 +102,9 @@ before publication. These decisions use the user's delegated authority.
 - Handle child stdin errors before writing, and settle the Codex promise only
   after process/stdio completion. Preserve nonzero child statuses; an input
   transfer failure must not report success even if the child exits zero.
-  Spawn failures remain controlled rejections. Do not add a global Codex task
-  timeout, retry, model switch, or permission policy.
+  Spawn failures remain controlled rejections. Process error listeners must
+  precede the absent-stdin guard as well as writes. Do not add a global Codex
+  task timeout, retry, model switch, or permission policy.
 - Classifier responses are limited to 64 KiB (65536) received UTF-8 bytes.
   Reject oversized declared Content-Length before reading, and enforce the
   actual streamed byte count even when the header is absent or understated.
