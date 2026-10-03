@@ -212,3 +212,137 @@ test("classifier rejects malformed JSON", async () => {
     await assert.rejects(() => classifyTask("Review the implementation.", parseConfig(base)));
   });
 });
+
+const responseBudget = 64 * 1024;
+const genericResponseError = { message: "classifier unavailable" };
+
+function paddedDecision(bytes: number, choice = "direct", multibyte = false): Uint8Array {
+  const payload = { answers: { route: { type: "choice", choice } }, padding: multibyte ? "界😀".repeat(100) : "" };
+  const initialSize = Buffer.byteLength(JSON.stringify(payload));
+  payload.padding += " ".repeat(bytes - initialSize);
+  return new TextEncoder().encode(JSON.stringify(payload));
+}
+
+function trackedResponse(chunks: Uint8Array[], options: { length?: string; readError?: boolean; cancelError?: boolean } = {}) {
+  const observed = { reads: 0, cancels: 0, releases: 0 };
+  let index = 0;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (options.readError) controller.error(new Error("private-read-error"));
+      else if (index < chunks.length) controller.enqueue(chunks[index++]);
+      else controller.close();
+    },
+    cancel() {
+      if (options.cancelError) throw new Error("private-cancel-error");
+    }
+  }, { highWaterMark: 0 });
+  const response = new Response(stream, { headers: options.length === undefined ? {} : { "content-length": options.length } });
+  const getReader = stream.getReader.bind(stream);
+  stream.getReader = (() => {
+    const reader = getReader();
+    const read = reader.read.bind(reader);
+    const cancel = reader.cancel.bind(reader);
+    const release = reader.releaseLock.bind(reader);
+    reader.read = () => { observed.reads++; return read(); };
+    reader.cancel = reason => { observed.cancels++; return cancel(reason); };
+    reader.releaseLock = () => { observed.releases++; release(); };
+    return reader;
+  }) as typeof stream.getReader;
+  return { response, observed };
+}
+
+for (const multibyte of [false, true]) {
+  test(`classifier accepts exactly 65536 UTF-8 bytes across chunks (multibyte: ${multibyte})`, async () => {
+    const bytes = paddedDecision(responseBudget, "fast", multibyte);
+    // One-byte chunks through the JSON/multibyte prefix deliberately split UTF-8 sequences.
+    const chunks = [...bytes.slice(0, 1000)].map(byte => Uint8Array.of(byte));
+    chunks.push(bytes.slice(1000, 32_000), bytes.slice(32_000));
+    const f = trackedResponse(chunks);
+    await withFetch(async () => f.response, async () => {
+      assert.equal(await chooseProfile(parseConfig(base), "Review the implementation."), "fast");
+    });
+    assert.equal(f.observed.reads, chunks.length + 1);
+    assert.equal(f.observed.cancels, 0);
+    assert.equal(f.observed.releases, 1);
+    assert.equal(f.response.body?.locked, false);
+  });
+}
+
+for (const length of [undefined, "1", String(responseBudget)]) {
+  test(`classifier rejects actual 65537 bytes with content-length ${length ?? "absent"}`, async () => {
+    const bytes = paddedDecision(responseBudget + 1, "direct", true);
+    const f = trackedResponse([bytes.slice(0, responseBudget), bytes.slice(responseBudget)], { length });
+    await withFetch(async () => f.response, async () => {
+      await assert.rejects(() => chooseProfile(parseConfig(base), "Review the implementation."), genericResponseError);
+    });
+    assert.equal(f.observed.reads, 2);
+    assert.equal(f.observed.cancels, 1);
+    assert.equal(f.observed.releases, 1);
+    assert.equal(f.response.body?.locked, false);
+  });
+}
+
+for (const cancelError of [false, true]) {
+  test(`oversized declared content-length cancels without reading (cleanup error: ${cancelError})`, async () => {
+    const f = trackedResponse([paddedDecision(100)], { length: String(responseBudget + 1), cancelError });
+    await withFetch(async () => f.response, async () => {
+      await assert.rejects(() => chooseProfile(parseConfig(base), "Review the implementation."), genericResponseError);
+    });
+    assert.deepEqual(f.observed, { reads: 0, cancels: 1, releases: 1 });
+    assert.equal(f.response.body?.locked, false);
+  });
+}
+
+for (const [name, chunks, readError] of [
+  ["malformed private JSON", [new TextEncoder().encode('{"private-response-value":')], false],
+  ["invalid UTF-8", [new Uint8Array([...new TextEncoder().encode('{"answers":{"route":{"type":"choice","choice":"direct"}},"padding":"'), 0xff, ...new TextEncoder().encode('"}')])], false],
+  ["stream error", [], true]
+] as const) {
+  test(`classifier ${name} fails generically and cleans up`, async () => {
+    const f = trackedResponse([...chunks], { readError });
+    await withFetch(async () => f.response, async () => {
+      await assert.rejects(() => chooseProfile(parseConfig(base), "Review the implementation."), genericResponseError);
+    });
+    assert.equal(f.observed.cancels, 1);
+    assert.equal(f.observed.releases, 1);
+    assert.equal(f.response.body?.locked, false);
+  });
+}
+
+test("classifier absent response body fails generically", async () => {
+  await withFetch(async () => new Response(null), async () => {
+    await assert.rejects(() => chooseProfile(parseConfig(base), "Review the implementation."), genericResponseError);
+  });
+});
+
+for (const choice of ["toString", "constructor"]) {
+  test(`classifier rejects inherited ${choice} on an ordinary profile map`, async () => {
+    const parsed = parseConfig(base);
+    const config = { ...parsed, profiles: { ...parsed.profiles } };
+    await withFetch(async () => decisionResponse(choice), async () => {
+      await assert.rejects(() => chooseProfile(config, "Review the implementation."), genericResponseError);
+    });
+  });
+}
+
+for (const choice of ["direct", "fast", "deep", "constructor"]) {
+  test(`classifier accepts legitimate own choice ${choice}`, async () => {
+    const parsed = parseConfig(base);
+    const config = { ...parsed, profiles: { ...parsed.profiles, constructor: parsed.profiles.deep } };
+    await withFetch(async () => decisionResponse(choice), async () => {
+      assert.equal(await chooseProfile(config, "Review the implementation."), choice);
+    });
+  });
+}
+
+test("auto uses opted-in Jev after bounded Laya response failure", async () => {
+  process.env.TURNHELM_ALLOW_HOSTED_JEV = "1";
+  let calls = 0;
+  const f = trackedResponse([paddedDecision(responseBudget + 1)]);
+  await withFetch(async () => ++calls === 1 ? f.response : decisionResponse("deep"), async () => {
+    assert.equal(await chooseProfile(parseConfig({ ...base, backend: "auto", hostedJev: { enabled: true } }), "Review the implementation."), "deep");
+  });
+  assert.equal(calls, 2);
+  assert.equal(f.observed.cancels, 1);
+  assert.equal(f.observed.releases, 1);
+});

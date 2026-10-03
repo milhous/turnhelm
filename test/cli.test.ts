@@ -37,6 +37,7 @@ async function fixture(t: TestContext, choice = "direct") {
     fallbackProfile: "deep", hostedJev: { enabled: false }, profiles: { deep: profile }
   };
   await writeFile(configPath, JSON.stringify(config));
+  await writeFile(join(directory, "package.json"), JSON.stringify({ type: "commonjs" }));
   // This executable only observes the child boundary; it never invokes Codex.
   await writeFile(join(directory, "codex"), `#!${process.execPath}
 let input = "";
