@@ -346,3 +346,25 @@ test("auto uses opted-in Jev after bounded Laya response failure", async () => {
   assert.equal(f.observed.cancels, 1);
   assert.equal(f.observed.releases, 1);
 });
+
+for (const cancelError of [false, true]) {
+  test(`classifier HTTP failure cancels without reading (cleanup error: ${cancelError})`, async () => {
+    const observed = { pulls: 0, cancels: 0 };
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        observed.pulls++;
+        controller.enqueue(new TextEncoder().encode("private-backend-response"));
+      },
+      cancel() {
+        observed.cancels++;
+        if (cancelError) throw new Error("private-cancel-error");
+      }
+    }, { highWaterMark: 0 });
+    const response = new Response(body, { status: 503 });
+    await withFetch(async () => response, async () => {
+      await assert.rejects(() => chooseProfile(parseConfig(base), "Review the implementation."), { message: "classifier HTTP 503" });
+    });
+    assert.deepEqual(observed, { pulls: 0, cancels: 1 });
+    assert.equal(body.locked, false);
+  });
+}
