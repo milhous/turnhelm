@@ -1,7 +1,13 @@
 # Turnhelm Phase A Jev/Laya model-effort routing design
 
 Date: 2026-10-03
-Status: proposed, implementation not started
+Status: implemented and validated (2026-10-03)
+
+Dated evidence: the authorized 2026-10-03 real-service smoke passed 24/24 cases
+for each of Laya and Jev. The subsequent offline hardening passed 168/168 tests
+on Node 24 and 26, with source coverage of 99.10% lines, 93.39% branches, and
+100% functions. See [validation evidence](../../validation/2026-10-03-jev-laya-phase-a.md).
+The hardening verification made no new live calls.
 
 ## Decision
 
@@ -130,6 +136,12 @@ Hosted Jev receives only the bounded Phase A task text, and only after explicit
 configuration and environment opt-in. Subagent text, tool arguments, and
 continuation data are local-only.
 
+The limit is exactly 2000 JavaScript UTF-16 code units of the original task.
+`resolvePhaseARoute` uses local fallback for longer or continuation-only input;
+strict `classifyTask` and `chooseProfile` calls reject it before any backend
+work. Invalid or blank tasks also fail before fetch. The request builder is
+private, and every classifier request rejects redirects with `redirect: "error"`.
+
 ## Non-goals
 
 - No loopback provider Gateway, HTTP interception, PTY shim, App Server client,
@@ -186,8 +198,11 @@ have its own spec and acceptance gate.
 
 ## Migration state
 
-Commit `d0a52c1` removes the unadmitted Gateway design, execution plan, and
-protocol report. The Phase A classifier and launcher remain unchanged until the
-follow-up implementation plan is approved and executed. This spec intentionally
-updates only the Phase A decision boundary; it does not authorize changes to
-Codex user configuration or native orchestration.
+Commit `d0a52c1` removed the unadmitted Gateway design, execution plan, and
+protocol report. The approved Phase A plan is now implemented: explicit auto
+mode, hosted opt-in gates, the one-shot launcher, and the dated real-service
+smoke are complete. Subsequent boundary hardening shares local-only input
+policy, rejects redirects, and retains hermetic source-coverage and audit gates
+in pinned Node 24 CI. These changes affect only the Phase A decision boundary;
+they do not change Codex user configuration or native orchestration. Remote
+publication and integration remain controller-owned gates.

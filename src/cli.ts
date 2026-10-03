@@ -6,8 +6,8 @@ import { resolvePhaseARoute } from "./route.js";
 async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
   const write = command === "codex" && rest[0] === "--write";
-  const prompt = (write ? rest.slice(1) : rest).join(" ").trim();
-  if (!["codex", "route"].includes(command ?? "") || !prompt) {
+  const prompt = (write ? rest.slice(1) : rest).join(" ");
+  if (!["codex", "route"].includes(command ?? "") || !prompt.trim()) {
     throw new Error('usage: turnhelm codex [--write] "<task>" | turnhelm route "<task>"');
   }
   const decision = await resolvePhaseARoute(prompt, loadConfig());

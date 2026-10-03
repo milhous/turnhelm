@@ -1,7 +1,7 @@
 # Phase A classifier boundary hardening
 
 Date: 2026-10-03
-Status: approved under the user's delegated authority; implementation pending
+Status: implementation verified (2026-10-03); controller review/integration pending
 
 ## Goal and evidence
 
@@ -11,12 +11,28 @@ integrate the verified branch without rewriting existing history. The user has
 authorized implementation, review, merge, and normal remote synchronization, with
 long-term safety and performance prioritized over backward compatibility.
 
-`resolvePhaseARoute` currently protects continuation text and inputs longer than
-2000 UTF-16 code units, but exported `classifyTask` and `chooseProfile` bypass
-that policy. The raw request builder is exported solely for tests. A separate
-baseline run with classifier credentials unset passes only 18/19 tests: the Jev
-fallback-success test relies on an inherited real API key. In addition, fetch's
-default redirect behavior can leave the configured classifier origin.
+Before hardening, `resolvePhaseARoute` protected continuation text and inputs
+longer than 2000 UTF-16 code units, but exported `classifyTask` and `chooseProfile`
+bypassed that policy. The raw request builder was exported solely for tests. A
+baseline run with classifier credentials unset passed only 18/19 tests: the Jev
+fallback-success test relied on an inherited real API key. In addition, fetch's
+default redirect behavior could leave the configured classifier origin.
+
+Implementation verification on 2026-10-03 passed 168/168 hermetic tests on Node
+24.21.0 and 26.5.0. Every production module exceeded 80% source lines, branches,
+and functions; aggregate coverage was 99.10%, 93.39%, and 100%, respectively.
+Dependency audit reported zero vulnerabilities. CLI characterization uses only
+ephemeral loopback fixtures and a temporary executable, preserving child
+coverage. The authorized live smoke evidence is unchanged; no new live calls
+were made. Independent review and publication remain controller-owned gates.
+
+CLI characterization also exposed `.join(" ").trim()` normalizing original
+task text and allowing padded overlong input to reach classification. The
+authorized minimal fix preserves the joined string and uses `prompt.trim()`
+only to reject blank usage. The focused CLI RED checkpoint had 13/16 passing
+tests with three expected failures; after the two-line correction, 16/16 pass,
+including unchanged padded/newline classifier state and Codex stdin in both
+sandbox modes, and zero fetches for padded 2001-unit input.
 
 ## Decision and alternatives
 
@@ -43,6 +59,8 @@ boundary without a second routing policy or additional dependencies.
   input before backend selection, opt-in checks, request serialization, or fetch.
 - Eligible tasks are sent unchanged. There is no truncation or normalization of
   the task transmitted to the classifier or the Codex child.
+- The CLI preserves its joined task string, including leading/trailing
+  whitespace and newlines; trimming is used only for blank-input validation.
 - The request builder becomes private. Every classifier fetch uses
   `redirect: "error"`; redirects are backend failures, never alternate origins.
 - Existing hosted-Jev config/environment/key gates and the single Laya-to-Jev

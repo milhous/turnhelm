@@ -1,5 +1,7 @@
 # Phase A Boundary Hardening Implementation Plan
 
+Status: Tasks 1 and 2 implementation verified (2026-10-03); controller review/integration checklist remains pending. Hermetic tests: 168/168; source lines/branches/functions: 99.10%/93.39%/100%; audit: zero vulnerabilities. No new live run.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Close classifier input bypasses, establish hermetic verification, and finish the authorized Phase A integration.
@@ -32,7 +34,7 @@
 - Consumes: `Config`, `chooseProfile(config: Config, prompt: string): Promise<string>`, `classifyTask(prompt: string, config: Config)`.
 - Produces: `localRoutingReason(prompt: string): "continuation" | "fallback" | undefined` in `src/task.ts`; existing routing and classifier signatures stay intact. `buildSystemOneRequest` is private with an explicit selected backend parameter.
 
-- [ ] **Step 1: Add and execute RED boundary regressions.**
+- [x] **Step 1: Add and execute RED boundary regressions.**
 
   Mock only fetch; never contact a real backend. Add a table of `classifyTask`
   and `chooseProfile` invocations for each backend (`laya`, `jev`, `auto`) with
@@ -63,7 +65,7 @@
   Conventional Commit RED checkpoint with exact evidence in its body. The
   pre-existing hermetic 18/19 failure is known, not a new regression.
 
-- [ ] **Step 2: Apply the smallest shared policy and fail-closed transport.**
+- [x] **Step 2: Apply the smallest shared policy and fail-closed transport.**
 
   Implement the complete policy below; use its result in `resolvePhaseARoute`
   instead of the local regex/length literals. Remove redundant empty checking
@@ -88,7 +90,7 @@
   and disabled default `TURNHELM_ALLOW_HOSTED_JEV` per unit test, allowing
   explicit test-local overrides for opt-in and missing-key cases.
 
-- [ ] **Step 3: Verify boundaries and GREEN, then commit.**
+- [x] **Step 3: Verify boundaries and GREEN, then commit.**
 
   Add exactly-2000-unit and Unicode boundary checks, unchanged original body
   assertions, normal direct/profile success, unknown/malformed responses,
@@ -106,6 +108,7 @@
 
 **Files:**
 - Modify: `package.json`, `package-lock.json` (Node engine floor metadata only)
+- Modify: `src/cli.ts` (approved original-task correction only)
 - Create: `test/cli.test.ts`
 - Create: `.github/workflows/ci.yml`
 - Modify if needed for meaningful coverage: `test/config.test.ts`, `test/codex.test.ts`, `test/route.test.ts`, `test/systemone.test.ts`
@@ -116,7 +119,7 @@
 - Consumes: the completed Task 1 public routing/classifier APIs and policy.
 - Produces: `npm run test:coverage`, dated offline evidence, accurate completed Phase A status.
 
-- [ ] **Step 1: Add hermetic CLI/child-process characterization tests.**
+- [x] **Step 1: Add hermetic CLI/child-process characterization tests.**
 
   Use temporary config files, a loopback HTTP test server for typed responses,
   and a temporary executable named `codex` prepended to PATH. Invoke only
@@ -131,7 +134,15 @@
   Add focused remaining config/argv/error-path characterization tests if the
   actual source coverage requires them; do not test implementation-only mocks.
 
-- [ ] **Step 2: Add the built-in source coverage command and verify its gate.**
+  Controller-approved original-task correction: the joined CLI task must not
+  be trimmed before routing or stdin. The focused CLI RED checkpoint
+  (`4f09272`) recorded 16 tests, 13 passing and three expected failures for
+  padded/newline stdin and padded 2001-unit routing. Preserve `.join(" ")` and
+  use `!prompt.trim()` only for usage validation. GREEN: 16/16 focused CLI tests,
+  including unchanged classifier state/stdin in both sandbox modes and zero
+  loopback requests for padded 2001-unit input. No other source edits.
+
+- [x] **Step 2: Add the built-in source coverage command and verify its gate.**
 
   Before adding the script, `npm run test:coverage` must report the missing
   script. Add the following script and set `engines.node` to `>=22.8.0` in
@@ -170,7 +181,7 @@
         - run: npm audit --audit-level=high
   ```
 
-- [ ] **Step 3: Synchronize documentation and record offline evidence.**
+- [x] **Step 3: Synchronize documentation and record offline evidence.**
 
   Mark the original Phase A spec implemented/validated with dated smoke
   evidence, update its migration paragraph, and mark the original plan's
@@ -181,7 +192,7 @@
   the previous live result intact and explicitly not claiming a new live run.
   Set the hardening spec/plan to verified completion once their gates pass.
 
-- [ ] **Step 4: Final task verification and commit.**
+- [x] **Step 4: Final task verification and commit.**
 
   Run hermetic `npm test`, hermetic `npm run test:coverage`,
   `npm audit --audit-level=high`, `git diff --check`, and inspect `git diff`.

@@ -1,12 +1,14 @@
 # Turnhelm Jev/Laya Phase A Routing Implementation Plan
 
+Status: execution complete and validated (2026-10-03). Authorized live smoke: 24/24 per backend; subsequent offline hardening: 168/168 tests, no new live run.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Extend the existing Phase A launcher with an explicit `auto` mode that calls local Laya once and optionally falls back to hosted Jev, while selecting only configured model-effort profiles.
 
 **Architecture:** Keep the current one-shot boundary: `turnhelm route`/`turnhelm codex` classifies a bounded task before starting stock `codex exec`. A typed choice returns `direct` or one allowlisted profile. `auto` performs one Laya request and, only after an opted-in Laya failure, one Jev request; all other failures use the existing fallback profile. No gateway, Hook, catalog cache, mid-session switch, or native subagent routing is added.
 
-**Tech Stack:** Node.js 22+, TypeScript, built-in `fetch`, `node:test`, real TypeSafe Jev, real local `laya[serve]`.
+**Tech Stack:** Node.js >=22.8.0, TypeScript, built-in `fetch`, `node:test`, real TypeSafe Jev, real local `laya[serve]`.
 
 ## Global Constraints
 
@@ -39,7 +41,7 @@
 - `parseConfig(value: unknown): Config` keeps the current profile and loopback validation.
 - A missing `hostedJev` property parses as `{ enabled: false }` so existing Phase A config files remain safe and do not silently enable hosted traffic.
 
-- [ ] **Step 1: Replace config tests with the red contract.**
+- [x] **Step 1: Replace config tests with the red contract.**
 
   Extend the existing `base` fixture with `hostedJev: { enabled: false }` and
   add these exact assertions:
@@ -64,7 +66,7 @@
   Keep the existing loopback, fallback, profile ID, description, model, and
   effort assertions.
 
-- [ ] **Step 2: Run the focused red test.**
+- [x] **Step 2: Run the focused red test.**
 
   Run:
 
@@ -75,7 +77,7 @@
   Expected: failure because `auto` is not an accepted backend and
   `hostedJev` is not parsed.
 
-- [ ] **Step 3: Implement the smallest parser change.**
+- [x] **Step 3: Implement the smallest parser change.**
 
   In `src/config.ts`, change only the backend union and returned shape. Parse
   `hostedJev` as follows before returning:
@@ -94,7 +96,7 @@
   Accept `"auto"` in the backend check. Do not add catalog loading, profile
   tiers, confidence thresholds, or new dependencies.
 
-- [ ] **Step 4: Update the example and remove the stale executable contract.**
+- [x] **Step 4: Update the example and remove the stale executable contract.**
 
   Change `examples/config.json` to:
 
@@ -122,7 +124,7 @@
   Remove the nonexistent `turnhelm-hook` entry from `package.json` while
   preserving the `turnhelm` bin and all existing scripts.
 
-- [ ] **Step 5: Update user-facing and historical docs.**
+- [x] **Step 5: Update user-facing and historical docs.**
 
   README must document `backend: "auto"`, the loopback-first behavior, and the
   two explicit Jev gates:
@@ -138,7 +140,7 @@
   `This document is historical; use docs/superpowers/specs/2026-10-03-jev-laya-phase-a-routing-design.md and the matching 2026-10-03 plan.`
   Do not rewrite their historical task bodies.
 
-- [ ] **Step 6: Run green tests and commit.**
+- [x] **Step 6: Run green tests and commit.**
 
   Run:
 
@@ -166,7 +168,7 @@
 - `chooseProfile(config: Config, prompt: string): Promise<string>` remains the route-facing API.
 - Internal `callDecision(config: Config, prompt: string, backend: "laya" | "jev"): Promise<string>` performs exactly one HTTP request and validates `direct` or a configured profile ID.
 
-- [ ] **Step 1: Add deterministic fetch-test helpers and red tests.**
+- [x] **Step 1: Add deterministic fetch-test helpers and red tests.**
 
   In `test/systemone.test.ts`, replace the current single-backend fixture
   with this shared fixture and add a helper that replaces `globalThis.fetch`
@@ -284,7 +286,7 @@
   tests. These tests must fail before implementation because `auto` currently
   maps to neither backend and no fallback call exists.
 
-- [ ] **Step 2: Run the red System One tests.**
+- [x] **Step 2: Run the red System One tests.**
 
   Run:
 
@@ -295,7 +297,7 @@
   Expected: the new auto/fallback tests fail while the existing builder tests
   continue to compile.
 
-- [ ] **Step 3: Extract one backend call without changing the wire contract.**
+- [x] **Step 3: Extract one backend call without changing the wire contract.**
 
   Refactor `src/systemone.ts` so `callDecision` chooses exactly these values:
 
@@ -309,7 +311,7 @@
   shape checks, and allowlisted choice check. Add no confidence parsing and do
   not include backend output in thrown errors.
 
-- [ ] **Step 4: Add explicit hosted-Jev gating and one fallback transition.**
+- [x] **Step 4: Add explicit hosted-Jev gating and one fallback transition.**
 
   Implement `hostedJevAllowed(config)` as the conjunction of
   `config.hostedJev.enabled` and `process.env.TURNHELM_ALLOW_HOSTED_JEV === "1"`.
@@ -320,14 +322,14 @@
   configured fallback. Never retry Laya or Jev and never call both on Laya
   success.
 
-- [ ] **Step 5: Verify routing fallback remains unchanged.**
+- [x] **Step 5: Verify routing fallback remains unchanged.**
 
   Add one `test/route.test.ts` case that stubs `fetch` to fail and confirms
   `resolvePhaseARoute` returns the configured fallback profile with
   `source === "fallback"`. Also assert a config without `fallbackProfile`
   rejects before Codex can run. Restore the global fetch after each test.
 
-- [ ] **Step 6: Run green tests and commit.**
+- [x] **Step 6: Run green tests and commit.**
 
   Run:
 
@@ -358,7 +360,7 @@
   `TURNHELM_ALLOW_HOSTED_JEV=1`; missing credentials/service causes a failed
   live test, never a fixture substitution.
 
-- [ ] **Step 1: Update the live test setup.**
+- [x] **Step 1: Update the live test setup.**
 
   Build per-backend configs with `parseConfig({ ...loadConfig(), backend })`:
 
@@ -373,14 +375,14 @@
   auto-mode calls to the paid live suite; the unit tests prove the transition,
   while the real suite proves both services independently.
 
-- [ ] **Step 2: Make Jev opt-in visible and safe.**
+- [x] **Step 2: Make Jev opt-in visible and safe.**
 
   Add a test precondition with a clear error when the Jev case lacks
   `TURNHELM_ALLOW_HOSTED_JEV=1`; do not print the key. Keep output to the
   existing scalar latency/profile summary. Add a note that this small labelled
   set is smoke coverage, not a quality benchmark.
 
-- [ ] **Step 3: Record the validation protocol.**
+- [x] **Step 3: Record the validation protocol.**
 
   Create `docs/validation/2026-10-03-jev-laya-phase-a.md` containing:
 
@@ -393,7 +395,7 @@
     model-catalog mutation;
   - a separate future-calibration note, marked out of scope for this MVP.
 
-- [ ] **Step 4: Run final verification.**
+- [x] **Step 4: Run final verification.**
 
   Run:
 
@@ -415,7 +417,7 @@
   command either passes with scalar output or fails clearly because a real
   service/credential is unavailable; it never silently substitutes a fake.
 
-- [ ] **Step 5: Commit the validation/documentation boundary.**
+- [x] **Step 5: Commit the validation/documentation boundary.**
 
   ```bash
   git add test/live.integration.ts README.md docs/validation/2026-10-02-routing-trial.md docs/validation/2026-10-03-jev-laya-phase-a.md

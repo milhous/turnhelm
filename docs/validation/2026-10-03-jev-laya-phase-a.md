@@ -49,3 +49,26 @@ this Phase A MVP.
 
 This is smoke evidence, not a general quality benchmark. No paths, prompts,
 request/response bodies, headers, key values, or logs are recorded.
+
+## Offline hardening result (2026-10-03)
+
+No new live calls were made. The authorized live result above remains the
+dated smoke evidence, not a rerun or general quality benchmark.
+
+- Hermetic `npm test`: 168/168 passed; 0 failed, skipped, or cancelled.
+- Hermetic `npm run test:coverage`: 168/168 passed on Node 24.21.0 and 26.5.0.
+- Source-only aggregate coverage: lines 99.10%; branches 93.39%; functions 100%.
+- Source module coverage (lines / branches / functions):
+  - `cli`: 100% / 100% / 100%.
+  - `codex`: 100% / 85.71% / 100%.
+  - `config`: 96.43% / 84.62% / 100%.
+  - `route`: 100% / 93.33% / 100%.
+  - `systemone`: 100% / 100% / 100%.
+  - `task`: 100% / 100% / 100%.
+- `npm audit --audit-level=high`: 0 vulnerabilities.
+- `git diff --check`: passed.
+
+Classifier credentials and hosted opt-in were unset for the offline commands.
+CLI characterization used temporary config/executable fixtures and ephemeral
+loopback HTTP only; neither real Codex nor a hosted service was invoked. The
+source gate covers every production module without including test files.
