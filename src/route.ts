@@ -1,5 +1,6 @@
 import type { Config, Profile } from "./config.js";
 import { chooseProfile } from "./systemone.js";
+import { localRoutingReason } from "./task.js";
 
 export type ClassifierDecision =
   | { kind: "direct" }
@@ -9,8 +10,6 @@ export type RouteDecision = ClassifierDecision & {
   source: "classifier" | "continuation" | "fallback";
 };
 
-const continuation = /^(继续|接着做|按刚才的方案继续|continue|go on|proceed)[.!。！\s]*$/i;
-
 const profile = (id: string, config: Config, source: RouteDecision["source"]): RouteDecision => ({
   kind: "profile",
   source,
@@ -19,7 +18,6 @@ const profile = (id: string, config: Config, source: RouteDecision["source"]): R
 });
 
 export async function classifyTask(prompt: string, config: Config): Promise<ClassifierDecision> {
-  if (!prompt.trim()) throw new Error("task must not be empty");
   const choice = await chooseProfile(config, prompt);
   if (choice === "direct") return { kind: "direct" };
   if (!Object.hasOwn(config.profiles, choice)) throw new Error("classifier returned an unknown profile");
@@ -27,10 +25,10 @@ export async function classifyTask(prompt: string, config: Config): Promise<Clas
 }
 
 export async function resolvePhaseARoute(prompt: string, config: Config): Promise<RouteDecision> {
-  if (!prompt.trim()) throw new Error("task must not be empty");
-  if (continuation.test(prompt.trim()) || prompt.length > 2000) {
+  const reason = localRoutingReason(prompt);
+  if (reason) {
     if (!config.fallbackProfile) throw new Error("fallbackProfile is required for this Phase A input");
-    return profile(config.fallbackProfile, config, prompt.length > 2000 ? "fallback" : "continuation");
+    return profile(config.fallbackProfile, config, reason);
   }
   try {
     const decision = await classifyTask(prompt, config);

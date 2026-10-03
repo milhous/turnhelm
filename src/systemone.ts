@@ -1,17 +1,17 @@
 import type { Config } from "./config.js";
+import { localRoutingReason } from "./task.js";
 
 const object = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-export function buildSystemOneRequest(config: Config, prompt: string, backend?: "laya" | "jev"): Record<string, unknown> {
-  const selected = backend ?? (config.backend === "jev" ? "jev" : "laya");
+function buildSystemOneRequest(config: Config, prompt: string, backend: "laya" | "jev"): Record<string, unknown> {
   const criteria: Record<string, string> = {
     direct: "No coding, debugging, review, or file-change work"
   };
   for (const [id, profile] of Object.entries(config.profiles)) criteria[id] = profile.description;
   return {
     state: prompt,
-    model: selected === "jev" ? "jev-latest" : "typed-decisions",
+    model: backend === "jev" ? "jev-latest" : "typed-decisions",
     questions: {
       route: {
         type: "choice",
@@ -35,6 +35,7 @@ async function callDecision(config: Config, prompt: string, backend: "laya" | "j
     method: "POST",
     headers,
     body: JSON.stringify(buildSystemOneRequest(config, prompt, backend)),
+    redirect: "error",
     signal: AbortSignal.timeout(4000)
   });
   if (!response.ok) throw new Error("classifier HTTP " + response.status);
@@ -51,6 +52,7 @@ async function callDecision(config: Config, prompt: string, backend: "laya" | "j
 }
 
 export async function chooseProfile(config: Config, prompt: string): Promise<string> {
+  if (localRoutingReason(prompt)) throw new Error("task is not eligible for classification");
   if (config.backend === "laya") return callDecision(config, prompt, "laya");
   if (config.backend === "jev") return callDecision(config, prompt, "jev");
   try { return await callDecision(config, prompt, "laya"); }
