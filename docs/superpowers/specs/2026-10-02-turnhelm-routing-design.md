@@ -1,9 +1,4 @@
-# Turnhelm routing design (superseded)
-
-> This historical Hook-based design is superseded by
-> `docs/superpowers/specs/2026-10-03-turnhelm-gateway-routing-design.md`.
-> Do not implement the Hook architecture. It is retained only as a record of
-> the earlier schema-gate investigation.
+# Turnhelm routing design
 
 Date: 2026-10-02
 
