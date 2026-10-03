@@ -1,234 +1,193 @@
 # Turnhelm Phase A Jev/Laya model-effort routing design
 
 Date: 2026-10-03
-Status: proposed, research-backed; implementation not started
+Status: proposed, implementation not started
 
-## Decision summary
+## Decision
 
-Turnhelm should keep Phase A as the supported integration boundary and remove the
-unadmitted Gateway/Hook path. The stable unit of routing is a **session binding**:
-one validated `(model, effort)` pair is selected before Codex starts and remains
-fixed for that invocation. Turnhelm must not proxy or rewrite Codex inference
-requests, mutate an in-flight turn, or attempt to route native subagent
-collaboration items.
+Turnhelm keeps one supported integration boundary: the existing Phase A
+`turnhelm route` and `turnhelm codex` commands. Each invocation makes one typed
+decision before `codex exec` starts, then passes one validated `(model, effort)`
+profile to the stock Codex child. The selected pair is immutable for that
+invocation.
 
-The decision layer should use a conditional local-first policy rather than an
-always-parallel ensemble:
+The MVP has three explicit classifier modes:
 
-1. A compact, bounded task description is evaluated by local Laya only when the
-   configured checkpoint has passed a held-out calibration gate for the active
-   decision workflow.
-2. Laya may return a pair tier or abstain. An abstention, out-of-domain result,
-   unhealthy local service, high-risk task, or calibration failure invokes
-   hosted Jev when explicitly enabled.
-3. When the fallback/adjudication path is active, Jev may inspect the compact
-   task and the sanitized Laya judgment, then choose one allowlisted pair tier.
-4. If the selected decision backend is unavailable or malformed, Turnhelm uses
-   the explicit configured baseline pair. It never invents a model or effort.
+- `laya`: call the configured loopback Laya service once;
+- `jev`: call hosted TypeSafe Jev once;
+- `auto`: call Laya once, then call Jev once only when Laya fails and hosted
+  fallback is explicitly enabled.
 
-Until a task-specific Laya checkpoint and calibration set are accepted, the
-production default is Jev-first with Laya in shadow evaluation. This avoids
-mistaking Laya's fast inference for validated routing accuracy.
+`auto` is local-first for latency and data minimization. It is not an ensemble:
+there is no parallel Jev call, confidence adjudication, bandit update, live
+model-catalog discovery, or mid-session switching. A malformed/unknown answer,
+service failure, timeout, missing opt-in, or unavailable fallback selects the
+configured baseline profile. No arbitrary classifier output reaches Codex.
 
-## Evidence and scope
+The previously proposed Gateway and Hook paths are not part of this design.
+They were removed because the installed Codex protocol was not admitted.
+Native Codex subagent routing remains unsupported.
+
+## Why this is the smallest safe design
+
+The repository already has the right stable boundary: a pure profile allowlist,
+a typed-decision request, a one-shot Codex launcher, and a fallback profile.
+The additional behavior needed is only backend composition and an explicit
+hosted-Jev opt-in. A live Codex catalog, tier compiler, receipt store, online
+learning loop, risk classifier, or request gateway would create new failure
+surfaces without improving the proven Phase A contract.
+
+Model and effort remain one pair, not two independent classifier choices. The
+configuration is the source of truth for allowed pairs in this MVP; Codex is
+responsible for rejecting a model that the account cannot use. A future catalog
+adapter may be added only after a separate measured requirement.
+
+## Evidence and limits
 
 TypeSafe's `/v1/systemone` API accepts a state, a model, and typed questions and
-returns typed answers; it is a decision API, not a text-generation model:
-<https://api.typesafe.ai/redoc>.
+returns typed answers: <https://api.typesafe.ai/redoc>.
 
-Laya exposes the same `POST /v1/systemone` shape and supports typed `choice`,
-`score`, and `noul` decisions. Its checkpoint router can select by language or
-explicit task: <https://github.com/NandhaKishorM/laya>.
+Laya exposes the same `POST /v1/systemone` shape and typed `choice`, `score`,
+and `noul` decisions: <https://github.com/NandhaKishorM/laya>.
 
-The Laya/TypeSafe-compatible project documents useful but binding caveats: the
-untuned checkpoints are not a general zero-shot replacement for Jev, shipped
-confidence can be overconfident, and temperature calibration must be fitted on
-held-out data before probabilities are used:
-<https://github.com/flyhof-labs/laya-jev>.
+Laya is substantially faster locally, but its public documentation warns that
+untuned checkpoints are not a general zero-shot replacement for Jev and that
+shipped confidence can be overconfident. Therefore Turnhelm does not use a
+confidence threshold in the MVP; it accepts only a validated choice or falls
+back: <https://github.com/flyhof-labs/laya-jev>.
 
-The closest session-safe implementation is `hyspacex/jev-router`: Jev chooses
-from a YAML model pool, the router binds a model and effort for a session, and
-adaptive effort is explicitly experimental and disabled by default:
-<https://github.com/hyspacex/jev-router>.
+The closest session-safe prior art binds one model and effort for a session and
+keeps adaptive effort experimental: <https://github.com/hyspacex/jev-router>.
+Projects that support Jev or Laya as a message classifier remain experimental or
+deployment-specific, including
+<https://github.com/obetomuniz/auto-mode-for-paseo> and
+<https://github.com/suenot/codex-jev-router>.
 
-Other relevant references are useful as patterns, not as production evidence:
-[`auto-mode-for-paseo`](https://github.com/obetomuniz/auto-mode-for-paseo)
-supports Jev or local Laya but labels the plugin experimental;
-[`suenot/codex-jev-router`](https://github.com/suenot/codex-jev-router) makes
-Laya an optional decider; and [`jevons`](https://github.com/gopalanj/jevons)
-demonstrates local/Laya/cloud failover with timeouts and a circuit breaker. None
-proves a universally optimal model-effort policy for Turnhelm's Codex workload.
+Research such as RouteLLM, Route-to-Reason, Ares, and PILOT supports learned or
+budget-aware routing, but those approaches require deployment-specific training,
+feedback, or calibration and are intentionally future work here:
+<https://arxiv.org/abs/2406.18665>,
+<https://arxiv.org/abs/2505.19435>,
+<https://arxiv.org/abs/2603.07915>,
+<https://arxiv.org/abs/2508.21141>.
 
-Academic work supports treating model and reasoning policy as a joint routing
-choice. RouteLLM provides threshold-calibrated strong/weak routing
-(<https://arxiv.org/abs/2406.18665>); Route-to-Reason jointly routes models and
-reasoning strategies under a token budget
-(<https://arxiv.org/abs/2505.19435>); Ares routes reasoning effort per agent
-step using interaction history (<https://arxiv.org/abs/2603.07915>); and PILOT
-frames adaptive routing as a contextual bandit with explicit budget control
-(<https://arxiv.org/abs/2508.21141>). These methods require deployment-specific
-data and are not copied into the first implementation.
+Reasoning effort values are model-dependent. The MVP validates configured safe
+tokens but does not pretend that a universal effort enum exists:
+<https://developers.openai.com/api/docs/guides/reasoning>.
 
-OpenAI's reasoning controls are model-dependent, so effort values must be
-validated against the live Codex model catalog rather than treated as a global
-enum: <https://developers.openai.com/api/docs/guides/reasoning>.
+## Configuration contract
 
-## Goals
-
-- Select a valid model and reasoning effort before a Phase A Codex invocation.
-- Keep the chosen pair stable for the whole invocation.
-- Prefer local inference for privacy and latency only after local quality is
-  demonstrated for the relevant workflow.
-- Use Jev as an explicit quality fallback/adjudicator, not as an unbounded
-  free-form planner.
-- Preserve existing Codex authentication, permissions, sandbox, orchestration,
-  and user configuration.
-- Make every routing decision replayable from safe scalar evidence without
-  storing prompts, tool arguments, credentials, or model responses.
-- Retain a deterministic baseline when both decision services are unavailable.
-
-## Non-goals
-
-- No loopback provider gateway, PTY shim, HTTP interception, App Server client,
-  Hook, MCP rewrite, or Codex protocol dependency.
-- No routing of native Codex subagents or hosted collaboration items.
-- No mid-turn model or effort switching.
-- No automatic delegation, parallelism, role, sandbox, approval, or permission
-  changes.
-- No promise that a classifier confidence score is a probability of task
-  success without calibration evidence.
-- No concurrent Jev+Laya calls on every request; that is an optional research
-  arm, not the production hot path.
-- No online bandit updates until an evaluated feedback and rollback mechanism
-  exists.
-
-## Routing contract
-
-### Catalog and pair registry
-
-At startup, Turnhelm obtains a non-secret model catalog through the supported
-Codex inspection path or an explicit test fixture. Each candidate is represented
-as a pair, never as independent model and effort choices:
+The existing profile shape remains:
 
 ```ts
-type ModelEffortPair = {
-  id: string;
+type Profile = {
+  description: string;
   model: string;
-  effort?: string;
-  capabilities: readonly string[];
-  riskClass: "normal" | "sensitive";
+  effort: string;
 };
 ```
 
-Only pairs present in the validated registry can be returned by Jev or Laya.
-An effort is omitted when the selected model has no reasoning control. An
-unknown model, unsupported effort, or stale catalog entry is rejected before
-Codex starts.
+The version-1 configuration is extended minimally:
 
-The classifier sees short stable tier IDs (for example `fast`, `balanced`,
-`deep`, and `safe`), not arbitrary provider model names. Turnhelm maps the
-selected tier to the current catalog pair and records the mapping in the
-launch receipt.
-
-### Typed decision questions
-
-The first implementation uses a small fixed question set:
-
-- `tier`: a `choice` over the configured tier IDs;
-- `in_domain`: a `noul` gate used only after Laya has a held-out calibration
-  record for this workflow;
-- `needs_safe_pair`: a `noul` gate for privacy or consequence-sensitive work.
-
-The task state is bounded, normalized text supplied by the caller. Turnhelm
-never parses a transcript, repository, tool output, or hidden reasoning to
-construct routing state.
-
-### Backend policy
-
-`decisionPolicy` has three explicit modes:
-
-- `jev-first`: production default until Laya passes the local acceptance gate;
-- `calibrated-laya-first`: local Laya may decide, with Jev on abstention or
-  policy escalation;
-- `jev-only` or `laya-only`: diagnostics and controlled experiments only.
-
-The local service is bound to loopback and has a short timeout. Infrastructure
-failures are distinguished from invalid decisions. Invalid or out-of-domain
-answers do not silently become a cheaper pair.
-
-Hosted Jev is disabled unless configuration and an explicit environment opt-in
-allow it. When enabled, only the bounded Phase A task description and the
-minimal typed Laya judgment may leave the machine. Subagent text and tool data
-remain local-only.
-
-### Session binding
-
-Phase A resolves the pair before spawning Codex:
-
-```text
-turnhelm codex task
-  -> normalize and bound task text
-  -> resolve model catalog and pair registry
-  -> Laya or Jev typed decision
-  -> validate pair and create safe receipt
-  -> spawn stock Codex with one-run model/effort settings
+```ts
+type Config = {
+  backend: "laya" | "jev" | "auto";
+  layaUrl: string;
+  profiles: Record<string, Profile>;
+  fallbackProfile?: string;
+  hostedJev: { enabled: boolean };
+};
 ```
 
-The original task is passed unchanged to Codex. The route decision is not
-inserted into the task text. A classifier failure selects the configured
-baseline pair and marks the receipt as `baseline`; it does not retry another
-provider or modify the task.
+`hostedJev.enabled` is necessary but not sufficient. Hosted Jev is callable
+only when `TURNHELM_ALLOW_HOSTED_JEV=1` and `TYPESAFE_API_KEY` is present.
+`LAYA_API_KEY` remains optional and is used only for the loopback request.
 
-## Calibration and evaluation gate
+Every profile model and effort is validated with the existing safe-token rules.
+Profile IDs are the only choices exposed to Jev/Laya, plus `direct`. Descriptions
+are bounded and contain no credentials or routing secrets.
 
-Laya cannot become the production first hop from latency alone. Before enabling
-`calibrated-laya-first`, Turnhelm must have a versioned, held-out dataset of
-representative tasks with the following labels:
+## Decision flow
 
-- correct tier or acceptable pair set;
-- sensitivity/risk class;
-- language and task family;
-- actual success outcome from the selected model-effort pair;
-- latency and usage scalars.
+```text
+turnhelm route/codex task
+  -> reject empty input
+  -> apply existing continuation/length fallback policy
+  -> build one typed choice over direct + profile IDs
+  -> backend = laya: call Laya once
+  -> backend = jev: call Jev once
+  -> backend = auto: Laya once, then opted-in Jev once on Laya failure
+  -> accept direct or an allowlisted profile
+  -> otherwise select fallbackProfile or fail before Codex starts
+  -> for codex: spawn stock codex exec with that profile's model/effort
+```
 
-The gate must report per-tier precision/recall, abstention rate, calibration
-error, false-cheap rate, false-deep rate, p50/p95 decision latency, and total
-routing cost. A task family fails the gate if its local router routes a
-high-risk task to a non-safe pair or if its calibration is not better than the
-configured deterministic baseline.
+The original task is passed to Codex unchanged. Turnhelm never parses a
+transcript, repository, tool output, or hidden reasoning to classify it. There
+are no retries beyond the single Laya-to-Jev fallback transition.
 
-The evaluation compares at least four arms:
+Hosted Jev receives only the bounded Phase A task text, and only after explicit
+configuration and environment opt-in. Subagent text, tool arguments, and
+continuation data are local-only.
 
-1. fixed baseline pair;
-2. deterministic local policy;
-3. Jev-only typed routing;
-4. calibrated Laya-first with Jev fallback.
+## Non-goals
 
-A shadow arm may collect hypothetical Laya choices without changing execution.
-Raw prompts and model responses are not committed to the repository; fixtures
-must be synthetic or sanitized and access-controlled.
+- No loopback provider Gateway, HTTP interception, PTY shim, App Server client,
+  Hook, MCP rewrite, or Codex protocol dependency.
+- No routing of native Codex subagents or hosted collaboration items.
+- No model or effort switching after Codex starts.
+- No automatic delegation, parallelism, role, sandbox, approval, or permission
+  changes.
+- No classifier confidence threshold, online bandit, live catalog cache, tier
+  compiler, risk model, circuit breaker, receipt database, or ensemble in the
+  MVP.
+- No fake Jev/Laya service in live validation.
 
-## Security and operations
+## Security and failure behavior
 
-- `TYPESAFE_API_KEY` and `LAYA_API_KEY` remain process-environment secrets and
-  never enter Codex's child environment, config files, receipts, or logs.
-- Receipts contain only route source, tier ID, model, effort, catalog revision,
-  request class, latency, status, and fallback reason.
-- Local Laya health uses a bounded timeout and a circuit breaker so a dead local
-  process does not add its timeout to every task.
-- Hosted Jev is never called concurrently with Laya in the normal path.
-- A decision backend cannot grant permissions, change sandbox, enable network
-  access, or create agents.
-- Catalog refresh failure is explicit; the last known pair is not silently
-  reused beyond its configured revision/TTL.
+- `TYPESAFE_API_KEY`, `LAYA_API_KEY`, and `TURNHELM_CONFIG` are removed from the
+  Codex child environment.
+- Raw prompts, tool arguments, backend output, credentials, and response bodies
+  are never logged or written to files.
+- Laya is restricted to HTTP loopback URLs.
+- Hosted Jev is opt-in and never receives a subagent task or tool data.
+- Non-sentinel behavior is irrelevant because no provider gateway exists.
+- A valid `direct` answer runs Codex without a model override; a valid profile
+  answer uses only its configured model and effort.
+- Backend timeout, transport error, malformed JSON, unknown profile, missing
+  key, or disabled hosted fallback uses `fallbackProfile` when configured;
+  otherwise the command exits before Codex starts.
+- The fallback is not retried through another model or provider.
 
-## Migration from the restored baseline
+## Validation gate
 
-The Gateway design, execution plan, and blocked protocol report are removed by
-commit `d0a52c1`. The existing Phase A classifier and Codex launcher remain the
-only supported implementation. The next implementation plan, after this spec
-is reviewed, should be limited to the Phase A decision-policy, pair-registry,
-calibration, and safe-receipt changes described above.
+Fast tests must cover:
 
-No implementation is authorized by this document until the user reviews the
-spec and approves the follow-up plan.
+1. strict config parsing for `auto` and `hostedJev`;
+2. direct and allowlisted profile choices;
+3. Laya success in `laya` mode;
+4. Jev success in `jev` mode;
+5. `auto` using Laya without contacting Jev;
+6. `auto` using Jev only after an opted-in Laya failure;
+7. no Jev call when hosted fallback is disabled or the environment opt-in is
+   absent;
+8. malformed/unknown answers selecting the configured fallback;
+9. classifier keys absent from the Codex child environment; and
+10. unchanged model/effort argv construction for the selected profile.
+
+The live command remains opt-in and real-service-only. It may run the existing
+labelled cases against Laya and Jev, but it must report source, selected profile,
+and latency only. It must never substitute fixtures or claim that the small
+labelled set proves general routing quality.
+
+A future calibration project may add held-out task data and confidence
+calibration. That work is not required to ship this deterministic MVP and must
+have its own spec and acceptance gate.
+
+## Migration state
+
+Commit `d0a52c1` removes the unadmitted Gateway design, execution plan, and
+protocol report. The Phase A classifier and launcher remain unchanged until the
+follow-up implementation plan is approved and executed. This spec intentionally
+updates only the Phase A decision boundary; it does not authorize changes to
+Codex user configuration or native orchestration.
