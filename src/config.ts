@@ -2,13 +2,14 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export type Backend = "laya" | "jev";
+export type Backend = "laya" | "jev" | "auto";
 export type Profile = { description: string; model: string; effort: string };
 export type Config = {
   backend: Backend;
   layaUrl: string;
   profiles: Record<string, Profile>;
   fallbackProfile?: string;
+  hostedJev: { enabled: boolean };
 };
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
@@ -23,7 +24,7 @@ const text = (value: unknown, name: string, max: number): string => {
 
 export function parseConfig(value: unknown): Config {
   if (!isObject(value)) throw new Error("config must be an object");
-  if (value.backend !== "laya" && value.backend !== "jev") throw new Error("backend must be laya or jev");
+  if (value.backend !== "laya" && value.backend !== "jev" && value.backend !== "auto") throw new Error("backend must be laya, jev, or auto");
   const parsed = new URL(text(value.layaUrl, "layaUrl", 200));
   const host = parsed.hostname.replace(/^\[|\]$/g, "");
   if (parsed.protocol !== "http:" || !["127.0.0.1", "::1"].includes(host) || parsed.username || parsed.password) {
@@ -51,7 +52,11 @@ export function parseConfig(value: unknown): Config {
   if (fallbackProfile && !Object.hasOwn(profiles, fallbackProfile)) {
     throw new Error("fallbackProfile must name a profile");
   }
-  return { backend: value.backend, layaUrl: parsed.origin, profiles, fallbackProfile };
+  const hostedJev = value.hostedJev === undefined ? { enabled: false } : (() => {
+    if (!isObject(value.hostedJev) || typeof value.hostedJev.enabled !== "boolean") throw new Error("invalid hostedJev");
+    return { enabled: value.hostedJev.enabled };
+  })();
+  return { backend: value.backend, layaUrl: parsed.origin, profiles, fallbackProfile, hostedJev };
 }
 
 export function loadConfig(

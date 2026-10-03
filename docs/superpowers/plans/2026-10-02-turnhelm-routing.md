@@ -1,4 +1,5 @@
 # Turnhelm Routing Implementation Plan
+> This document is historical; use ../specs/2026-10-03-jev-laya-phase-a-routing-design.md and the matching 2026-10-03 plan.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

@@ -1,4 +1,5 @@
 # Turnhelm routing design
+> This document is historical; use 2026-10-03-jev-laya-phase-a-routing-design.md and the matching 2026-10-03 plan.
 
 Date: 2026-10-02
 

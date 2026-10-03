@@ -4,11 +4,11 @@ Local-first task routing for Codex. Turnhelm chooses a validated model and
 reasoning-effort profile; Codex keeps its own authentication and provider.
 
 Copy `examples/config.json` to `~/.config/turnhelm/config.json` and set model
-names your Codex account can use. Set `backend` to `laya` for a real local
-loopback `laya[serve]` process using the `typed-decisions` checkpoint, or `jev`
-for the hosted TypeSafe service with `TYPESAFE_API_KEY` in the environment.
-Hosted Jev receives the submitted task text. Turnhelm does not log it or store
-the key.
+names your Codex account can use. Set `backend` to `auto` for loopback-first
+routing: Laya runs locally before any hosted option. Hosted Jev is used only
+when `hostedJev.enabled` is true and `TURNHELM_ALLOW_HOSTED_JEV=1`. Phase A
+chooses one configured model/effort profile before Codex starts. Native
+subagent routing and the old Hook/Gateway experiments are unsupported.
 
 ## Phase A
 
