@@ -41,3 +41,11 @@ This is smoke coverage, not a quality benchmark.
 Comparative quality calibration, larger datasets, confidence policies, and
 model-catalog experiments are future work and are explicitly out of scope for
 this Phase A MVP.
+
+## Authorized live smoke result (2026-10-03)
+
+- Real Laya: 24/24 passed; selected_profiles `direct:8,fast:8,deep:8`; p50 69.4ms; p95 98.6ms. Laya ran from the existing loopback `laya-serve` typed-decisions service.
+- Real Jev: 24/24 passed; selected_profiles `direct:8,fast:8,deep:8`; p50 282.2ms; p95 729.1ms.
+
+This is smoke evidence, not a general quality benchmark. No paths, prompts,
+request/response bodies, headers, key values, or logs are recorded.
