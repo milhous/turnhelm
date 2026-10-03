@@ -1,7 +1,7 @@
 # Phase A classifier boundary hardening
 
 Date: 2026-10-03
-Status: implementation verified (2026-10-03); controller review/integration pending
+Status: initial hardening verified; final-review safety fixes in progress (2026-10-03)
 
 ## Goal and evidence
 
@@ -78,6 +78,31 @@ boundary without a second routing policy or additional dependencies.
   supported Node 24 line. See the [official Node CLI source](https://github.com/nodejs/node/blob/v22.x/doc/api/cli.md#--test-coverage-branchesthreshold).
 - No paid live rerun is necessary: the existing authorized smoke evidence is
   preserved and explicitly dated rather than presented as a new live run.
+
+## Final-review safety amendments
+
+The full unpublished-history review identified four concrete gaps to close
+before publication. These decisions use the user's delegated authority.
+
+- The temporary extensionless Codex fixture must use explicit CommonJS-safe
+  asynchronous code, not implicit module detection. Verify exact minimum Node
+  22.8.0 as well as Node 24/26; this is a deterministic test-format correction.
+- Handle child stdin errors before writing, and settle the Codex promise only
+  after process/stdio completion. Preserve nonzero child statuses; an input
+  transfer failure must not report success even if the child exits zero.
+  Spawn failures remain controlled rejections. Do not add a global Codex task
+  timeout, retry, model switch, or permission policy.
+- Classifier responses are limited to 64 KiB (65536) received UTF-8 bytes.
+  Reject oversized declared Content-Length before reading, and enforce the
+  actual streamed byte count even when the header is absent or understated.
+  Cancel/release the reader on overflow or failure, retain the four-second
+  request abort, and parse JSON only after the bounded read. Malformed JSON,
+  invalid UTF-8, absent body, and stream errors produce generic errors without
+  response excerpts. Exactly 65536 bytes is allowed; 65537 is rejected.
+- Use `Object.hasOwn` for the classifier choice allowlist, including ordinary
+  structurally valid Config objects, while retaining legitimate own profile IDs.
+
+These are stateless boundary corrections, not a new routing subsystem.
 
 ## Verification and integration
 

@@ -199,6 +199,81 @@ Status: Tasks 1 and 2 implementation verified (2026-10-03); controller review/in
   Commit only task-owned files with a Conventional Commit message, and
   report commands, exact source coverage, test count, and any concerns.
 
+### Task 3: Close all final-review failure/resource boundaries
+
+**Files:**
+- Modify: `src/codex.ts`, `src/systemone.ts`
+- Modify: `test/cli.test.ts`, `test/codex.test.ts`, `test/systemone.test.ts`
+- Update current verification evidence/status: `README.md`, `docs/validation/2026-10-03-jev-laya-phase-a.md`, both current Phase A/hardening specs, and this plan.
+
+**Interfaces:**
+- Consumes: existing `runCodex(route: RouteDecision, prompt: string, write: boolean): Promise<number>` and `chooseProfile(config: Config, prompt: string): Promise<string>`.
+- Produces: the same public interfaces with controlled stdin failures, bounded private response decoding, strict own-property choices, and deterministic CommonJS-safe offline Codex fixtures.
+
+- [ ] **Step 1: Reproduce all findings and commit RED tests.**
+
+  The controller already reproduced the exact Node22.8/npm10.8.2 floor failure
+  (163/168) and reviewer reproduced unhandled EPIPE with an immediate-exit fake
+  Codex and a 100 KiB input. Add focused behavior regressions before production
+  edits. Make the fake CLI fixture's temporary directory explicitly CommonJS
+  with a local `package.json` so the existing top-level-await bug also fails on
+  current Node; do not assert source-code strings instead of behavior.
+
+  Use a finite-timeout Node child harness importing the real `runCodex`, with
+  only a temporary immediate-exit shell `codex` on PATH, and a generated
+  100 KiB task. Expect the nonzero child code to be returned without an
+  unhandled exception; separately verify an early zero exit with failed input
+  transfer returns nonzero, and a missing executable is a controlled rejection.
+
+  Mock fetch with typed valid decision JSON padded to byte boundaries. Add
+  exactly-65536 success; 65537 overflow; oversized declared Content-Length with
+  no read; understated/missing header overflow; multi-chunk/multibyte UTF-8
+  accounting; cancel-on-error; malformed JSON/invalid UTF-8/absent body/read
+  error with generic non-leaking errors; normal direct/profile success and
+  existing auto fallback behavior. For ordinary `profiles: { ...config.profiles }`,
+  inherited `toString`/`constructor` responses must be rejected; legitimate
+  own profile IDs remain valid. No live services, real Codex, or real keys.
+
+  Run `npm run build && node --test dist/test/cli.test.js dist/test/codex.test.js dist/test/systemone.test.js`, capture expected failures, audit/diff-check,
+  and create a Conventional Commit RED checkpoint before production edits.
+
+- [ ] **Step 2: Apply the minimal lifecycle and response-budget fixes.**
+
+  Wrap the temporary extensionless fixture's async body in an async IIFE;
+  retain its existing output/exit/signal behavior and explicit CommonJS context.
+  In `runCodex`, attach stdin/process listeners before `.end(prompt)`, handle
+  stdin errors without an unhandled emitter, and settle on child `close` so
+  late stream errors precede completion. Preserve nonzero statuses; if input
+  failed and code is zero, return 1. Spawn errors reject with a generic error.
+  Keep the existing public signature and do not add execution timeouts/retries.
+
+  In `systemone.ts`, add a private bounded-reader helper. Maximum response
+  bytes are exactly `64 * 1024`. A reader fills a bounded `Uint8Array`, checks
+  declared Content-Length before read and actual chunk byte totals before
+  copying, decodes valid UTF-8, then parses JSON. Cancel and release on every
+  failure/overflow; cancellation cleanup errors must not expose data or mask
+  the primary controlled failure. No raw JSON parse exception excerpts escape.
+  Retain the existing fetch timeout/redirect options and type/profile checks;
+  replace `answer.choice in config.profiles` with
+  `Object.hasOwn(config.profiles, answer.choice)`. No new dependency or export.
+
+- [ ] **Step 3: Verify GREEN on every declared target and reconcile evidence.**
+
+  Rerun the same focused command, then hermetic `npm test` and
+  `npm run test:coverage` on exact Node22.8.0 with its bundled npm10.8.2,
+  official Node24.21.0, and native Node26.5.0. Verified tool directories are
+  `.git/tools/node-v22.8.0/bin` and `.git/tools/node-v24.21.0/bin`; prepend the
+  chosen directory to PATH. Node22's bundled npm avoids an unrelated native
+  npm11 engine warning. All source thresholds must still pass, with every
+  production module meaningfully covered. Inspect output, audit, and diff-check
+  before the GREEN checkpoint.
+
+  Update documentation with current scalar results and the response budget,
+  controlled child-input semantics, and exact-minimum verification. Preserve
+  original dated live evidence and earlier RED/GREEN receipts as historical
+  evidence; do not fabricate a new live result or mark integration complete.
+  Append all covering commands, counts/coverage, and concerns to the report.
+
 ## Controller integration checklist
 
 - [ ] Task 1 spec/quality review accepted; Task 2 spec/quality review accepted.
