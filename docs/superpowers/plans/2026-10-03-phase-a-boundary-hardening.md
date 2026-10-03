@@ -17,6 +17,7 @@
 - Existing hosted-Jev config/environment/key gates and the single Laya-to-Jev fallback transition remain unchanged.
 - Offline tests use dummy keys and restored environment/fetch state only. They must pass with real classifier credentials absent.
 - Source coverage must reach at least 80% for lines, branches, and functions, using Node's built-in coverage, including CLI/child-process smoke coverage.
+- Node's declared floor is `>=22.8.0`; offline CI runs Node 24, with SHA-pinned official actions, read-only contents permission, and no persisted checkout credentials.
 - No paid live rerun is necessary. No production dependency, Gateway, Hook, catalog, confidence policy, retry mechanism, or native subagent integration is added.
 - Preserve user work and existing commits. Work in the current feature checkout; only the controller performs integration and publication.
 
@@ -104,8 +105,9 @@
 ### Task 2: Reconcile docs and retain offline coverage gates
 
 **Files:**
-- Modify: `package.json` (and `package-lock.json` only if the supported Node floor changes)
+- Modify: `package.json`, `package-lock.json` (Node engine floor metadata only)
 - Create: `test/cli.test.ts`
+- Create: `.github/workflows/ci.yml`
 - Modify if needed for meaningful coverage: `test/config.test.ts`, `test/codex.test.ts`, `test/route.test.ts`, `test/systemone.test.ts`
 - Modify: `README.md`, `docs/superpowers/specs/2026-10-03-jev-laya-phase-a-routing-design.md`, `docs/superpowers/plans/2026-10-03-jev-laya-phase-a-routing.md`, `docs/validation/2026-10-03-jev-laya-phase-a.md`
 - Update status: this plan and its matching design doc after verification.
@@ -124,17 +126,17 @@
   Preserve Node's coverage environment for child-process coverage.
 
   Cover route JSON/direct/profile, original task stdin, read-only and explicit
-  workspace-write argv, classifier-key removal, empty/invalid command/config
-  failure with generic error output, and long/continuation local-only routes.
+  workspace-write argv, removal of classifier credentials, generic errors for
+  blank/unsupported commands or invalid config, and local-only long/continuation routes.
   Add focused remaining config/argv/error-path characterization tests if the
   actual source coverage requires them; do not test implementation-only mocks.
 
 - [ ] **Step 2: Add the built-in source coverage command and verify its gate.**
 
   Before adding the script, `npm run test:coverage` must report the missing
-  script. Add the following script after confirming flag support at the
-  declared Node floor; raise the floor only to the first official version
-  supporting the required flags if necessary, and update lock metadata.
+  script. Add the following script and set `engines.node` to `>=22.8.0` in
+  package/lock root metadata. The controller verified the official Node CLI
+  source: coverage filters were added in 22.5.0; thresholds in 22.8.0.
 
   ```json
   "test:coverage": "npm run build && node --test --experimental-test-coverage --test-coverage-include='dist/src/**' --test-coverage-lines=80 --test-coverage-branches=80 --test-coverage-functions=80 dist/test/*.test.js"
@@ -143,6 +145,30 @@
   Run the coverage command with all classifier credentials/opt-in unset.
   All three source thresholds must pass; do not exclude poorly covered
   production modules or count test files to inflate coverage.
+
+  Retain the gate for future changes with this minimal workflow (official
+  action tag SHAs were verified by the controller before dispatch):
+
+  ```yaml
+  name: Offline verification
+  on: [push, pull_request]
+  permissions:
+    contents: read
+  jobs:
+    verify:
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+          with:
+            persist-credentials: false
+        - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+          with:
+            node-version: 24
+            cache: npm
+        - run: npm ci --ignore-scripts
+        - run: npm run test:coverage
+        - run: npm audit --audit-level=high
+  ```
 
 - [ ] **Step 3: Synchronize documentation and record offline evidence.**
 
@@ -168,4 +194,4 @@
 - [ ] Reconcile `.git/sdd/progress.md` with completed authorized live smoke and new hardening results.
 - [ ] Scan all unpublished Git history for secrets with redacted output; review final diff.
 - [ ] Obtain independent whole-branch review; fix any blocking findings and re-review.
-- [ ] Fetch and verify remote ancestry, fast-forward local main, rerun offline verification, normal non-force push, and verify remote HEAD.
+- [ ] Fetch and verify remote ancestry; normally push the reviewed feature branch and wait for offline CI to pass before fast-forwarding local main. Rerun offline verification, normally push main without force, and verify remote HEAD/CI.

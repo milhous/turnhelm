@@ -52,6 +52,12 @@ boundary without a second routing policy or additional dependencies.
   must pass with real classifier credentials absent.
 - Source coverage must reach at least 80% for lines, branches, and functions,
   using Node's built-in coverage, including CLI/child-process smoke coverage.
+- Persist offline coverage and dependency-audit gates in a minimal GitHub
+  Actions workflow. Pin actions to verified official commit SHAs, grant only
+  `contents: read`, disable persisted checkout credentials, and do not expose
+  classifier credentials. Node's required coverage threshold flags were added
+  in 22.8.0; the development/runtime floor becomes `>=22.8.0` and CI uses the
+  supported Node 24 line. See the [official Node CLI source](https://github.com/nodejs/node/blob/v22.x/doc/api/cli.md#--test-coverage-branchesthreshold).
 - No paid live rerun is necessary: the existing authorized smoke evidence is
   preserved and explicitly dated rather than presented as a new live run.
 
@@ -62,7 +68,8 @@ the existing user preference to work in the current checkout. Run hermetic
 tests, coverage, dependency audit, whitespace checks, and an independent review.
 Synchronize the Phase A spec status, execution checkboxes, and local ledger.
 Before publication, scan the entire unpublished history for secrets and review
-the final diff. Fetch remote state; use only fast-forward integration and a
-normal non-force push. If the remote has diverged, stop automatic publication
+the final diff. Fetch remote state; normally push the reviewed feature branch
+and require its offline CI to pass before fast-forwarding main. Use only
+fast-forward integration and a normal non-force push. If the remote has diverged, stop automatic publication
 and preserve both histories. Do not change credentials, branch protections, or
 user Codex configuration.
