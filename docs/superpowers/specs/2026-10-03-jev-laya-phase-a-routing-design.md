@@ -21,8 +21,8 @@ always-parallel ensemble:
 2. Laya may return a pair tier or abstain. An abstention, out-of-domain result,
    unhealthy local service, high-risk task, or calibration failure invokes
    hosted Jev when explicitly enabled.
-3. Jev may adjudicate the compact task and the sanitized Laya judgment, then
-   chooses one allowlisted pair tier.
+3. When the fallback/adjudication path is active, Jev may inspect the compact
+   task and the sanitized Laya judgment, then choose one allowlisted pair tier.
 4. If the selected decision backend is unavailable or malformed, Turnhelm uses
    the explicit configured baseline pair. It never invents a model or effort.
 
@@ -52,11 +52,12 @@ adaptive effort is explicitly experimental and disabled by default:
 <https://github.com/hyspacex/jev-router>.
 
 Other relevant references are useful as patterns, not as production evidence:
-`auto-mode-for-paseo` supports Jev or local Laya but labels the plugin
-experimental; `suenot/codex-jev-router` makes Laya an optional decider; and
-`jevons` demonstrates local/Laya/cloud failover with timeouts and a circuit
-breaker. None proves a universally optimal model-effort policy for Turnhelm's
-Codex workload.
+[`auto-mode-for-paseo`](https://github.com/obetomuniz/auto-mode-for-paseo)
+supports Jev or local Laya but labels the plugin experimental;
+[`suenot/codex-jev-router`](https://github.com/suenot/codex-jev-router) makes
+Laya an optional decider; and [`jevons`](https://github.com/gopalanj/jevons)
+demonstrates local/Laya/cloud failover with timeouts and a circuit breaker. None
+proves a universally optimal model-effort policy for Turnhelm's Codex workload.
 
 Academic work supports treating model and reasoning policy as a joint routing
 choice. RouteLLM provides threshold-calibrated strong/weak routing
