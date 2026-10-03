@@ -23,8 +23,13 @@ units stay local and require `fallbackProfile`. The direct classifier helpers
 (`classifyTask` and `chooseProfile`) reject those inputs, as well as invalid or
 blank tasks, before network work. Eligible classifier text is not truncated;
 the request builder is private and HTTP redirects are rejected.
+Classifier responses are streamed with a 65536-byte UTF-8 limit, independent
+of Content-Length; invalid encoding/JSON and oversized bodies fail generically.
+Only `direct` or an own configured profile ID is accepted.
 Joined CLI task text, including leading/trailing whitespace and newlines, is
 preserved for classification and Codex stdin; only blank-input validation trims.
+Codex completion waits for child/stdio closure: stdin failures cannot report
+success, nonzero child statuses are preserved, and spawn failures are controlled.
 
 ## Development
 
@@ -38,6 +43,11 @@ env -u TYPESAFE_API_KEY -u LAYA_API_KEY -u TURNHELM_ALLOW_HOSTED_JEV npm test
 env -u TYPESAFE_API_KEY -u LAYA_API_KEY -u TURNHELM_ALLOW_HOSTED_JEV npm run test:coverage
 npm audit --audit-level=high
 ```
+
+The 2026-10-03 final boundary verification passed 189/189 tests on exact Node
+22.8.0 (bundled npm 10.8.2), Node 24.21.0, and Node 26.5.0; source coverage was
+99.25% lines, 93.06% branches, and 100% functions on each target. No new live
+calls were made; see [dated validation](docs/validation/2026-10-03-jev-laya-phase-a.md).
 
 Coverage includes every production module in `dist/src/**`, including CLI
 children, and enforces at least 80% lines, branches, and functions. The pinned

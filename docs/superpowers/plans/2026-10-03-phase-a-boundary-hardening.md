@@ -1,6 +1,6 @@
 # Phase A Boundary Hardening Implementation Plan
 
-Status: Tasks 1 and 2 implementation verified (2026-10-03); controller review/integration checklist remains pending. Hermetic tests: 168/168; source lines/branches/functions: 99.10%/93.39%/100%; audit: zero vulnerabilities. No new live run.
+Status: Tasks 1–3 implementation verified (2026-10-03); controller review/integration checklist remains pending. Hermetic tests: 189/189 on exact Node 22.8.0/npm 10.8.2, Node 24.21.0, and Node 26.5.0; source lines/branches/functions: 99.25%/93.06%/100%; audit: zero vulnerabilities. No new live run.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -210,7 +210,7 @@ Status: Tasks 1 and 2 implementation verified (2026-10-03); controller review/in
 - Consumes: existing `runCodex(route: RouteDecision, prompt: string, write: boolean): Promise<number>` and `chooseProfile(config: Config, prompt: string): Promise<string>`.
 - Produces: the same public interfaces with controlled stdin failures, bounded private response decoding, strict own-property choices, and deterministic CommonJS-safe offline Codex fixtures.
 
-- [ ] **Step 1: Reproduce all findings and commit RED tests.**
+- [x] **Step 1: Reproduce all findings and commit RED tests.**
 
   The controller already reproduced the exact Node22.8/npm10.8.2 floor failure
   (163/168) and reviewer reproduced unhandled EPIPE with an immediate-exit fake
@@ -237,7 +237,7 @@ Status: Tasks 1 and 2 implementation verified (2026-10-03); controller review/in
   Run `npm run build && node --test dist/test/cli.test.js dist/test/codex.test.js dist/test/systemone.test.js`, capture expected failures, audit/diff-check,
   and create a Conventional Commit RED checkpoint before production edits.
 
-- [ ] **Step 2: Apply the minimal lifecycle and response-budget fixes.**
+- [x] **Step 2: Apply the minimal lifecycle and response-budget fixes.**
 
   Wrap the temporary extensionless fixture's async body in an async IIFE;
   retain its existing output/exit/signal behavior and explicit CommonJS context.
@@ -257,7 +257,7 @@ Status: Tasks 1 and 2 implementation verified (2026-10-03); controller review/in
   replace `answer.choice in config.profiles` with
   `Object.hasOwn(config.profiles, answer.choice)`. No new dependency or export.
 
-- [ ] **Step 3: Verify GREEN on every declared target and reconcile evidence.**
+- [x] **Step 3: Verify GREEN on every declared target and reconcile evidence.**
 
   Rerun the same focused command, then hermetic `npm test` and
   `npm run test:coverage` on exact Node22.8.0 with its bundled npm10.8.2,

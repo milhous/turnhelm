@@ -40,6 +40,7 @@ async function fixture(t: TestContext, choice = "direct") {
   await writeFile(join(directory, "package.json"), JSON.stringify({ type: "commonjs" }));
   // This executable only observes the child boundary; it never invokes Codex.
   await writeFile(join(directory, "codex"), `#!${process.execPath}
+(async () => {
 let input = "";
 for await (const chunk of process.stdin) input += chunk;
 console.log(JSON.stringify({
@@ -49,6 +50,7 @@ console.log(JSON.stringify({
 }));
 if (process.env.TEST_CODEX_SIGNAL) process.kill(process.pid, "SIGTERM");
 else process.exitCode = Number(process.env.TEST_CODEX_EXIT ?? 0);
+})().catch(() => { process.exitCode = 1; });
 `, { mode: 0o700 });
   // Preserve NODE_V8_COVERAGE and other runner settings for child source coverage.
   const env: NodeJS.ProcessEnv = { ...process.env, PATH: directory + delimiter + (process.env.PATH ?? ""),

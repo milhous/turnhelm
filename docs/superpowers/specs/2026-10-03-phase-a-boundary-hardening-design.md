@@ -1,7 +1,7 @@
 # Phase A classifier boundary hardening
 
 Date: 2026-10-03
-Status: initial hardening verified; final-review safety fixes in progress (2026-10-03)
+Status: final-review safety fixes verified; controller review/integration pending (2026-10-03)
 
 ## Goal and evidence
 
@@ -18,13 +18,21 @@ baseline run with classifier credentials unset passed only 18/19 tests: the Jev
 fallback-success test relied on an inherited real API key. In addition, fetch's
 default redirect behavior could leave the configured classifier origin.
 
-Implementation verification on 2026-10-03 passed 168/168 hermetic tests on Node
+Initial implementation verification on 2026-10-03 passed 168/168 hermetic tests on Node
 24.21.0 and 26.5.0. Every production module exceeded 80% source lines, branches,
 and functions; aggregate coverage was 99.10%, 93.39%, and 100%, respectively.
 Dependency audit reported zero vulnerabilities. CLI characterization uses only
 ephemeral loopback fixtures and a temporary executable, preserving child
 coverage. The authorized live smoke evidence is unchanged; no new live calls
 were made. Independent review and publication remain controller-owned gates.
+
+Final boundary verification passed 189/189 hermetic tests and coverage tests on
+exact Node 22.8.0 with bundled npm 10.8.2, official Node 24.21.0, and native
+Node 26.5.0. Aggregate source lines/branches/functions were
+99.25%/93.06%/100% on every target; every production module exceeded 80%.
+The focused RED receipt was 130/152, with 22 expected boundary/fixture failures;
+GREEN was 152/152 on all three targets. Dependency audit remained clean.
+The exact-minimum verification closes the earlier implicit-module fixture gap.
 
 CLI characterization also exposed `.join(" ").trim()` normalizing original
 task text and allowing padded overlong input to reach classification. The

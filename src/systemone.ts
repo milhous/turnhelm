@@ -24,6 +24,32 @@ function buildSystemOneRequest(config: Config, prompt: string, backend: "laya" |
 
 const hostedJevAllowed = (config: Config) => config.hostedJev.enabled && process.env.TURNHELM_ALLOW_HOSTED_JEV === "1";
 
+const responseByteLimit = 64 * 1024;
+
+async function readDecision(response: Response): Promise<unknown> {
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  try {
+    if (!response.body) throw new Error("missing body");
+    reader = response.body.getReader();
+    if (Number(response.headers.get("content-length")) > responseByteLimit) throw new Error("response too large");
+    const bytes = new Uint8Array(responseByteLimit);
+    let size = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value.byteLength > responseByteLimit - size) throw new Error("response too large");
+      bytes.set(value, size);
+      size += value.byteLength;
+    }
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, size)));
+  } catch {
+    try { await reader?.cancel(); } catch { /* Cleanup must not replace the controlled failure. */ }
+    throw new Error("classifier unavailable");
+  } finally {
+    try { reader?.releaseLock(); } catch { /* Never expose stream cleanup errors. */ }
+  }
+}
+
 async function callDecision(config: Config, prompt: string, backend: "laya" | "jev"): Promise<string> {
   if (backend === "jev" && !hostedJevAllowed(config)) throw new Error("hosted Jev is not enabled");
   const key = backend === "jev" ? process.env.TYPESAFE_API_KEY : process.env.LAYA_API_KEY;
@@ -39,7 +65,7 @@ async function callDecision(config: Config, prompt: string, backend: "laya" | "j
     signal: AbortSignal.timeout(4000)
   });
   if (!response.ok) throw new Error("classifier HTTP " + response.status);
-  const data: unknown = await response.json();
+  const data = await readDecision(response);
   if (!object(data) || !object(data.answers) || !object(data.answers.route)) {
     throw new Error("classifier returned no route");
   }
@@ -47,7 +73,7 @@ async function callDecision(config: Config, prompt: string, backend: "laya" | "j
   if (answer.type !== "choice" || typeof answer.choice !== "string") {
     throw new Error("classifier returned an invalid choice");
   }
-  if (answer.choice !== "direct" && !(answer.choice in config.profiles)) throw new Error("classifier unavailable");
+  if (answer.choice !== "direct" && !Object.hasOwn(config.profiles, answer.choice)) throw new Error("classifier unavailable");
   return answer.choice;
 }
 

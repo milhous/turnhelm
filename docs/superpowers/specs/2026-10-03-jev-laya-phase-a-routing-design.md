@@ -4,9 +4,11 @@ Date: 2026-10-03
 Status: implemented and validated (2026-10-03)
 
 Dated evidence: the authorized 2026-10-03 real-service smoke passed 24/24 cases
-for each of Laya and Jev. The subsequent offline hardening passed 168/168 tests
-on Node 24 and 26, with source coverage of 99.10% lines, 93.39% branches, and
-100% functions. See [validation evidence](../../validation/2026-10-03-jev-laya-phase-a.md).
+for each of Laya and Jev. Final offline boundary hardening passed 189/189 tests
+on exact Node 22.8.0 (bundled npm 10.8.2), Node 24.21.0, and Node 26.5.0,
+with source coverage of 99.25% lines, 93.06% branches, and 100% functions.
+See [validation evidence](../../validation/2026-10-03-jev-laya-phase-a.md),
+which also preserves the earlier 168-test hardening receipt.
 The hardening verification made no new live calls.
 
 ## Decision
@@ -165,7 +167,15 @@ private, and every classifier request rejects redirects with `redirect: "error"`
 - Hosted Jev is opt-in and never receives a subagent task or tool data.
 - Non-sentinel behavior is irrelevant because no provider gateway exists.
 - A valid `direct` answer runs Codex without a model override; a valid profile
-  answer uses only its configured model and effort.
+  answer must be an own configured ID and uses only its configured model and effort.
+- Responses are streamed into a fixed 65536-byte buffer. Oversized declared
+  Content-Length is rejected before reading; actual byte counts are enforced
+  even without an accurate header. Invalid UTF-8/JSON, missing bodies, and read
+  failures are generic, with cancellation/release cleanup on decoding failure.
+- Codex waits for child/stdio closure, handles stdin errors before writing,
+  preserves nonzero child codes, and returns failure if input transfer fails
+  despite a zero child exit. Spawn failures reject generically. No execution
+  timeout, retry, or model-switch policy is added.
 - Backend timeout, transport error, malformed JSON, unknown profile, missing
   key, or disabled hosted fallback uses `fallbackProfile` when configured;
   otherwise the command exits before Codex starts.
