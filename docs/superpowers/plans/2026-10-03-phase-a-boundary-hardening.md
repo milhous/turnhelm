@@ -1,6 +1,6 @@
 # Phase A Boundary Hardening Implementation Plan
 
-Status: Tasks 1–3 implementation verified (2026-10-03); controller review/integration checklist remains pending. Hermetic tests: 190/190 on exact Node 22.8.0/npm 10.8.2, Node 24.21.0, and Node 26.5.0; source lines/branches/functions: 99.25%/93.71%/100%; audit: zero vulnerabilities. No new live run.
+Status: Tasks 1–3 implementation verified (2026-10-03); controller review/integration checklist remains pending. Hermetic tests: 192/192 on exact Node 22.8.0/npm 10.8.2, Node 24.21.0, and Node 26.5.0; source lines/branches/functions: 99.26%/93.79%/100%; audit: zero vulnerabilities. No new live run.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

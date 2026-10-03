@@ -4,9 +4,9 @@ Date: 2026-10-03
 Status: implemented and validated (2026-10-03)
 
 Dated evidence: the authorized 2026-10-03 real-service smoke passed 24/24 cases
-for each of Laya and Jev. Final offline boundary hardening passed 190/190 tests
+for each of Laya and Jev. Final offline boundary hardening passed 192/192 tests
 on exact Node 22.8.0 (bundled npm 10.8.2), Node 24.21.0, and Node 26.5.0,
-with source coverage of 99.25% lines, 93.71% branches, and 100% functions.
+with source coverage of 99.26% lines, 93.79% branches, and 100% functions.
 See [validation evidence](../../validation/2026-10-03-jev-laya-phase-a.md),
 which also preserves the earlier 168-test hardening receipt.
 The hardening verification made no new live calls.
@@ -172,6 +172,8 @@ private, and every classifier request rejects redirects with `redirect: "error"`
   Content-Length is rejected before reading; actual byte counts are enforced
   even without an accurate header. Invalid UTF-8/JSON, missing bodies, and read
   failures are generic, with cancellation/release cleanup on decoding failure.
+  Non-success HTTP bodies are cancelled without reading before status-only
+  rejection; cleanup failures cannot mask the status or expose backend text.
 - Codex waits for child/stdio closure, handles stdin errors before writing,
   preserves nonzero child codes, and returns failure if input transfer fails
   despite a zero child exit. Spawn failures reject generically. No execution

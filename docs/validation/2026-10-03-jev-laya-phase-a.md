@@ -77,7 +77,7 @@ source gate covers every production module without including test files.
 
 No new live calls were made. At this checkpoint, this superseded the initial
 offline receipt above, not the dated authorized live smoke evidence. The
-absent-stdin follow-up below is the current-code receipt.
+follow-up receipts below supersede this checkpoint.
 
 - Focused RED: build passed; CLI/Codex/System One tests passed 130/152, with 22
   expected failures for explicit CommonJS fixture parsing, unhandled stdin
@@ -107,7 +107,7 @@ CommonJS-safe and all child executions remain temporary fixtures, never real Cod
 The four-second classifier abort and existing fallback/opt-in policy are unchanged.
 Independent review and remote integration remain controller-owned gates.
 
-## Final boundary result including absent-stdin follow-up (2026-10-03)
+## Absent-stdin follow-up result (2026-10-03, historical)
 
 The controller reproduced a remaining queued ChildProcess `EMFILE` crash when
 spawn returned no stdin. A finite-timeout, FD-limited isolated harness with
@@ -128,3 +128,24 @@ error. Local harness descriptors are closed; the parent FD limit is unchanged.
 Earlier RED/GREEN and live receipts remain historical evidence. No new live
 calls, real Codex, controller integration updates, or remote publication were
 performed for this same-category follow-up.
+
+## Final boundary result including HTTP-body cleanup (2026-10-03)
+
+The non-success HTTP branch previously bypassed bounded decoding and left
+bodies unconsumed/uncancelled. It now cancels without reading before the existing
+status-only rejection, and cleanup failures cannot expose backend text or mask
+that status. Real Response503/fetch-only regressions with zero-highWaterMark
+streams prove zero pulls and cancellation, including a throwing cancel callback.
+
+- Focused System One RED: 131/133, two expected missing-cancellation failures;
+  GREEN: 133/133. Combined CLI/Codex/System One GREEN: 155/155 on every target.
+- Hermetic full tests and source coverage tests: 192/192 each on exact Node
+  22.8.0/npm 10.8.2, official Node 24.21.0/npm 11.17.0, and native Node
+  26.5.0/npm 11.17.0; zero failed/skipped/cancelled.
+- Aggregate source coverage, identical on every target: 99.26% lines / 93.79%
+  branches / 100% functions. System One: 100% / 97.18% / 100%; other modules
+  unchanged from preceding receipts, all above 80%.
+- Dependency audits on all targets: zero vulnerabilities; diff-check passed.
+
+No new live calls or real Codex; earlier smoke/RED/GREEN receipts preserved.
+Independent review and remote integration remain controller-owned gates.

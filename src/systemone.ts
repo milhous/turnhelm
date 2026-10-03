@@ -64,7 +64,10 @@ async function callDecision(config: Config, prompt: string, backend: "laya" | "j
     redirect: "error",
     signal: AbortSignal.timeout(4000)
   });
-  if (!response.ok) throw new Error("classifier HTTP " + response.status);
+  if (!response.ok) {
+    try { await response.body?.cancel(); } catch { /* Keep the status-only failure if cleanup fails. */ }
+    throw new Error("classifier HTTP " + response.status);
+  }
   const data = await readDecision(response);
   if (!object(data) || !object(data.answers) || !object(data.answers.route)) {
     throw new Error("classifier returned no route");

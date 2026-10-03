@@ -26,15 +26,18 @@ ephemeral loopback fixtures and a temporary executable, preserving child
 coverage. The authorized live smoke evidence is unchanged; no new live calls
 were made. Independent review and publication remain controller-owned gates.
 
-Final boundary verification passed 190/190 hermetic tests and coverage tests on
+Final boundary verification passed 192/192 hermetic tests and coverage tests on
 exact Node 22.8.0 with bundled npm 10.8.2, official Node 24.21.0, and native
 Node 26.5.0. Aggregate source lines/branches/functions were
-99.25%/93.71%/100% on every target; every production module exceeded 80%.
+99.26%/93.79%/100% on every target; every production module exceeded 80%.
 The focused RED receipt was 130/152, with 22 expected boundary/fixture failures;
 Initial GREEN was 152/152 on all three targets. A same-category absent-stdin
 follow-up reproduced unhandled queued EMFILE after rejection (5/6 Codex RED),
-then installed the process listener before the guard. Current focused GREEN is
-153/153 on every target; Codex source branch coverage is now 100%.
+then installed the process listener before the guard (focused GREEN: 153/153).
+A non-success HTTP-body follow-up reproduced missing cancellation (131/133
+System One RED), then cancelled without reading and retained status-only errors,
+even if cleanup failed. Current focused GREEN is 155/155 on every target;
+Codex source branch coverage is 100% and System One branches are 97.18%.
 Dependency audit remained clean.
 The exact-minimum verification closes the earlier implicit-module fixture gap.
 
@@ -112,6 +115,8 @@ before publication. These decisions use the user's delegated authority.
   request abort, and parse JSON only after the bounded read. Malformed JSON,
   invalid UTF-8, absent body, and stream errors produce generic errors without
   response excerpts. Exactly 65536 bytes is allowed; 65537 is rejected.
+  Non-success HTTP bodies are cancelled without reading before status-only
+  rejection; cancellation failure must not mask the status or leak backend text.
 - Use `Object.hasOwn` for the classifier choice allowlist, including ordinary
   structurally valid Config objects, while retaining legitimate own profile IDs.
 
