@@ -24,9 +24,10 @@ Auto capability profiles are generated in memory from this fixed policy:
 The official effort matrix is `low`, `medium`, `high`, `xhigh`, `max` for
 `gpt-6-astra` and `gpt-6.1-sol`; `gpt-6-luna` additionally supports `none`.
 Roles are emitted only when the model is in that matrix and is supported by a
-visible, API-backed entry in the read-only `$CODEX_HOME/models_cache.json` or
-is the official model in `$CODEX_HOME/config.toml`. Missing, malformed, hidden,
-or unknown metadata is ignored. `balanced`, then `fast`, is selected as the
+visible (`list` in Codex cache metadata), API-backed entry in the read-only
+`$CODEX_HOME/models_cache.json` or is the official model in
+`$CODEX_HOME/config.toml`. Hidden (`hide`) or unknown metadata is ignored;
+malformed metadata is ignored safely. `balanced`, then `fast`, is selected as the
 automatic fallback; if no role is available, config loading fails closed
 instead of routing to an unqualified model. Explicit mode remains available
 for controlled deployments and test fixtures, including safe provider-specific

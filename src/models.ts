@@ -104,7 +104,8 @@ function readCachedModels(home: string): CodexSignals["cached"] {
   const cached: CodexSignals["cached"] = {};
   for (const entry of parsed.models) {
     if (!isObject(entry) || typeof entry.slug !== "string" ||
-      (entry.visibility !== "visible" && entry.visibility !== "hidden") ||
+      (entry.visibility !== "list" && entry.visibility !== "hide" &&
+        entry.visibility !== "visible" && entry.visibility !== "hidden") ||
       typeof entry.supported_in_api !== "boolean" || !Array.isArray(entry.supported_reasoning_levels) ||
       !Object.hasOwn(OFFICIAL_MODEL_CAPABILITIES, entry.slug)) continue;
     if (!entry.supported_in_api) continue;
@@ -115,7 +116,7 @@ function readCachedModels(home: string): CodexSignals["cached"] {
     const official = OFFICIAL_MODEL_CAPABILITIES[entry.slug].efforts;
     const normalized = official.filter(effort => efforts.includes(effort));
     cached[entry.slug] = {
-      visible: entry.visibility === "visible",
+      visible: entry.visibility === "list" || entry.visibility === "visible",
       supportedInApi: true,
       efforts: normalized
     };

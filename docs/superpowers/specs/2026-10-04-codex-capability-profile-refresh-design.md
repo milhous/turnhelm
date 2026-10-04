@@ -41,9 +41,10 @@ Use one pure capability module and one in-memory profile materializer:
    IDs and exact effort sets.
 2. A defensive, read-only parser may inspect
    `$CODEX_HOME/models_cache.json` when present. It records only official IDs
-   with `supported_in_api: true` and normalized effort metadata; hidden or empty
-   entries remain non-active metadata only. The cache can confirm availability
-   or add a visible candidate; it can never activate hidden entries, override
+   with `supported_in_api: true` and normalized effort metadata; Codex visibility
+   values `list`/`hide` (also normalized from `visible`/`hidden` aliases) are
+   retained as booleans, with hidden or empty entries remaining non-active. The
+   cache can confirm availability or add a listed/visible candidate; it can never activate hidden entries, override
    the official effort matrix, or remove the official table.
 3. The active Codex default model from `$CODEX_HOME/config.toml` is accepted as
    an additional availability signal only when it is one of the official IDs.

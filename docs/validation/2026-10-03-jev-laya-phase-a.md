@@ -181,7 +181,8 @@ role IDs; omitted roles and raw unqualified models are absent.
 - Whitespace check: `git diff --check` — passed.
 
 Auto policy remains read-only and fail-closed: only the official model/effort
-matrix and visible API-backed cache or active default-model signals materialize
+matrix and listed (`visibility: "list"`) API-backed cache or active
+default-model signals materialize
 `fast`, `balanced`, `deep`, and `frontier`; no runtime network/probe/write or
 mid-run model switching was added. Earlier authorized 2026-10-03 live receipts
 remain unchanged and are not model-qualification evidence for this refresh.
@@ -204,3 +205,14 @@ Codex executable, or credentials were used.
 The TOML metadata reader is bounded and read-only, rejects non-regular files,
 accepts only root-level active model assignments, skips escaped multiline
 content, and fails closed on ambiguous/unterminated multiline metadata.
+
+
+### Codex cache visibility token integration correction (2026-10-04)
+
+The actual Codex cache visibility tokens `list` (active) and `hide` (non-active)
+are normalized alongside the `visible`/`hidden` fixture aliases. This restores
+cache-backed `fast` role availability when Luna is listed; hidden reserve models
+remain non-active. No live or native Codex calls were made for this correction.
+
+- RED test commit: `2119b99bced1c7b7e8d485b176b488d37c5c77c0`.
+- GREEN focused test: `npm run build && node --test dist/test/models.test.js` — 7/7 passed.
