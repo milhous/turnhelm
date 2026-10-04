@@ -5,92 +5,81 @@ Status: approved design, implementation not started
 
 ## Goal
 
-Make Turnhelm's model/effort selection follow the current Codex capability
-surface without trusting arbitrary classifier strings, adding network work to
-normal task routing, or silently activating an unavailable model. Profile
-updates must be atomic, auditable, reversible to the last known-good snapshot,
-and safe for the active Codex provider.
+Automatically build Turnhelm's model/effort profiles from a small, validated
+capability policy at config-load time. The normal routing path must remain local,
+fast, deterministic, and free of network or paid discovery calls. Unknown,
+hidden, or model-incompatible pairs must never reach `codex exec`.
 
-## Evidence
+## Evidence and scope correction
 
-- Codex CLI `0.160.0` is installed and the active provider is the custom
-  `cliproxyapi` provider. `codex doctor --json` reports the provider and the
-  configured default model, but does not expose a supported-model command.
-- The local Codex model cache currently contains six entries: visible Luna,
-  GPT-5.6 Terra, GPT-5.6 Luna, GPT-5.5, plus hidden reserve and auto-review
-  entries. It does not contain Astra or GPT-6.1 Sol, so it is provider/cache
-  evidence rather than a complete authority for this installation.
-- The official model catalog identifies `gpt-6-astra`, `gpt-6.1-sol`, and
-  `gpt-6-luna`. Astra and 6.1 Sol support `low`, `medium`, `high`, `xhigh`,
-  and `max`; Luna additionally supports `none`:
+- Codex CLI `0.160.0` is installed with a custom `cliproxyapi` provider. The
+  CLI has no stable `models` subcommand; `codex doctor --json` reports provider
+  and config health but not a complete model catalog.
+- The local `models_cache.json` is provider/cache evidence, not a public API
+  contract. It currently lists six entries, including hidden reserve and
+  auto-review entries, and does not list Astra or GPT-6.1 Sol even though the
+  active installation can run GPT-6.1 Sol.
+- The official current model matrix is small and explicit: `gpt-6-astra`,
+  `gpt-6.1-sol`, and `gpt-6-luna`. Astra and 6.1 Sol support
+  `low/medium/high/xhigh/max`; Luna additionally supports `none`:
   <https://developers.openai.com/api/docs/models>,
   <https://developers.openai.com/api/docs/guides/reasoning>.
-- The current Turnhelm parser accepts arbitrary safe model/effort tokens and
-  does not validate model-specific effort compatibility. `buildCodexArgs`
-  passes the configured pair verbatim. Classifier output is already restricted
-  to own configured profile IDs.
+- The existing parser accepts arbitrary safe model/effort tokens and
+  `buildCodexArgs` passes them verbatim. The classifier already accepts only
+  own configured profile IDs.
 
-## Non-goals
+The previous proposal was too large: persistent snapshots, locks, fsync,
+scheduled refresh jobs, qualification commands, and provider probes would add
+new lifecycle and cost surfaces without a stable Codex catalog API. They are
+removed from this design.
 
-- No model selection after `codex exec` starts.
-- No model/effort cross-product generated at request time.
-- No per-task network discovery, paid qualification call, confidence score,
-  ensemble, bandit, catalog cache in the classifier, gateway, hook, or native
-  subagent routing.
-- No automatic mutation of `~/.config/turnhelm/config.json` or Codex user
-  configuration.
-- No activation of hidden, reserve, auto-review, legacy, or provider-unknown
-  models merely because they appear in a cache.
+## Decision
 
-## Recommended architecture
+Use one pure capability module and one in-memory profile materializer:
 
-### 1. Capability manifest
+1. A checked-in official capability table defines the supported current model
+   IDs and exact effort sets.
+2. A defensive, read-only parser may inspect
+   `$CODEX_HOME/models_cache.json` when present. It accepts only visible entries
+   with `supported_in_api: true` and a non-empty effort list. The cache can
+   confirm availability or add a visible candidate; it can never activate hidden
+   entries, override the official effort matrix, or remove the official table.
+3. The active Codex default model from `$CODEX_HOME/config.toml` is accepted as
+   an additional availability signal only when it is one of the official IDs.
+   This handles custom providers whose cache omits the configured default.
+4. Profile roles are generated in memory on every `loadConfig` call. No network,
+   subprocess, paid probe, snapshot write, lock, or user-config mutation occurs.
+5. Explicit `profileMode: "explicit"` remains available for tests and controlled
+   deployments. The shipped example opts into `profileMode: "auto"`; library
+   callers that omit the field retain explicit mode and must supply profiles.
 
-Add a versioned, schema-validated capability manifest containing:
+## Configuration contract
 
 ```ts
-type ModelCapability = {
-  model: string;
-  family: "frontier" | "balanced" | "fast";
-  supportedEfforts: string[];
-  source: "official" | "codex-cache" | "qualified";
-  visible: boolean;
-  qualifiedAt?: string;
-  codexVersion?: string;
-  provider?: string;
+type ProfileMode = "auto" | "explicit";
+type ProfileOverride = { description: string; model: string; effort: string };
+type RawConfig = {
+  backend: Backend;
+  layaUrl: string;
+  profileMode: ProfileMode;
+  profiles?: Record<string, ProfileOverride>;
+  fallbackProfile?: string;
+  hostedJev: { enabled: boolean };
 };
 ```
 
-The built-in official baseline is explicit and small:
+`parseRawConfig(value)` validates the file shape; `materializeConfig(raw,
+capabilities)` produces the runtime `Config`. `parseConfig(value)` remains a
+pure convenience for explicit-mode tests. In `explicit` mode, one to four
+profiles are required and existing safe-token validation remains unchanged; a
+provider may use a non-official but safe model ID in this deliberately explicit
+mode. In
+`auto` mode, `profiles` is optional and can override only the stable role IDs
+`fast`, `balanced`, `deep`, and `frontier`; overrides require an official
+model/effort pair and the model must be available in the local capability
+signals. Arbitrary profile IDs are rejected in auto mode.
 
-```text
-gpt-6-astra:   low, medium, high, xhigh, max       frontier
-gpt-6.1-sol:   low, medium, high, xhigh, max       balanced
-gpt-6-luna:    none, low, medium, high, xhigh, max fast
-```
-
-The local Codex cache is parsed read-only and can add a candidate only when it
-is visible, `supported_in_api` is true, and its effort list is non-empty. Hidden
-or system entries are discarded. Cache data cannot remove an official baseline
-or activate a candidate by itself.
-
-### 2. Qualification boundary
-
-New or changed provider/model pairs enter the active set only after an explicit
-qualification run. Qualification uses a fixed, non-user prompt, the selected
-model and one supported effort, `read-only` sandbox, no repository task data,
-no tools, a strict timeout, and scalar-only recording. It records exit status,
-model, effort, Codex version, provider identity, latency, and a boolean marker;
-it never stores prompts, responses, headers, credentials, or logs.
-
-Qualification is never performed inside `route` or `codex`. A refresh command or
-scheduled maintenance job may run it. If qualification fails, the candidate is
-not activated and the previous snapshot remains usable.
-
-### 3. Stable profile roles
-
-Profiles are role IDs, not raw classifier-selected model names. The generated
-active snapshot uses at most four roles:
+The generated role policy is deterministic:
 
 ```text
 fast     -> gpt-6-luna / low
@@ -99,69 +88,60 @@ deep     -> gpt-6.1-sol / high
 frontier -> gpt-6-astra / xhigh
 ```
 
-The role is activated only if its exact pair is qualified. If Astra is absent or
-fails qualification, `frontier` is omitted; the classifier cannot return it.
-If `deep` is unavailable, `balanced` is the only generated fallback. Existing
-`direct` remains direct and continues using Codex's default model; it never
-silently becomes Astra. The configured fallback profile must always point to an
-active role.
+A role is emitted only when its model is available according to the official
+matrix plus the local Codex signals. No cross-role substitution is performed:
+if Astra is unavailable, `frontier` is omitted; if 6.1 Sol is unavailable,
+`balanced` and `deep` are omitted. `fallbackProfile` defaults to `balanced`,
+then `fast` when `balanced` is absent, and must name an emitted role when set.
+`direct` remains direct and continues using the user's Codex default model; it
+does not silently become Astra.
 
-### 4. Snapshot and refresh behavior
-
-Store generated profiles in a separate, permission-restricted snapshot (not the
-user's primary config) with schema version, generated time, source hashes,
-Codex version/provider, qualification receipts, and active roles. Refresh writes
-to a temporary file, validates it completely, fsyncs/renames atomically, and
-keeps the prior snapshot if any step fails. Concurrent refreshes use a lock.
-
-Expose:
+## Data flow and failure behavior
 
 ```text
-turnhelm models status   # scalar active roles, age, source, and qualification state
-turnhelm models refresh  # refresh metadata and qualify new/changed pairs
+loadConfig
+  -> parse base fields and profileMode
+  -> read official capability table
+  -> best-effort read-only Codex cache/default model metadata
+  -> generate or validate stable role profiles in memory
+  -> validate fallbackProfile and return Config
+route/codex
+  -> classifier sees only emitted role IDs
+  -> one immutable (model, effort) pair reaches codex exec
 ```
 
-Normal routing reads the last-known-good snapshot with no network and no model
-probe. A stale snapshot remains usable until its configured expiry; it never
-blocks a task on discovery. A missing snapshot has no active roles and fails
-with an actionable refresh message rather than silently using unqualified
-pairs. Refresh is explicit or scheduled outside the task critical path, so
-latency and paid calls are bounded and observable. An automatic metadata refresh
-may read the local Codex cache when stale, but it cannot activate a new pair
-without a qualification receipt.
-
-### 5. Validation and failure policy
-
-- Every active pair must satisfy the model's exact effort list.
-- Unknown model IDs, unsupported efforts, hidden entries, malformed snapshots,
-  stale qualification receipts, and provider/version mismatches are rejected.
-- A classifier may return only `direct` or an active role ID. Arbitrary model
-  and effort values never reach Codex.
-- A refresh failure leaves the old snapshot untouched. If no valid snapshot
-  exists, routing fails before Codex starts with instructions to run the
-  qualification refresh; no built-in pair is implicitly trusted for a provider.
-- Existing secrets hygiene remains: classifier keys never reach Codex, and
-  refresh receipts contain scalar metadata only.
-
-## Testing strategy
-
-- Unit-test the official effort matrix, hidden/cache filtering, role generation,
-  schema/version checks, stale receipt rejection, fallback selection, and
-  model-specific effort validation.
-- Use a fake Codex executable and fake cache files for refresh/qualification
-  tests; assert no real network, prompts, keys, or user config mutation.
-- Test atomic-write failure and concurrent refresh locking.
-- Test that generated role IDs become the only classifier choices and that
-  `buildCodexArgs` receives the exact qualified pair.
-- Run the existing full suite, source coverage thresholds, dependency audit,
-  and a real qualification only as an explicitly authorized live gate.
+Cache absence, malformed cache JSON, unsupported cache schema, or unreadable
+Codex config is non-fatal: the resolver uses official IDs only when explicitly
+configured or when they are the active Codex default, otherwise omits the role.
+Auto mode with no emitted role fails at config load with an actionable error;
+it never silently falls back to an unverified model. No raw cache content,
+paths, credentials, prompts, or responses are logged.
+Model-access failures remain explicit child failures; they do not trigger an
+unbounded model search or an automatic second model.
 
 ## Security and performance invariants
 
-- No per-invocation network or discovery latency.
-- No unqualified or hidden model can enter the route chain.
-- No user task text is sent during qualification.
-- Snapshot writes are atomic and permission-restricted.
-- Last-known-good state survives provider outage, malformed metadata, and
-  interrupted refresh.
-- Profile selection remains one immutable `(model, effort)` pair per Codex run.
+- No per-invocation network, model probe, or paid request beyond the one
+  classifier call already required by the route.
+- Read-only cache/config inspection is size-bounded and defensive; malformed
+  metadata cannot alter the route or crash the process.
+- Hidden, reserve, auto-review, unknown, and effort-incompatible models never
+  enter the classifier criteria or Codex argv.
+- Profile selection remains one immutable `(model, effort)` pair per run.
+- Classifier keys remain absent from the Codex child environment.
+- No user config, Codex config, cache, or snapshot is modified.
+
+## Testing strategy
+
+- Unit-test the official matrix and every model-specific effort boundary.
+- Unit-test visible/hidden/cache filtering, active-default recognition,
+  malformed/oversized cache handling, auto role generation, explicit overrides,
+  fallback selection, and no-role failure.
+- Assert auto classifier criteria contain only emitted role IDs and
+  `buildCodexArgs` receives exact generated pairs.
+- Keep existing explicit test fixtures by setting `profileMode: "explicit"`.
+- Add a loader test proving cache/config reads are read-only and do not emit
+  secrets or raw metadata.
+- Run the full offline suite, coverage threshold, dependency audit, and diff
+  checks. Real model execution remains an explicitly separate live gate, not
+  part of profile generation.
