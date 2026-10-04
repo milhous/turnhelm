@@ -55,7 +55,7 @@ function readDefaultModel(home: string): string | undefined {
   for (const line of text.split(/\r?\n/)) {
     if (multiline) {
       const delimiter = multiline === "basic" ? '"""' : "'''";
-      const count = line.split(delimiter).length - 1;
+      const count = countTomlDelimiters(line, delimiter, multiline === "basic");
       if (count % 2 === 1) multiline = undefined;
       continue;
     }
@@ -72,12 +72,27 @@ function readDefaultModel(home: string): string | undefined {
     }
     const rhs = value.trimStart();
     if (rhs.startsWith('"""')) {
-      if ((rhs.split('"""').length - 1) % 2 === 1) multiline = "basic";
+      if (countTomlDelimiters(rhs, '"""', true) % 2 === 1) multiline = "basic";
     } else if (rhs.startsWith("'''")) {
-      if ((rhs.split("'''").length - 1) % 2 === 1) multiline = "literal";
+      if (countTomlDelimiters(rhs, "'''", false) % 2 === 1) multiline = "literal";
     }
   }
-  return assignments === 1 ? selected : undefined;
+  return !multiline && assignments === 1 ? selected : undefined;
+}
+
+function countTomlDelimiters(value: string, delimiter: string, escapes: boolean): number {
+  let count = 0;
+  let from = 0;
+  while (true) {
+    const index = value.indexOf(delimiter, from);
+    if (index < 0) return count;
+    let backslashes = 0;
+    if (escapes) {
+      for (let cursor = index - 1; cursor >= 0 && value[cursor] === "\\"; cursor--) backslashes++;
+    }
+    if (backslashes % 2 === 0) count++;
+    from = index + delimiter.length;
+  }
 }
 
 function readCachedModels(home: string): CodexSignals["cached"] {
