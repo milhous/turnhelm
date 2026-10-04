@@ -1,112 +1,233 @@
 # turnhelm
 
-Local-first task routing for Codex. Turnhelm chooses a validated model and
-reasoning-effort profile; Codex keeps its own authentication and provider.
+Local-first task routing for Codex. Turnhelm classifies a task, selects one
+validated model/reasoning-effort profile, and starts a separate Codex process
+with an explicit sandbox boundary.
 
-Copy `examples/config.json` to `~/.config/turnhelm/config.json`. Set
-`profileMode` to `auto` (the shipped example does) to materialize only the
-stable roles available to the local Codex installation. Set `backend` to
-`auto` for loopback-first routing: Laya runs locally before any hosted option.
-Hosted Jev is used only when `hostedJev.enabled` is true and
-`TURNHELM_ALLOW_HOSTED_JEV=1`. Phase A chooses one model/effort profile before
-Codex starts. Native
-subagent routing and the old Hook/Gateway experiments are unsupported.
+Turnhelm does **not** switch the model or permissions of the current Codex or
+Claude Code session. It is a parent-agent launcher: read-only by default,
+workspace writes only with an explicit `--write` command. Codex remains
+responsible for its own authentication and provider access.
 
-Auto capability profiles are generated in memory from this fixed policy:
+## What it provides
 
-| role | model / effort |
-| --- | --- |
-| `fast` | `gpt-6-luna` / `low` |
-| `balanced` | `gpt-6.1-sol` / `medium` |
-| `deep` | `gpt-6.1-sol` / `high` |
-| `frontier` | `gpt-6-astra` / `xhigh` |
+- **Capability-aware profiles** — auto mode materializes only official
+  model/effort pairs available to the local Codex installation.
+- **Local-first classification** — with `backend: auto`, Laya runs on loopback
+  first; hosted Jev is available only through a deliberate dual opt-in.
+- **Fail-closed routing** — invalid input, unavailable capabilities, classifier
+  failures, and missing fallbacks never trigger an unapproved model retry.
+- **Bounded child execution** — Codex receives either `read-only` (default) or
+  `workspace-write` (explicit) sandbox permissions.
+- **Shared agent skill** — Codex CLI and Claude Code use the same
+  `turnhelm-routing` instructions.
 
-The official effort matrix is `low`, `medium`, `high`, `xhigh`, `max` for
-`gpt-6-astra` and `gpt-6.1-sol`; `gpt-6-luna` additionally supports `none`.
-Roles are emitted only when the model is in that matrix and is supported by a
-visible (`list` in Codex cache metadata), API-backed entry in the read-only
-`$CODEX_HOME/models_cache.json` or is the official model in
-`$CODEX_HOME/config.toml`. Hidden (`hide`) or unknown metadata is ignored;
-malformed metadata is ignored safely. `balanced`, then `fast`, is selected as the
-automatic fallback; if no role is available, config loading fails closed
-instead of routing to an unqualified model. Explicit mode remains available
-for controlled deployments and test fixtures, including safe provider-specific
-model IDs such as the legacy `gpt-6-sol`; that legacy ID is not part of the
-auto policy.
+## Architecture
 
-Capability resolution performs no runtime network request, Codex subprocess or
-paid probe, persistent snapshot, daemon, or user-config mutation. The cache and
-default-model signals are bounded, read-only hints. `direct` remains unchanged:
-it emits no `--model` or reasoning-effort override, and a selected profile is
-bound to one immutable pair for that Codex run.
+```mermaid
+flowchart TB
+    U["User or agent"] --> CLI["turnhelm CLI"]
+    CLI --> CFG["Config loader"]
+    CFG --> SIG["Read-only Codex signals<br/>models_cache.json + config.toml"]
+    SIG --> PROFILES["Auto or explicit profiles"]
+    CLI --> GATE{"Task gate"}
+    PROFILES --> GATE
 
-## Phase A
+    GATE -->|continuation or overlong| FALLBACK["Fallback profile"]
+    GATE -->|eligible task| CLASSIFIER["System One classifier"]
+    CLASSIFIER -->|laya / auto| LAYA["Local Laya<br/>loopback HTTP"]
+    CLASSIFIER -->|jev / opted-in fallback| JEV["Hosted Jev<br/>dual opt-in"]
 
-Run `turnhelm route "task"` to inspect the selected profile without starting
-Codex. Run `turnhelm codex "task"` for read-only Codex execution, or
-`turnhelm codex --write "task"` for workspace-write. A backend failure uses
-only the configured `fallbackProfile`; without one, the task stops before
-Codex runs. Model-access failures do not trigger another model.
+    FALLBACK --> DECISION["Route decision"]
+    LAYA --> DECISION
+    JEV --> DECISION
 
-Continuation-only tasks and tasks longer than 2000 JavaScript UTF-16 code
-units stay local and require `fallbackProfile`. The direct classifier helpers
-(`classifyTask` and `chooseProfile`) reject those inputs, as well as invalid or
-blank tasks, before network work. Eligible classifier text is not truncated;
-the request builder is private and HTTP redirects are rejected.
-Classifier responses are streamed with a 65536-byte UTF-8 limit, independent
-of Content-Length; invalid encoding/JSON and oversized bodies fail generically.
-Non-success HTTP bodies are cancelled without reading; errors reveal only status.
-Only `direct` or an own configured profile ID is accepted.
-Joined CLI task text, including leading/trailing whitespace and newlines, is
-preserved for classification and Codex stdin; only blank-input validation trims.
-Codex completion waits for child/stdio closure: stdin failures cannot report
-success, nonzero child statuses are preserved, and spawn failures are controlled.
+    DECISION --> ROUTE["route: JSON inspection"]
+    DECISION --> CODEX["codex: separate child"]
+    CODEX --> READ["read-only (default)"]
+    CODEX --> WRITE["workspace-write (--write)"]
+```
 
-## Agent skills (Codex CLI + Claude Code)
+The capability resolver reads bounded local metadata only. It does not make a
+runtime network request, start a Codex subprocess, run a paid probe, persist a
+snapshot, or mutate user configuration.
 
-This repository ships one canonical shared skill at
-`.agents/skills/turnhelm-routing/SKILL.md`. Claude Code loads the same file
-through the checked-in symlink at `.claude/skills/turnhelm-routing`; keeping one
-source prevents Codex and Claude guidance from drifting.
+## Routing flow
 
-- **Codex CLI:** invoke `$turnhelm-routing` or ask the agent to use the
-  `turnhelm-routing` skill.
-- **Claude Code:** invoke `/turnhelm-routing` or let normal skill discovery
-  select it.
-- **Manual fallback:** from a checkout, run `npm run build`, then use
-  `node dist/src/cli.js route "<task>"` or
-  `node dist/src/cli.js codex "<task>"` when the `turnhelm` binary is not on
-  `PATH`.
+```mermaid
+sequenceDiagram
+    participant A as User / agent
+    participant T as Turnhelm
+    participant S as Codex signals
+    participant B as Configured classifier backend
+    participant C as Codex child
 
-The skill always recommends `turnhelm route` before a child run, defaults to
-read-only `turnhelm codex`, and requires explicit authorization for
-`turnhelm codex --write`. It does not switch the current Claude/Codex session's
-model, and it never enables hosted Jev automatically. Hosted Jev remains a
-dual opt-in (`hostedJev.enabled: true` plus
-`TURNHELM_ALLOW_HOSTED_JEV=1`) and still requires credentials and data-egress
-approval. See the [Codex skills guide](https://developers.openai.com/codex/skills),
-[Claude Code skills guide](https://code.claude.com/docs/en/skills), and
-[Agent Skills specification](https://agentskills.io/specification).
+    A->>T: route or codex "task"
+    T->>S: Read local capability metadata
+    S-->>T: Available official profiles
 
-## Development
+    alt Continuation or over 2000 UTF-16 units
+        T->>T: Select configured fallback
+    else Eligible task
+        T->>B: Classify task
+        Note over B: auto: Laya first; Jev only with both opt-ins
+        B-->>T: direct or profile
+        T->>T: Use fallback if classification fails
+    end
 
-Use Node.js >=22.8.0 (CI uses Node 24). Offline tests use dummy credentials,
-loopback fixtures, and a temporary Codex executable, never real Codex or hosted
-services:
+    alt route command
+        T-->>A: JSON decision; no Codex child
+    else codex command
+        T->>C: exec --sandbox read-only
+        C-->>A: Result and exit status
+    else codex --write after explicit approval
+        T->>C: exec --sandbox workspace-write
+        C-->>A: Result and exit status
+    end
+```
+
+## Quick start
+
+Requirements: Node.js `>=22.8.0` and a local Codex CLI installation.
 
 ```bash
 npm ci --ignore-scripts
+npm run build
+
+mkdir -p "$HOME/.config/turnhelm"
+cp examples/config.json "$HOME/.config/turnhelm/config.json"
+
+# Inspect the route without starting a Codex child.
+node dist/src/cli.js route "Review the authentication boundary"
+
+# Run a separate Codex child in read-only mode.
+node dist/src/cli.js codex "Review the authentication boundary"
+```
+
+If the package is installed or linked as a binary, use `turnhelm` instead of
+`node dist/src/cli.js`:
+
+```bash
+turnhelm route "Review the authentication boundary"
+turnhelm codex "Review the authentication boundary"
+```
+
+Use workspace writes only after authorizing the exact change:
+
+```bash
+turnhelm codex --write "Update only README.md with the approved architecture diagram"
+```
+
+## CLI
+
+| Command | Behavior | Child sandbox |
+| --- | --- | --- |
+| `turnhelm route "task"` | Print the selected route as JSON | No Codex child |
+| `turnhelm codex "task"` | Execute the selected route | `read-only` |
+| `turnhelm codex --write "task"` | Execute an explicitly approved change | `workspace-write` |
+
+`route` may call the configured classifier backend, so it is inspection-only
+with respect to Codex execution, not necessarily offline. A route decision is
+not permission to edit files. The word “continue” also does not grant write
+permission.
+
+## Profiles and model selection
+
+With `profileMode: "auto"`, Turnhelm generates these stable roles when their
+official pair is available from read-only local Codex signals:
+
+| Role | Model | Effort | Intended use |
+| --- | --- | --- | --- |
+| `fast` | `gpt-6-luna` | `low` | Small, localized edits |
+| `balanced` | `gpt-6.1-sol` | `medium` | Routine implementation and debugging |
+| `deep` | `gpt-6.1-sol` | `high` | Complex debugging and review |
+| `frontier` | `gpt-6-astra` | `xhigh` | Difficult reasoning and architecture |
+
+Hidden, unknown, malformed, or API-unsupported cache entries are ignored.
+Unavailable roles are omitted; if no official profile remains, configuration
+fails closed. Auto mode chooses `balanced`, then `fast`, as its fallback when
+available. A `direct` decision intentionally passes no model or effort
+override to Codex.
+
+## Configuration
+
+The default configuration path is
+`~/.config/turnhelm/config.json`. Set `TURNHELM_CONFIG` to use another file.
+The shipped [example configuration](examples/config.json) is safe by default:
+
+```json
+{
+  "backend": "auto",
+  "profileMode": "auto",
+  "layaUrl": "http://127.0.0.1:8765",
+  "hostedJev": { "enabled": false }
+}
+```
+
+| Option | Values | Notes |
+| --- | --- | --- |
+| `backend` | `auto`, `laya`, `jev` | `auto` tries loopback Laya before an opted-in Jev fallback. |
+| `profileMode` | `auto`, `explicit` | `auto` is recommended; explicit mode is for controlled profiles. |
+| `layaUrl` | HTTP loopback URL | Only `127.0.0.1` and `::1` are accepted. |
+| `fallbackProfile` | Profile ID | Optional in auto mode; required when a local fallback is needed in explicit mode. |
+| `hostedJev.enabled` | `true`, `false` | Must be paired with `TURNHELM_ALLOW_HOSTED_JEV=1`. |
+
+For explicit profiles, provide a bounded set of profile IDs with a description,
+model, and effort. Every auto-mode profile must use an official supported pair.
+
+## Security and data boundaries
+
+- Hosted Jev requires both `hostedJev.enabled: true` and
+  `TURNHELM_ALLOW_HOSTED_JEV=1`; it also requires `TYPESAFE_API_KEY`.
+- Local Laya may require `LAYA_API_KEY`. Never put credentials in a task,
+  committed configuration, or logs.
+- The task text is sent to the configured classifier before profile selection.
+  Remove secrets and sensitive data before routing, and review data residency,
+  cost, and consent before enabling a hosted backend.
+- Turnhelm strips classifier keys and `TURNHELM_CONFIG` from the Codex child
+  environment.
+- Classifier or model-access failures do not trigger an unapproved model retry.
+  Turnhelm uses the configured fallback or stops.
+- From a Turnhelm-managed Codex child, do not invoke `turnhelm codex` again;
+  execute the child task directly to avoid recursion.
+
+## Agent skills (Codex CLI + Claude Code)
+
+The canonical shared skill is
+`.agents/skills/turnhelm-routing/SKILL.md`. Claude Code uses the checked-in
+symlink at `.claude/skills/turnhelm-routing`, so both agents receive the same
+guidance.
+
+- **Codex CLI:** `$turnhelm-routing` or natural-language skill invocation.
+- **Claude Code:** `/turnhelm-routing` or normal skill discovery.
+
+The skill recommends inspecting with `route`, defaults to read-only execution,
+and requires explicit authorization for `--write`. It does not change the
+current session's model or enable hosted Jev automatically.
+
+## Development and verification
+
+```bash
+# Install dependencies and build.
+npm ci --ignore-scripts
+npm run build
+
+# Hermetic tests: do not use classifier credentials or hosted Jev.
 env -u TYPESAFE_API_KEY -u LAYA_API_KEY -u TURNHELM_ALLOW_HOSTED_JEV npm test
 env -u TYPESAFE_API_KEY -u LAYA_API_KEY -u TURNHELM_ALLOW_HOSTED_JEV npm run test:coverage
+
+# Dependency audit.
 npm audit --audit-level=high
 ```
 
-The final 2026-10-04 capability verification passed 217/217 tests; source
-coverage was 99.40% lines, 94.12% branches, and 100% functions. No new live
-calls were made; see [dated validation](docs/validation/2026-10-03-jev-laya-phase-a.md).
+The CI workflow runs the coverage gate and dependency audit on Node 24. The
+separate `npm run test:live` command is opt-in and requires real services and
+credentials; it is not part of offline verification. Historical boundary and
+live-test receipts are recorded in
+[`docs/validation/2026-10-03-jev-laya-phase-a.md`](docs/validation/2026-10-03-jev-laya-phase-a.md).
 
-Coverage includes every production module in `dist/src/**`, including CLI
-children, and enforces at least 80% lines, branches, and functions. The pinned
-offline CI workflow retains coverage and dependency-audit gates. The separate
-`test:live` command requires explicit approval, real services, and credentials;
-it is not part of offline verification.
+## Further reading
+
+- [Codex skills](https://developers.openai.com/codex/skills)
+- [Claude Code skills](https://code.claude.com/docs/en/skills)
+- [Agent Skills specification](https://agentskills.io/specification)
