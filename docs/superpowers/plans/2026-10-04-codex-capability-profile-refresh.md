@@ -209,7 +209,7 @@
 - Consumes the materialized `Config` and stable role IDs from Task 2.
 - Produces documented auto-profile behavior and complete offline verification.
 
-- [ ] **Step 1: Add RED launcher and live-harness contract tests.**
+- [x] **Step 1: Add RED launcher and live-harness contract tests.**
 
   Add assertions that `buildCodexArgs` emits exact model/effort pairs for
   `gpt-6-astra/xhigh`, `gpt-6.1-sol/high`, and `gpt-6-luna/low`, while direct
@@ -224,7 +224,7 @@
   npm run build && node --test dist/test/codex.test.js dist/test/cli.test.js
   ```
 
-- [ ] **Step 2: Update documentation without adding runtime machinery.**
+- [x] **Step 2: Update documentation without adding runtime machinery.**
 
   Document `profileMode: "auto"`, the four role mappings, official
   model-specific effort limits, cache/default-model read-only signals, the
@@ -232,7 +232,7 @@
   legacy `gpt-6-sol` profile examples as removed from the auto policy. Keep
   existing live evidence dated; do not claim a new live model qualification.
 
-- [ ] **Step 3: Run full GREEN gates and commit.**
+- [x] **Step 3: Run full GREEN gates and commit.**
 
   Run all of the following with classifier credentials unset:
 

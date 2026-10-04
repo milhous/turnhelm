@@ -1,7 +1,7 @@
 # Codex capability-driven profile refresh
 
 Date: 2026-10-04
-Status: approved design, implementation not started
+Status: implemented and verified offline (2026-10-04); no new live model qualification
 
 ## Goal
 
@@ -118,6 +118,11 @@ it never silently falls back to an unverified model. No raw cache content,
 paths, credentials, prompts, or responses are logged.
 Model-access failures remain explicit child failures; they do not trigger an
 unbounded model search or an automatic second model.
+
+The launcher consumes one emitted profile and pins its model and effort in a
+single `codex exec` invocation. `direct` emits no model or reasoning-effort
+override. Auto classifier criteria contain only emitted role IDs; raw models
+from omitted or unqualified roles never reach the classifier or route output.
 
 ## Security and performance invariants
 

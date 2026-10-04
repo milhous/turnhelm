@@ -79,8 +79,11 @@ feedback, or calibration and are intentionally future work here:
 <https://arxiv.org/abs/2603.07915>,
 <https://arxiv.org/abs/2508.21141>.
 
-Reasoning effort values are model-dependent. The MVP validates configured safe
-tokens but does not pretend that a universal effort enum exists:
+Reasoning effort values remain model-dependent. In `profileMode: "auto"`, the
+official matrix is explicit: Astra and 6.1 Sol accept `low`, `medium`, `high`,
+`xhigh`, and `max`; Luna additionally accepts `none`. Explicit mode still
+validates safe tokens for controlled provider-specific fixtures. The launcher
+passes one `(model, effort)` pair for a profile and no overrides for `direct`:
 <https://developers.openai.com/api/docs/guides/reasoning>.
 
 ## Configuration contract
@@ -184,6 +187,14 @@ private, and every classifier request rejects redirects with `redirect: "error"`
   key, or disabled hosted fallback uses `fallbackProfile` when configured;
   otherwise the command exits before Codex starts.
 - The fallback is not retried through another model or provider.
+
+When `profileMode: "auto"` is selected, config loading reads only bounded,
+read-only `$CODEX_HOME` cache/default-model signals and materializes the stable
+`fast`, `balanced`, `deep`, and `frontier` role IDs in memory. It performs no
+network discovery, subprocess probe, paid qualification call, snapshot write,
+daemon work, or user-config mutation. Hidden/cache-only/unknown models are
+excluded; if no official role is available, loading fails closed before the
+classifier or Codex child starts.
 
 ## Validation gate
 

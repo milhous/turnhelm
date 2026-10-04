@@ -3,12 +3,41 @@
 Local-first task routing for Codex. Turnhelm chooses a validated model and
 reasoning-effort profile; Codex keeps its own authentication and provider.
 
-Copy `examples/config.json` to `~/.config/turnhelm/config.json` and set model
-names your Codex account can use. Set `backend` to `auto` for loopback-first
-routing: Laya runs locally before any hosted option. Hosted Jev is used only
-when `hostedJev.enabled` is true and `TURNHELM_ALLOW_HOSTED_JEV=1`. Phase A
-chooses one configured model/effort profile before Codex starts. Native
+Copy `examples/config.json` to `~/.config/turnhelm/config.json`. Set
+`profileMode` to `auto` (the shipped example does) to materialize only the
+stable roles available to the local Codex installation. Set `backend` to
+`auto` for loopback-first routing: Laya runs locally before any hosted option.
+Hosted Jev is used only when `hostedJev.enabled` is true and
+`TURNHELM_ALLOW_HOSTED_JEV=1`. Phase A chooses one model/effort profile before
+Codex starts. Native
 subagent routing and the old Hook/Gateway experiments are unsupported.
+
+Auto capability profiles are generated in memory from this fixed policy:
+
+| role | model / effort |
+| --- | --- |
+| `fast` | `gpt-6-luna` / `low` |
+| `balanced` | `gpt-6.1-sol` / `medium` |
+| `deep` | `gpt-6.1-sol` / `high` |
+| `frontier` | `gpt-6-astra` / `xhigh` |
+
+The official effort matrix is `low`, `medium`, `high`, `xhigh`, `max` for
+`gpt-6-astra` and `gpt-6.1-sol`; `gpt-6-luna` additionally supports `none`.
+Roles are emitted only when the model is in that matrix and is supported by a
+visible, API-backed entry in the read-only `$CODEX_HOME/models_cache.json` or
+is the official model in `$CODEX_HOME/config.toml`. Missing, malformed, hidden,
+or unknown metadata is ignored. `balanced`, then `fast`, is selected as the
+automatic fallback; if no role is available, config loading fails closed
+instead of routing to an unqualified model. Explicit mode remains available
+for controlled deployments and test fixtures, including safe provider-specific
+model IDs such as the legacy `gpt-6-sol`; that legacy ID is not part of the
+auto policy.
+
+Capability resolution performs no runtime network request, Codex subprocess or
+paid probe, persistent snapshot, daemon, or user-config mutation. The cache and
+default-model signals are bounded, read-only hints. `direct` remains unchanged:
+it emits no `--model` or reasoning-effort override, and a selected profile is
+bound to one immutable pair for that Codex run.
 
 ## Phase A
 

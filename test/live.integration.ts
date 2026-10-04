@@ -3,6 +3,10 @@ import assert from "node:assert/strict";
 import { loadConfig, parseConfig } from "../src/config.js";
 import { classifyTask } from "../src/route.js";
 
+// This file is intentionally excluded from `npm test`; `npm run test:live` is
+// an explicit real-service gate. It never probes or qualifies models: the
+// loaded config's already-emitted role IDs are the only routing choices.
+
 const cases = [
   ["What is this repository called? Do not change files.", "direct"],
   ["这个项目叫什么？只回答，不改文件。", "direct"],
