@@ -73,8 +73,20 @@ test("reads only the root-level active model assignment from bounded TOML", asyn
   assert.equal(readCodexSignals({ CODEX_HOME: home }).defaultModel, undefined);
   await writeConfig('developer_instructions = """\nmodel = "gpt-6-astra"\n"""\n');
   assert.equal(readCodexSignals({ CODEX_HOME: home }).defaultModel, undefined);
+  await writeConfig('"developer_instructions" = """\nmodel = "gpt-6-astra"\n"""\nmodel = "gpt-6-luna"\n');
+  assert.equal(readCodexSignals({ CODEX_HOME: home }).defaultModel, "gpt-6-luna");
+  await writeConfig('developer_instructions = """one line"""\nmodel = "gpt-6-luna"\n');
+  assert.equal(readCodexSignals({ CODEX_HOME: home }).defaultModel, "gpt-6-luna");
   await writeConfig('model = "gpt-6-luna"\n[profiles.selected]\nmodel = "gpt-6-astra"\n');
   assert.equal(readCodexSignals({ CODEX_HOME: home }).defaultModel, "gpt-6-luna");
   await writeConfig('model = "gpt-6-luna"\nmodel = "gpt-6-astra"\n');
   assert.equal(readCodexSignals({ CODEX_HOME: home }).defaultModel, undefined);
+});
+
+test("ignores non-regular Codex metadata paths", async t => {
+  const home = await mkdtemp(join(tmpdir(), "turnhelm-nonfile-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  await mkdir(join(home, "models_cache.json"));
+  await mkdir(join(home, "config.toml"));
+  assert.deepEqual(readCodexSignals({ CODEX_HOME: home }), { cached: {} });
 });
