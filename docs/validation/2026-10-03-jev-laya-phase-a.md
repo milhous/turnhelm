@@ -175,7 +175,7 @@ default-model signal and verifies that classifier criteria contain only emitted
 role IDs; omitted roles and raw unqualified models are absent.
 
 - Test-only RED: `npm run build && node --test dist/test/codex.test.js dist/test/cli.test.js` — 25 passed, 1 expected failure (legacy `gpt-6-sol` expectation).
-- Hermetic GREEN: `npm test` — 208/208 passed; 0 failed, skipped, or cancelled.
+- Historical pre-final-review checkpoint: hermetic `npm test` — 208/208 passed; superseded by the final fix-wave receipt below.
 - Coverage GREEN: `env -u TYPESAFE_API_KEY -u LAYA_API_KEY -u TURNHELM_ALLOW_HOSTED_JEV npm run test:coverage` — 208/208 passed; source lines 99.55%, branches 92.14%, functions 100% (all production modules above 80%).
 - Dependency audit: `npm audit --audit-level=high` — 0 vulnerabilities.
 - Whitespace check: `git diff --check` — passed.
@@ -186,3 +186,21 @@ matrix and visible API-backed cache or active default-model signals materialize
 mid-run model switching was added. Earlier authorized 2026-10-03 live receipts
 remain unchanged and are not model-qualification evidence for this refresh.
 No paid/live rerun, credentials/settings change, history rewrite, or force push occurred.
+
+
+## Capability refresh final fix-wave receipt (2026-10-04)
+
+This receipt supersedes earlier capability-refresh test/coverage totals above;
+it does not change or rerun the dated live-service evidence. No live services,
+Codex executable, or credentials were used.
+
+- Final capability implementation: `56428636d3ed9f7f175736b9b26f4f4d8a06d4fd`.
+- Hermetic verification: `npm test` — 216/216 passed; 0 failed, skipped, or cancelled.
+- Coverage: `npm run test:coverage` — 216/216 passed; lines 99.00%, branches 93.36%, functions 100%.
+- Dependency audit: `npm audit --audit-level=high` — 0 vulnerabilities.
+- Whitespace check: `git diff --check` — passed.
+- Full implementation and RED/GREEN fix-wave evidence: `.git/sdd/capability-refresh/task-1-report.md`.
+
+The TOML metadata reader is bounded and read-only, rejects non-regular files,
+accepts only root-level active model assignments, skips escaped multiline
+content, and fails closed on ambiguous/unterminated multiline metadata.
