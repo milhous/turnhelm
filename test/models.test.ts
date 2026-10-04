@@ -92,3 +92,16 @@ test("ignores non-regular Codex metadata paths", async t => {
   await mkdir(join(home, "config.toml"));
   assert.deepEqual(readCodexSignals({ CODEX_HOME: home }), { cached: {} });
 });
+
+test("normalizes Codex list/hide visibility tokens", async t => {
+  const home = await mkdtemp(join(tmpdir(), "turnhelm-codex-visibility-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  await writeFile(join(home, "models_cache.json"), JSON.stringify({ models: [
+    { slug: "gpt-6-luna", visibility: "list", supported_in_api: true, supported_reasoning_levels: [{ effort: "low" }] },
+    { slug: "gpt-6-astra", visibility: "hide", supported_in_api: true, supported_reasoning_levels: [{ effort: "xhigh" }] }
+  ] }));
+  assert.deepEqual(readCodexSignals({ CODEX_HOME: home }).cached, {
+    "gpt-6-luna": { visible: true, supportedInApi: true, efforts: ["low"] },
+    "gpt-6-astra": { visible: false, supportedInApi: true, efforts: ["xhigh"] }
+  });
+});
