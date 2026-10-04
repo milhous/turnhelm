@@ -191,13 +191,14 @@ No paid/live rerun, credentials/settings change, history rewrite, or force push 
 
 ## Capability refresh final fix-wave receipt (2026-10-04)
 
-This receipt supersedes earlier capability-refresh test/coverage totals above;
+This final visibility-token receipt supersedes earlier capability-refresh
+receipts above (including the 216-test TOML/parser checkpoint);
 it does not change or rerun the dated live-service evidence. No live services,
 Codex executable, or credentials were used.
 
-- Final capability implementation: `fac0d6d57bd9fa7d8580fab0d42ce8ff6c2981b5` (TOML/parser safety fix wave included).
-- Fresh hermetic verification: `env -u TYPESAFE_API_KEY -u LAYA_API_KEY -u TURNHELM_ALLOW_HOSTED_JEV npm test` — 216/216 passed; 0 failed, skipped, or cancelled.
-- Fresh coverage: `env -u TYPESAFE_API_KEY -u LAYA_API_KEY -u TURNHELM_ALLOW_HOSTED_JEV npm run test:coverage` — 216/216 passed; lines 99.40%, branches 94.05%, functions 100%.
+- Final capability implementation: `41d2c1fffb8533b77fccb8674b6a9e5717d140d3` (Codex `list`/`hide` visibility token support).
+- Fresh hermetic verification: `env -u TYPESAFE_API_KEY -u LAYA_API_KEY -u TURNHELM_ALLOW_HOSTED_JEV npm test` — 217/217 passed; 0 failed, skipped, or cancelled.
+- Fresh coverage: `env -u TYPESAFE_API_KEY -u LAYA_API_KEY -u TURNHELM_ALLOW_HOSTED_JEV npm run test:coverage` — 217/217 passed; lines 99.40%, branches 94.12%, functions 100%.
 - Dependency audit: `npm audit --audit-level=high` — 0 vulnerabilities.
 - Whitespace check: `git diff --check` — passed.
 - Full implementation and RED/GREEN fix-wave evidence: `.git/sdd/capability-refresh/task-1-report.md`.
