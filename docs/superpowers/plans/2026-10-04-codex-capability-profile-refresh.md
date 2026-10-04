@@ -1,5 +1,7 @@
 # Codex Capability Profile Refresh Implementation Plan
 
+Status: complete and independently reviewed offline (2026-10-04). Final implementation `fac0d6d`; hermetic tests 216/216; coverage 99.40%/94.05%/100%; audit zero vulnerabilities; no live model qualification.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Generate safe `fast`/`balanced`/`deep`/`frontier` profiles from the official Codex model-effort matrix and read-only local Codex capability signals without adding runtime network or paid discovery work.
@@ -36,7 +38,7 @@
 - Produces `ModelCapability`, `CodexSignals`, `OFFICIAL_MODEL_CAPABILITIES`, `readCodexSignals(env?: NodeJS.ProcessEnv): CodexSignals`, and `isSupportedEffort(model: string, effort: string): boolean`.
 - `CodexSignals` contains only scalar model IDs and effort arrays: `{ defaultModel?: string; cached: Record<string, { visible: boolean; supportedInApi: boolean; efforts: string[] }> }`.
 
-- [ ] **Step 1: Write the failing capability and parser tests.**
+- [x] **Step 1: Write the failing capability and parser tests.**
 
   Create temporary `CODEX_HOME` directories per test. Add these exact cases:
 
@@ -71,7 +73,7 @@
   Expected: RED because the new module/functions do not yet exist. Record the
   failing command in the task report before editing production code.
 
-- [ ] **Step 2: Implement the minimal pure matrix and defensive reader.**
+- [x] **Step 2: Implement the minimal pure matrix and defensive reader.**
 
   Add the exact official table and a 1 MiB maximum file size. Read only:
   - `models_cache.json.models[]` entries with scalar `slug`, `visibility`,
@@ -84,7 +86,7 @@
   contents. Keep the module dependency-free and side-effect-free apart from
   bounded reads.
 
-- [ ] **Step 3: Run focused GREEN and commit.**
+- [x] **Step 3: Run focused GREEN and commit.**
 
   Run the same focused command and verify all capability/parser tests pass with
   clean output. Then run `git diff --check` and commit:
@@ -105,7 +107,7 @@
 - Consumes `readCodexSignals` and `isSupportedEffort` from Task 1.
 - Produces `ProfileMode = "auto" | "explicit"`, `RawConfig`, `parseRawConfig(value: unknown): RawConfig`, `materializeConfig(raw: RawConfig, signals: CodexSignals): Config`, and existing `parseConfig/loadConfig` behavior.
 
-- [ ] **Step 1: Add RED tests for raw config and role generation.**
+- [x] **Step 1: Add RED tests for raw config and role generation.**
 
   Extend fixtures with `profileMode: "explicit"` and add these tests before
   changing production code:
@@ -152,7 +154,7 @@
   profile IDs are rejected in auto mode. Run focused config/route/systemone
   tests and capture the intended RED failures.
 
-- [ ] **Step 2: Implement raw parsing and in-memory materialization.**
+- [x] **Step 2: Implement raw parsing and in-memory materialization.**
 
   Keep `parseRawConfig` responsible for common object/backend/loopback,
   `profileMode`, hosted-Jev, and optional raw profile shape checks. Keep
@@ -178,7 +180,7 @@
   `fast`; throw before routing if no role remains. Return a null-prototype
   profile map so inherited classifier choices remain impossible.
 
-- [ ] **Step 3: Run GREEN and commit.**
+- [x] **Step 3: Run GREEN and commit.**
 
   Run:
 

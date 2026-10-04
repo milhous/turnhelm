@@ -194,9 +194,9 @@ This receipt supersedes earlier capability-refresh test/coverage totals above;
 it does not change or rerun the dated live-service evidence. No live services,
 Codex executable, or credentials were used.
 
-- Final capability implementation: `56428636d3ed9f7f175736b9b26f4f4d8a06d4fd`.
-- Hermetic verification: `npm test` — 216/216 passed; 0 failed, skipped, or cancelled.
-- Coverage: `npm run test:coverage` — 216/216 passed; lines 99.00%, branches 93.36%, functions 100%.
+- Final capability implementation: `fac0d6d57bd9fa7d8580fab0d42ce8ff6c2981b5` (TOML/parser safety fix wave included).
+- Fresh hermetic verification: `env -u TYPESAFE_API_KEY -u LAYA_API_KEY -u TURNHELM_ALLOW_HOSTED_JEV npm test` — 216/216 passed; 0 failed, skipped, or cancelled.
+- Fresh coverage: `env -u TYPESAFE_API_KEY -u LAYA_API_KEY -u TURNHELM_ALLOW_HOSTED_JEV npm run test:coverage` — 216/216 passed; lines 99.40%, branches 94.05%, functions 100%.
 - Dependency audit: `npm audit --audit-level=high` — 0 vulnerabilities.
 - Whitespace check: `git diff --check` — passed.
 - Full implementation and RED/GREEN fix-wave evidence: `.git/sdd/capability-refresh/task-1-report.md`.
