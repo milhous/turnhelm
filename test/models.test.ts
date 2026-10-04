@@ -75,6 +75,8 @@ test("reads only the root-level active model assignment from bounded TOML", asyn
   assert.equal(readCodexSignals({ CODEX_HOME: home }).defaultModel, undefined);
   await writeConfig('"developer_instructions" = """\nmodel = "gpt-6-astra"\n"""\nmodel = "gpt-6-luna"\n');
   assert.equal(readCodexSignals({ CODEX_HOME: home }).defaultModel, "gpt-6-luna");
+  await writeConfig(['"developer_instructions" = """', 'foo \\"""', 'model = "gpt-6-astra"', '"""'].join("\n") + "\n");
+  assert.equal(readCodexSignals({ CODEX_HOME: home }).defaultModel, undefined);
   await writeConfig('developer_instructions = """one line"""\nmodel = "gpt-6-luna"\n');
   assert.equal(readCodexSignals({ CODEX_HOME: home }).defaultModel, "gpt-6-luna");
   await writeConfig('model = "gpt-6-luna"\n[profiles.selected]\nmodel = "gpt-6-astra"\n');
