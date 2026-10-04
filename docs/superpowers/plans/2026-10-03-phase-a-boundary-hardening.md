@@ -1,6 +1,6 @@
 # Phase A Boundary Hardening Implementation Plan
 
-Status: Tasks 1–3 implementation verified (2026-10-03); controller review/integration checklist remains pending. Hermetic tests: 192/192 on exact Node 22.8.0/npm 10.8.2, Node 24.21.0, and Node 26.5.0; source lines/branches/functions: 99.26%/93.79%/100%; audit: zero vulnerabilities. No new live run.
+Status: complete, independently reviewed, fast-forwarded to main and published (2026-10-04). Hermetic tests: 192/192 on exact Node 22.8.0/npm 10.8.2, Node 24.21.0, and Node 26.5.0; source lines/branches/functions: 99.26%/93.79%/100%; audit: zero vulnerabilities. Feature/main remote CI passed for reviewed runtime revision `c0e52ae`. No new live run. See the [integration receipt](../../validation/2026-10-03-jev-laya-phase-a.md#integration-result-2026-10-04).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -276,8 +276,8 @@ Status: Tasks 1–3 implementation verified (2026-10-03); controller review/inte
 
 ## Controller integration checklist
 
-- [ ] Task 1 spec/quality review accepted; Task 2 spec/quality review accepted.
-- [ ] Reconcile `.git/sdd/progress.md` with completed authorized live smoke and new hardening results.
-- [ ] Scan all unpublished Git history for secrets with redacted output; review final diff.
-- [ ] Obtain independent whole-branch review; fix any blocking findings and re-review.
-- [ ] Fetch and verify remote ancestry; normally push the reviewed feature branch and wait for offline CI to pass before fast-forwarding local main. Rerun offline verification, normally push main without force, and verify remote HEAD/CI.
+- [x] Tasks 1–3 spec/quality reviews accepted; no remaining review findings.
+- [x] Reconcile `.git/sdd/progress.md` with completed authorized live smoke and new hardening results.
+- [x] Scan all unpublished Git history for secrets with redacted output; review final diff.
+- [x] Obtain independent whole-branch review; fix blocking findings and accept re-review.
+- [x] Fetch and verify remote ancestry; normally push the reviewed feature branch and wait for offline CI before fast-forwarding local main. Rerun offline verification, normally push main without force, and verify remote HEAD/CI.

@@ -1,7 +1,7 @@
 # Turnhelm Phase A Jev/Laya model-effort routing design
 
 Date: 2026-10-03
-Status: implemented and validated (2026-10-03)
+Status: implemented and validated (2026-10-03); independently reviewed, integrated into main and published (2026-10-04)
 
 Dated evidence: the authorized 2026-10-03 real-service smoke passed 24/24 cases
 for each of Laya and Jev. Final offline boundary hardening passed 192/192 tests
@@ -219,4 +219,6 @@ smoke are complete. Subsequent boundary hardening shares local-only input
 policy, rejects redirects, and retains hermetic source-coverage and audit gates
 in pinned Node 24 CI. These changes affect only the Phase A decision boundary;
 they do not change Codex user configuration or native orchestration. Remote
-publication and integration remain controller-owned gates.
+publication and integration completed on 2026-10-04 by fast-forward and normal
+push, with feature/main offline CI passing for reviewed runtime revision
+`c0e52ae`. See the [integration receipt](../../validation/2026-10-03-jev-laya-phase-a.md#integration-result-2026-10-04).

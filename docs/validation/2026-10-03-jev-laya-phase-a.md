@@ -105,7 +105,8 @@ are controlled and completion waits for child/stdio closure, preserving nonzero
 child codes while refusing success after failed transfer. Fixtures are explicitly
 CommonJS-safe and all child executions remain temporary fixtures, never real Codex.
 The four-second classifier abort and existing fallback/opt-in policy are unchanged.
-Independent review and remote integration remain controller-owned gates.
+At this historical checkpoint, independent review and remote integration were
+still controller-owned gates; completion is recorded in the integration receipt below.
 
 ## Absent-stdin follow-up result (2026-10-03, historical)
 
@@ -148,4 +149,19 @@ streams prove zero pulls and cancellation, including a throwing cancel callback.
 - Dependency audits on all targets: zero vulnerabilities; diff-check passed.
 
 No new live calls or real Codex; earlier smoke/RED/GREEN receipts preserved.
-Independent review and remote integration remain controller-owned gates.
+At this historical checkpoint, independent review and remote integration were
+still controller-owned gates; completion is recorded in the integration receipt below.
+
+## Integration result (2026-10-04)
+
+- Independent final re-review: Ready to merge; no remaining Critical/Important findings.
+- Reviewed runtime revision: `c0e52ae52112e5813dc892a07d204222731c521d`.
+- [Feature offline CI](https://github.com/milhous/turnhelm/actions/runs/37129370062): passed before main integration.
+- Main integration: fast-forward, preserving every existing commit; normal non-force push.
+- Fresh pre-merge and post-merge offline test/coverage: 192/192; source lines/branches/functions 99.26%/93.79%/100%; dependency audit: zero vulnerabilities.
+- [Main offline CI](https://github.com/milhous/turnhelm/actions/runs/37165746606): passed; remote main matched the reviewed runtime revision.
+- Secret scan: all 38 commits checked; no unresolved secret. One exact fingerprint for known non-secret documentation prose was reviewed and narrowly excluded; no rule, file, or commit was broadly skipped.
+
+The final documentation closure changes no runtime behavior. Earlier real-service
+smoke and offline RED/GREEN results remain dated evidence, not new live results.
+No paid/live rerun, credentials/settings change, history rewrite, or force push occurred.

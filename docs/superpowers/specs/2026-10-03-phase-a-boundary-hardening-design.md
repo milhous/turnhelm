@@ -1,7 +1,7 @@
 # Phase A classifier boundary hardening
 
 Date: 2026-10-03
-Status: final-review safety fixes verified; controller review/integration pending (2026-10-03)
+Status: implemented, independently reviewed, integrated into main and published (2026-10-04)
 
 ## Goal and evidence
 
@@ -24,7 +24,8 @@ and functions; aggregate coverage was 99.10%, 93.39%, and 100%, respectively.
 Dependency audit reported zero vulnerabilities. CLI characterization uses only
 ephemeral loopback fixtures and a temporary executable, preserving child
 coverage. The authorized live smoke evidence is unchanged; no new live calls
-were made. Independent review and publication remain controller-owned gates.
+were made. Those initial receipts precede the accepted final review and the
+2026-10-04 integration receipt linked below.
 
 Final boundary verification passed 192/192 hermetic tests and coverage tests on
 exact Node 22.8.0 with bundled npm 10.8.2, official Node 24.21.0, and native
@@ -96,8 +97,8 @@ boundary without a second routing policy or additional dependencies.
 
 ## Final-review safety amendments
 
-The full unpublished-history review identified four concrete gaps to close
-before publication. These decisions use the user's delegated authority.
+The full unpublished-history review identified four concrete gaps, all closed
+and re-reviewed before publication. These decisions used the user's delegated authority.
 
 - The temporary extensionless Codex fixture must use explicit CommonJS-safe
   asynchronous code, not implicit module detection. Verify exact minimum Node
@@ -134,3 +135,13 @@ and require its offline CI to pass before fast-forwarding main. Use only
 fast-forward integration and a normal non-force push. If the remote has diverged, stop automatic publication
 and preserve both histories. Do not change credentials, branch protections, or
 user Codex configuration.
+
+## Integration state (2026-10-04)
+
+All implementation/task reviews and the independent whole-publication
+re-review are complete. Reviewed runtime revision `c0e52ae` passed feature CI,
+was fast-forwarded into main without rewriting history, passed post-merge
+offline tests/coverage and audit, and passed main CI after a normal push.
+The final documentation closure changes no runtime files. No paid/live rerun,
+credential change, or user Codex configuration change occurred. Details are in
+the [integration receipt](../../validation/2026-10-03-jev-laya-phase-a.md#integration-result-2026-10-04).
