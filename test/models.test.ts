@@ -1,0 +1,51 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { OFFICIAL_MODEL_CAPABILITIES, isSupportedEffort, readCodexSignals } from "../src/models.js";
+
+ test("official matrix exposes exact model-specific efforts", () => {
+  assert.deepEqual(OFFICIAL_MODEL_CAPABILITIES["gpt-6-astra"].efforts, ["low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(OFFICIAL_MODEL_CAPABILITIES["gpt-6.1-sol"].efforts, ["low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(OFFICIAL_MODEL_CAPABILITIES["gpt-6-luna"].efforts, ["none", "low", "medium", "high", "xhigh", "max"]);
+  assert.equal(isSupportedEffort("gpt-6-astra", "none"), false);
+  assert.equal(isSupportedEffort("gpt-6-luna", "none"), true);
+});
+
+test("reads only visible API-backed cache models and default model", async t => {
+  const home = await mkdtemp(join(tmpdir(), "turnhelm-models-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  await writeFile(join(home, "models_cache.json"), JSON.stringify({
+    models: [
+      { slug: "gpt-6-luna", visibility: "visible", supported_in_api: true, supported_reasoning_levels: [{ effort: "none" }, { effort: "low" }, { effort: "bogus" }] },
+      { slug: "gpt-6-astra", visibility: "hidden", supported_in_api: true, supported_reasoning_levels: [{ effort: "xhigh" }] },
+      { slug: "gpt-6.1-sol", visibility: "visible", supported_in_api: false, supported_reasoning_levels: [{ effort: "high" }] },
+      { slug: "private-secret", visibility: "visible", supported_in_api: true, supported_reasoning_levels: [{ effort: "max" }], token: "do-not-return" }
+    ], secret: "do-not-return"
+  }));
+  await writeFile(join(home, "config.toml"), `# comment\nmodel = "gpt-6.1-sol"\napi_key = "do-not-return"\n`);
+  const signals = readCodexSignals({ CODEX_HOME: home });
+  assert.equal(signals.defaultModel, "gpt-6.1-sol");
+  assert.deepEqual(signals.cached["gpt-6-luna"], { visible: true, supportedInApi: true, efforts: ["none", "low"] });
+  assert.deepEqual(signals.cached["gpt-6-astra"], { visible: false, supportedInApi: true, efforts: ["xhigh"] });
+  assert.equal(signals.cached["gpt-6.1-sol"], undefined);
+  assert.equal(signals.cached["private-secret"], undefined);
+  assert.equal(JSON.stringify(signals).includes("do-not-return"), false);
+  assert.equal(JSON.stringify(signals).includes(home), false);
+});
+
+test("ignores absent, oversized, malformed, and schema-incompatible metadata", async t => {
+  const absent = await mkdtemp(join(tmpdir(), "turnhelm-models-"));
+  t.after(() => rm(absent, { recursive: true, force: true }));
+  assert.deepEqual(readCodexSignals({ CODEX_HOME: absent }), { cached: {} });
+  await writeFile(join(absent, "models_cache.json"), "x".repeat(1024 * 1024 + 1));
+  await writeFile(join(absent, "config.toml"), "model = \"gpt-6-astra\"");
+  assert.deepEqual(readCodexSignals({ CODEX_HOME: absent }), { cached: {} });
+  await writeFile(join(absent, "models_cache.json"), "not json");
+  assert.deepEqual(readCodexSignals({ CODEX_HOME: absent }), { cached: {}, defaultModel: "gpt-6-astra" });
+  await writeFile(join(absent, "models_cache.json"), JSON.stringify({ models: [{ slug: 4, visibility: "visible", supported_in_api: true, supported_reasoning_levels: "bad" }] }));
+  await writeFile(join(absent, "config.toml"), "model = [\"gpt-6-astra\"]");
+  assert.deepEqual(readCodexSignals({ CODEX_HOME: absent }), { cached: {} });
+  assert.deepEqual(readCodexSignals({ CODEX_HOME: join(absent, "missing") }), { cached: {} });
+});
