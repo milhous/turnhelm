@@ -28,7 +28,9 @@ export function isSupportedEffort(model: string, effort: string): boolean {
 function readBounded(path: string): string | undefined {
   let descriptor: number | undefined;
   try {
-    const size = statSync(path).size;
+    const metadata = statSync(path);
+    if (!metadata.isFile()) return undefined;
+    const size = metadata.size;
     if (!Number.isSafeInteger(size) || size > MAX_METADATA_BYTES) return undefined;
     descriptor = openSync(path, "r");
     const buffer = Buffer.allocUnsafe(MAX_METADATA_BYTES + 1);
@@ -53,23 +55,27 @@ function readDefaultModel(home: string): string | undefined {
   for (const line of text.split(/\r?\n/)) {
     if (multiline) {
       const delimiter = multiline === "basic" ? '"""' : "'''";
-      const close = line.indexOf(delimiter);
-      if (close < 0) continue;
-      multiline = undefined;
+      const count = line.split(delimiter).length - 1;
+      if (count % 2 === 1) multiline = undefined;
       continue;
     }
     if (/^[ \t]*\[/.test(line)) break;
     if (/^[ \t]*#/.test(line)) continue;
-    const assignment = /^[ \t]*model[ \t]*=/.exec(line);
-    if (!assignment) {
-      const value = /^[ \t]*[A-Za-z0-9_-]+[ \t]*=[ \t]*(.*)$/.exec(line)?.[1] ?? "";
-      if (value.includes('"""')) multiline = "basic";
-      else if (value.includes("'''")) multiline = "literal";
-      continue;
+    const assignment = /^[ \t]*(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z0-9_-]+))[ \t]*=[ \t]*(.*)$/.exec(line);
+    if (!assignment) continue;
+    const bareKey = assignment[3];
+    const value = assignment[4];
+    if (bareKey === "model") {
+      assignments++;
+      const model = /^"([^"\r\n]*)"[ \t]*(?:#.*)?$/.exec(value)?.[1];
+      selected = model && Object.hasOwn(OFFICIAL_MODEL_CAPABILITIES, model) ? model : undefined;
     }
-    assignments++;
-    const model = /^[ \t]*model[ \t]*=[ \t]*"([^"\r\n]*)"[ \t]*(?:#.*)?$/.exec(line)?.[1];
-    selected = model && Object.hasOwn(OFFICIAL_MODEL_CAPABILITIES, model) ? model : undefined;
+    const rhs = value.trimStart();
+    if (rhs.startsWith('"""')) {
+      if ((rhs.split('"""').length - 1) % 2 === 1) multiline = "basic";
+    } else if (rhs.startsWith("'''")) {
+      if ((rhs.split("'''").length - 1) % 2 === 1) multiline = "literal";
+    }
   }
   return assignments === 1 ? selected : undefined;
 }
