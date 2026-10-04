@@ -75,15 +75,28 @@ test("descriptor-exhausted Codex spawn rejects without an unhandled process erro
   assert.deepEqual(JSON.parse(result.stdout), { error: "Codex could not start" });
 });
 
-test("profile route uses one-run model and effort", () => {
+for (const [model, effort] of [
+  ["gpt-6-astra", "xhigh"],
+  ["gpt-6.1-sol", "high"],
+  ["gpt-6-luna", "low"]
+] as const) {
+  test(`profile route pins ${model}/${effort} for one run`, () => {
+    assert.deepEqual(
+      buildCodexArgs({
+        kind: "profile",
+        source: "classifier",
+        profileId: "role",
+        profile: { description: "x", model, effort }
+      }, false),
+      ["exec", "--sandbox", "read-only", "--model", model, "--config", `model_reasoning_effort="${effort}"`, "-"]
+    );
+  });
+}
+
+test("direct route leaves Codex model and effort defaults intact", () => {
   assert.deepEqual(
-    buildCodexArgs({
-      kind: "profile",
-      source: "classifier",
-      profileId: "deep",
-      profile: { description: "x", model: "gpt-6-sol", effort: "high" }
-    }, false),
-    ["exec", "--sandbox", "read-only", "--model", "gpt-6-sol", "--config", 'model_reasoning_effort="high"', "-"]
+    buildCodexArgs({ kind: "direct", source: "classifier" }, false),
+    ["exec", "--sandbox", "read-only", "-"]
   );
 });
 

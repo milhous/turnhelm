@@ -13,7 +13,7 @@ const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 const genericError = "Turnhelm could not route this task; check config and backend availability.\n";
 const profile = { description: "Complex work", model: "test-model", effort: "high" };
 
-async function fixture(t: TestContext, choice = "direct") {
+async function fixture(t: TestContext, choice = "direct", profileMode: "explicit" | "auto" = "explicit") {
   const directory = await mkdtemp(join(tmpdir(), "turnhelm-cli-"));
   const requests: { url: string | undefined; method: string | undefined; body: unknown }[] = [];
   const server = createServer(async (request, response) => {
@@ -32,12 +32,20 @@ async function fixture(t: TestContext, choice = "direct") {
   const address = server.address();
   assert.ok(address && typeof address !== "string");
   const configPath = join(directory, "config.json");
-  const config = {
-    backend: "laya", layaUrl: `http://127.0.0.1:${address.port}`,
-    fallbackProfile: "deep", hostedJev: { enabled: false }, profiles: { deep: profile }
-  };
+  const config = profileMode === "auto"
+    ? {
+      backend: "auto", layaUrl: `http://127.0.0.1:${address.port}`,
+      profileMode: "auto", hostedJev: { enabled: false }, profiles: {}
+    }
+    : {
+      backend: "laya", layaUrl: `http://127.0.0.1:${address.port}`,
+      profileMode: "explicit", fallbackProfile: "deep", hostedJev: { enabled: false }, profiles: { deep: profile }
+    };
   await writeFile(configPath, JSON.stringify(config));
   await writeFile(join(directory, "package.json"), JSON.stringify({ type: "commonjs" }));
+  const codexHome = join(directory, "codex-home");
+  await mkdir(codexHome);
+  if (profileMode === "auto") await writeFile(join(codexHome, "config.toml"), 'model = "gpt-6.1-sol"\n');
   // This executable only observes the child boundary; it never invokes Codex.
   await writeFile(join(directory, "codex"), `#!${process.execPath}
 (async () => {
@@ -55,7 +63,7 @@ else process.exitCode = Number(process.env.TEST_CODEX_EXIT ?? 0);
   // Preserve NODE_V8_COVERAGE and other runner settings for child source coverage.
   const env: NodeJS.ProcessEnv = { ...process.env, PATH: directory + delimiter + (process.env.PATH ?? ""),
     TURNHELM_CONFIG: configPath, LAYA_API_KEY: "dummy-laya", TYPESAFE_API_KEY: "dummy-typesafe",
-    CODEX_HOME: join(directory, "codex-home") };
+    CODEX_HOME: codexHome };
   delete env.TURNHELM_ALLOW_HOSTED_JEV;
   delete env.TEST_CODEX_EXIT;
   delete env.TEST_CODEX_SIGNAL;
@@ -68,6 +76,21 @@ else process.exitCode = Number(process.env.TEST_CODEX_EXIT ?? 0);
     })
   };
 }
+
+test("CLI auto route exposes only emitted role IDs and selected profile data", { timeout: 20_000 }, async t => {
+  const f = await fixture(t, "deep", "auto");
+  const result = await f.run(["route", "Review this change."]);
+  assert.equal(result.stderr, "");
+  const observed = JSON.parse(result.stdout);
+  assert.deepEqual(observed, {
+    kind: "profile", source: "classifier", profileId: "deep",
+    profile: { description: "Complex debugging and review", model: "gpt-6-sol", effort: "high" }
+  });
+  const request = f.requests[0].body as { questions: { route: { criteria: Record<string, string> } } };
+  assert.deepEqual(Object.keys(request.questions.route.criteria), ["direct", "balanced", "deep"]);
+  assert.equal(JSON.stringify(request).includes("test-model"), false);
+  assert.equal(JSON.stringify(request).includes("gpt-6.1-sol"), false);
+});
 
 for (const choice of ["direct", "deep"]) {
   test(`CLI route emits ${choice} JSON without starting Codex`, { timeout: 20_000 }, async t => {
