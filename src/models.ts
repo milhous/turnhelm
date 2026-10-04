@@ -1,4 +1,5 @@
 import { closeSync, openSync, readSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 export type ModelCapability = { efforts: readonly string[] };
@@ -46,9 +47,31 @@ function readBounded(path: string): string | undefined {
 function readDefaultModel(home: string): string | undefined {
   const text = readBounded(join(home, "config.toml"));
   if (text === undefined) return undefined;
-  const match = /^[ \t]*model[ \t]*=[ \t]*"([^"\r\n]*)"[ \t]*(?:#.*)?$/m.exec(text);
-  const model = match?.[1];
-  return model && Object.hasOwn(OFFICIAL_MODEL_CAPABILITIES, model) ? model : undefined;
+  let multiline: "basic" | "literal" | undefined;
+  let assignments = 0;
+  let selected: string | undefined;
+  for (const line of text.split(/\r?\n/)) {
+    if (multiline) {
+      const delimiter = multiline === "basic" ? '"""' : "'''";
+      const close = line.indexOf(delimiter);
+      if (close < 0) continue;
+      multiline = undefined;
+      continue;
+    }
+    if (/^[ \t]*\[/.test(line)) break;
+    if (/^[ \t]*#/.test(line)) continue;
+    const assignment = /^[ \t]*model[ \t]*=/.exec(line);
+    if (!assignment) {
+      const value = /^[ \t]*[A-Za-z0-9_-]+[ \t]*=[ \t]*(.*)$/.exec(line)?.[1] ?? "";
+      if (value.includes('"""')) multiline = "basic";
+      else if (value.includes("'''")) multiline = "literal";
+      continue;
+    }
+    assignments++;
+    const model = /^[ \t]*model[ \t]*=[ \t]*"([^"\r\n]*)"[ \t]*(?:#.*)?$/.exec(line)?.[1];
+    selected = model && Object.hasOwn(OFFICIAL_MODEL_CAPABILITIES, model) ? model : undefined;
+  }
+  return assignments === 1 ? selected : undefined;
 }
 
 function readCachedModels(home: string): CodexSignals["cached"] {
@@ -80,8 +103,9 @@ function readCachedModels(home: string): CodexSignals["cached"] {
 }
 
 export function readCodexSignals(env: NodeJS.ProcessEnv = process.env): CodexSignals {
-  const home = env.CODEX_HOME;
-  if (typeof home !== "string" || !home) return { cached: {} };
+  const home = typeof env.CODEX_HOME === "string" && env.CODEX_HOME
+    ? env.CODEX_HOME
+    : join(typeof env.HOME === "string" && env.HOME ? env.HOME : homedir(), ".codex");
   const cached = readCachedModels(home);
   const defaultModel = readDefaultModel(home);
   return defaultModel === undefined ? { cached } : { defaultModel, cached };

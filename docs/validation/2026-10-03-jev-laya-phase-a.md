@@ -5,7 +5,7 @@ Date: 2026-10-03
 ## Commands
 
 ```bash
-npm test
+env -u LAYA_API_KEY -u TYPESAFE_API_KEY -u TURNHELM_ALLOW_HOSTED_JEV npm test
 TURNHELM_ALLOW_HOSTED_JEV=1 npm run test:live
 npm audit --audit-level=high
 git diff --check
