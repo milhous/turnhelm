@@ -1,0 +1,3 @@
+interface:
+  display_name: "Turnhelm Routing"
+  short_description: "Safely inspect and run Turnhelm-routed Codex tasks"

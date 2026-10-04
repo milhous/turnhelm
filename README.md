@@ -62,6 +62,32 @@ preserved for classification and Codex stdin; only blank-input validation trims.
 Codex completion waits for child/stdio closure: stdin failures cannot report
 success, nonzero child statuses are preserved, and spawn failures are controlled.
 
+## Agent skills (Codex CLI + Claude Code)
+
+This repository ships one canonical shared skill at
+`.agents/skills/turnhelm-routing/SKILL.md`. Claude Code loads the same file
+through the checked-in symlink at `.claude/skills/turnhelm-routing`; keeping one
+source prevents Codex and Claude guidance from drifting.
+
+- **Codex CLI:** invoke `$turnhelm-routing` or ask the agent to use the
+  `turnhelm-routing` skill.
+- **Claude Code:** invoke `/turnhelm-routing` or let normal skill discovery
+  select it.
+- **Manual fallback:** from a checkout, run `npm run build`, then use
+  `node dist/src/cli.js route "<task>"` or
+  `node dist/src/cli.js codex "<task>"` when the `turnhelm` binary is not on
+  `PATH`.
+
+The skill always recommends `turnhelm route` before a child run, defaults to
+read-only `turnhelm codex`, and requires explicit authorization for
+`turnhelm codex --write`. It does not switch the current Claude/Codex session's
+model, and it never enables hosted Jev automatically. Hosted Jev remains a
+dual opt-in (`hostedJev.enabled: true` plus
+`TURNHELM_ALLOW_HOSTED_JEV=1`) and still requires credentials and data-egress
+approval. See the [Codex skills guide](https://developers.openai.com/codex/skills),
+[Claude Code skills guide](https://code.claude.com/docs/en/skills), and
+[Agent Skills specification](https://agentskills.io/specification).
+
 ## Development
 
 Use Node.js >=22.8.0 (CI uses Node 24). Offline tests use dummy credentials,
@@ -75,9 +101,8 @@ env -u TYPESAFE_API_KEY -u LAYA_API_KEY -u TURNHELM_ALLOW_HOSTED_JEV npm run tes
 npm audit --audit-level=high
 ```
 
-The 2026-10-03 final boundary verification passed 192/192 tests on exact Node
-22.8.0 (bundled npm 10.8.2), Node 24.21.0, and Node 26.5.0; source coverage was
-99.26% lines, 93.79% branches, and 100% functions on each target. No new live
+The final 2026-10-04 capability verification passed 217/217 tests; source
+coverage was 99.40% lines, 94.12% branches, and 100% functions. No new live
 calls were made; see [dated validation](docs/validation/2026-10-03-jev-laya-phase-a.md).
 
 Coverage includes every production module in `dist/src/**`, including CLI
