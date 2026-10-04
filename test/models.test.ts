@@ -49,3 +49,32 @@ test("ignores absent, oversized, malformed, and schema-incompatible metadata", a
   assert.deepEqual(readCodexSignals({ CODEX_HOME: absent }), { cached: {} });
   assert.deepEqual(readCodexSignals({ CODEX_HOME: join(absent, "missing") }), { cached: {} });
 });
+
+test("uses temporary HOME/.codex when CODEX_HOME is not set", async t => {
+  const home = await mkdtemp(join(tmpdir(), "turnhelm-home-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const codex = join(home, ".codex");
+  await mkdir(codex);
+  await writeFile(join(codex, "models_cache.json"), JSON.stringify({ models: [
+    { slug: "gpt-6-luna", visibility: "visible", supported_in_api: true, supported_reasoning_levels: [{ effort: "low" }] }
+  ] }));
+  await writeFile(join(codex, "config.toml"), 'model = "gpt-6.1-sol"\n');
+  assert.deepEqual(readCodexSignals({ HOME: home }), {
+    defaultModel: "gpt-6.1-sol",
+    cached: { "gpt-6-luna": { visible: true, supportedInApi: true, efforts: ["low"] } }
+  });
+});
+
+test("reads only the root-level active model assignment from bounded TOML", async t => {
+  const home = await mkdtemp(join(tmpdir(), "turnhelm-toml-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const writeConfig = (value: string) => writeFile(join(home, "config.toml"), value);
+  await writeConfig('[profiles.not_selected]\nmodel = "gpt-6-astra"\n');
+  assert.equal(readCodexSignals({ CODEX_HOME: home }).defaultModel, undefined);
+  await writeConfig('developer_instructions = """\nmodel = "gpt-6-astra"\n"""\n');
+  assert.equal(readCodexSignals({ CODEX_HOME: home }).defaultModel, undefined);
+  await writeConfig('model = "gpt-6-luna"\n[profiles.selected]\nmodel = "gpt-6-astra"\n');
+  assert.equal(readCodexSignals({ CODEX_HOME: home }).defaultModel, "gpt-6-luna");
+  await writeConfig('model = "gpt-6-luna"\nmodel = "gpt-6-astra"\n');
+  assert.equal(readCodexSignals({ CODEX_HOME: home }).defaultModel, undefined);
+});

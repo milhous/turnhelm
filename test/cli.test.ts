@@ -89,7 +89,8 @@ test("CLI auto route exposes only emitted role IDs and selected profile data", {
   const request = f.requests[0].body as { questions: { route: { criteria: Record<string, string> } } };
   assert.deepEqual(Object.keys(request.questions.route.criteria), ["direct", "balanced", "deep"]);
   assert.equal(JSON.stringify(request).includes("test-model"), false);
-  assert.equal(JSON.stringify(request).includes("gpt-6.1-sol"), false);
+  assert.equal(Object.hasOwn(request.questions.route.criteria, "frontier"), false);
+  assert.equal(JSON.stringify(request).includes("gpt-6-astra"), false);
 });
 
 for (const choice of ["direct", "deep"]) {

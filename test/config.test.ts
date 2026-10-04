@@ -124,3 +124,34 @@ test("explicit mode still accepts safe synthetic model fixtures", () => {
   }, { cached: {} });
   assert.equal(config.profiles.test.model, "provider-test");
 });
+
+test("auto mode accepts an available official override", () => {
+  const config = parseConfig({
+    backend: "auto", profileMode: "auto", layaUrl: "http://127.0.0.1:8765",
+    hostedJev: { enabled: false }, profiles: { deep: { description: "Custom", model: "gpt-6-astra", effort: "max" } }
+  }, { defaultModel: "gpt-6-astra", cached: {} });
+  assert.deepEqual(config.profiles.deep, { description: "Custom", model: "gpt-6-astra", effort: "max" });
+});
+
+test("auto mode rejects unavailable official override", () => {
+  assert.throws(() => parseConfig({
+    backend: "auto", profileMode: "auto", layaUrl: "http://127.0.0.1:8765",
+    hostedJev: { enabled: false }, profiles: { fast: { description: "x", model: "gpt-6-luna", effort: "low" } }
+  }, { cached: {} }), /not available/);
+});
+
+test("rejects invalid profile mode", () => {
+  assert.throws(() => parseConfig({ ...base, profileMode: "guess" }), /profileMode/);
+});
+
+test("explicit mode validates fallback profile", () => {
+  assert.throws(() => parseConfig({ ...base, fallbackProfile: "unknown" }), /fallbackProfile/);
+});
+
+test("auto mode rejects fallback unavailable by emission and invalid fallback identifiers", () => {
+  const onlyFast = { cached: { "gpt-6-luna": { visible: true, supportedInApi: true, efforts: ["low"] } } };
+  const auto = { backend: "auto", profileMode: "auto", layaUrl: "http://127.0.0.1:8765", hostedJev: { enabled: false }, profiles: {} };
+  assert.throws(() => parseConfig({ ...auto, fallbackProfile: "deep" }, onlyFast), /fallbackProfile/);
+  assert.throws(() => parseConfig({ ...auto, fallbackProfile: "bad id" }, onlyFast), /fallbackProfile/);
+  assert.equal(parseConfig(auto, onlyFast).fallbackProfile, "fast");
+});
