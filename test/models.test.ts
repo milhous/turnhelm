@@ -40,12 +40,12 @@ test("ignores absent, oversized, malformed, and schema-incompatible metadata", a
   t.after(() => rm(absent, { recursive: true, force: true }));
   assert.deepEqual(readCodexSignals({ CODEX_HOME: absent }), { cached: {} });
   await writeFile(join(absent, "models_cache.json"), "x".repeat(1024 * 1024 + 1));
-  await writeFile(join(absent, "config.toml"), "model = \"gpt-6-astra\"");
+  await writeFile(join(absent, "config.toml"), "x".repeat(1024 * 1024 + 1));
   assert.deepEqual(readCodexSignals({ CODEX_HOME: absent }), { cached: {} });
   await writeFile(join(absent, "models_cache.json"), "not json");
-  assert.deepEqual(readCodexSignals({ CODEX_HOME: absent }), { cached: {}, defaultModel: "gpt-6-astra" });
-  await writeFile(join(absent, "models_cache.json"), JSON.stringify({ models: [{ slug: 4, visibility: "visible", supported_in_api: true, supported_reasoning_levels: "bad" }] }));
   await writeFile(join(absent, "config.toml"), "model = [\"gpt-6-astra\"]");
+  assert.deepEqual(readCodexSignals({ CODEX_HOME: absent }), { cached: {} });
+  await writeFile(join(absent, "models_cache.json"), JSON.stringify({ models: [{ slug: 4, visibility: "visible", supported_in_api: true, supported_reasoning_levels: "bad" }] }));
   assert.deepEqual(readCodexSignals({ CODEX_HOME: absent }), { cached: {} });
   assert.deepEqual(readCodexSignals({ CODEX_HOME: join(absent, "missing") }), { cached: {} });
 });
