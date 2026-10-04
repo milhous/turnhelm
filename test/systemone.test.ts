@@ -7,6 +7,7 @@ import { chooseProfile } from "../src/systemone.js";
 
 const base = {
   backend: "laya",
+  profileMode: "explicit",
   layaUrl: "http://127.0.0.1:8765",
   fallbackProfile: "deep",
   hostedJev: { enabled: false },
@@ -15,6 +16,26 @@ const base = {
     deep: { description: "Complex work", model: "gpt-6-sol", effort: "high" }
   }
 } as const;
+
+test("auto profile descriptions become classifier criteria", async () => {
+  const config = parseConfig({
+    backend: "laya", profileMode: "auto", layaUrl: "http://127.0.0.1:8765",
+    hostedJev: { enabled: false }, profiles: {}
+  }, {
+    defaultModel: "gpt-6.1-sol",
+    cached: { "gpt-6-luna": { visible: true, supportedInApi: true, efforts: ["low"] } }
+  });
+  await withFetch(async (_input, options) => {
+    const body = JSON.parse(String(options?.body));
+    assert.deepEqual(body.questions.route.criteria, {
+      direct: "No coding, debugging, review, or file-change work",
+      fast: config.profiles.fast.description,
+      balanced: config.profiles.balanced.description,
+      deep: config.profiles.deep.description
+    });
+    return decisionResponse("deep");
+  }, async () => { assert.equal(await chooseProfile(config, "Investigate this issue."), "deep"); });
+});
 
 const environmentKeys = ["TYPESAFE_API_KEY", "LAYA_API_KEY", "TURNHELM_ALLOW_HOSTED_JEV"] as const;
 let previousEnvironment: (string | undefined)[];

@@ -4,6 +4,7 @@ import { parseConfig } from "../src/config.js";
 
 const base = {
   backend: "laya",
+  profileMode: "explicit",
   hostedJev: { enabled: false },
   layaUrl: "http://127.0.0.1:8765",
   fallbackProfile: "deep",
@@ -45,4 +46,81 @@ test("defaults hosted Jev to disabled", () => {
 
 test("rejects malformed hostedJev", () => {
   assert.throws(() => parseConfig({ ...base, hostedJev: { enabled: "yes" } }), /hostedJev/);
+});
+
+test("auto mode emits only available stable roles", () => {
+  const config = parseConfig({
+    backend: "auto",
+    profileMode: "auto",
+    layaUrl: "http://127.0.0.1:8765",
+    hostedJev: { enabled: false },
+    profiles: {},
+    fallbackProfile: undefined
+  }, {
+    defaultModel: "gpt-6.1-sol",
+    cached: {
+      "gpt-6-luna": { visible: true, supportedInApi: true, efforts: ["low", "medium", "high", "xhigh", "max"] }
+    }
+  });
+  assert.deepEqual(Object.keys(config.profiles), ["fast", "balanced", "deep"]);
+  assert.equal(config.profiles.fast.model, "gpt-6-luna");
+  assert.equal(config.profiles.deep.effort, "high");
+  assert.equal(config.fallbackProfile, "balanced");
+  assert.equal(config.profiles.fast.description, "Small localized edits");
+  assert.equal(config.profiles.balanced.description, "Balanced implementation and routine debugging");
+  assert.equal(config.profiles.deep.description, "Complex debugging and review");
+});
+
+test("auto mode ignores hidden cached models", () => {
+  const config = parseConfig({
+    backend: "auto", profileMode: "auto", layaUrl: "http://127.0.0.1:8765",
+    hostedJev: { enabled: false }, profiles: {}
+  }, {
+    defaultModel: "gpt-6.1-sol",
+    cached: { "gpt-6-luna": { visible: false, supportedInApi: true, efforts: ["low"] } }
+  });
+  assert.deepEqual(Object.keys(config.profiles), ["balanced", "deep"]);
+});
+
+test("auto mode rejects an override with an unsupported effort", () => {
+  assert.throws(() => parseConfig({
+    backend: "auto", profileMode: "auto", layaUrl: "http://127.0.0.1:8765",
+    hostedJev: { enabled: false },
+    profiles: { frontier: { description: "x", model: "gpt-6-astra", effort: "none" } }
+  }, { defaultModel: "gpt-6-astra", cached: {} }), /effort/);
+});
+
+test("auto mode rejects arbitrary profile IDs", () => {
+  assert.throws(() => parseConfig({
+    backend: "auto", profileMode: "auto", layaUrl: "http://127.0.0.1:8765",
+    hostedJev: { enabled: false }, profiles: { custom: { description: "x", model: "gpt-6-luna", effort: "low" } }
+  }, { defaultModel: "gpt-6-luna", cached: {} }), /profile ID/);
+});
+
+test("auto mode has no silent role when no official model is available", () => {
+  assert.throws(() => parseConfig({
+    backend: "auto", profileMode: "auto", layaUrl: "http://127.0.0.1:8765",
+    hostedJev: { enabled: false }, profiles: {}
+  }, { cached: {} }), /no available profiles/);
+});
+
+test("auto mode chooses balanced then fast as the fallback", () => {
+  const balanced = parseConfig({
+    backend: "auto", profileMode: "auto", layaUrl: "http://127.0.0.1:8765",
+    hostedJev: { enabled: false }, profiles: {}
+  }, { defaultModel: "gpt-6.1-sol", cached: {} });
+  assert.equal(balanced.fallbackProfile, "balanced");
+  const fast = parseConfig({
+    backend: "auto", profileMode: "auto", layaUrl: "http://127.0.0.1:8765",
+    hostedJev: { enabled: false }, profiles: {}
+  }, { cached: { "gpt-6-luna": { visible: true, supportedInApi: true, efforts: ["low"] } } });
+  assert.equal(fast.fallbackProfile, "fast");
+});
+
+test("explicit mode still accepts safe synthetic model fixtures", () => {
+  const config = parseConfig({
+    backend: "auto", profileMode: "explicit", layaUrl: "http://127.0.0.1:8765",
+    hostedJev: { enabled: false }, profiles: { test: { description: "x", model: "provider-test", effort: "custom" } }
+  }, { cached: {} });
+  assert.equal(config.profiles.test.model, "provider-test");
 });

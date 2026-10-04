@@ -5,9 +5,23 @@ import { classifyTask, resolvePhaseARoute } from "../src/route.js";
 
 const config = parseConfig({
   backend: "laya",
+  profileMode: "explicit",
   layaUrl: "http://127.0.0.1:8765",
   fallbackProfile: "deep",
   profiles: { deep: { description: "Complex work", model: "gpt-6-sol", effort: "high" } }
+});
+
+test("auto profiles are stable and use a null-prototype map", () => {
+  const auto = parseConfig({
+    backend: "auto", profileMode: "auto", layaUrl: "http://127.0.0.1:8765",
+    hostedJev: { enabled: false }, profiles: {}
+  }, {
+    defaultModel: "gpt-6.1-sol",
+    cached: { "gpt-6-luna": { visible: true, supportedInApi: true, efforts: ["low"] } }
+  });
+  assert.deepEqual(Object.keys(auto.profiles), ["fast", "balanced", "deep"]);
+  assert.equal(Object.getPrototypeOf(auto.profiles), null);
+  assert.equal(Object.hasOwn(auto.profiles, "frontier"), false);
 });
 
 const environmentKeys = ["TYPESAFE_API_KEY", "LAYA_API_KEY", "TURNHELM_ALLOW_HOSTED_JEV"] as const;
