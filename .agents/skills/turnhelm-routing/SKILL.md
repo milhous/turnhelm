@@ -43,7 +43,7 @@ session.
    preserve unrelated user changes.
 
 If the checkout is not installed as a `turnhelm` binary, build first with
-`npm run build` and use `node dist/src/cli.js ...` for the same commands.
+`pnpm run build` and use `node dist/src/cli.js ...` for the same commands.
 
 ## Routing contract
 

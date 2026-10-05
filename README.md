@@ -88,11 +88,12 @@ sequenceDiagram
 
 ## Quick start
 
-Requirements: Node.js `>=22.8.0` and a local Codex CLI installation.
+Requirements: Node.js `>=22.8.0`, pnpm `10.12.1` (pinned in `package.json`),
+and a local Codex CLI installation.
 
 ```bash
-npm ci --ignore-scripts
-npm run build
+pnpm install --frozen-lockfile --ignore-scripts
+pnpm run build
 
 mkdir -p "$HOME/.config/turnhelm"
 cp examples/config.json "$HOME/.config/turnhelm/config.json"
@@ -209,19 +210,19 @@ current session's model or enable hosted Jev automatically.
 
 ```bash
 # Install dependencies and build.
-npm ci --ignore-scripts
-npm run build
+pnpm install --frozen-lockfile --ignore-scripts
+pnpm run build
 
 # Hermetic tests: do not use classifier credentials or hosted Jev.
-env -u TYPESAFE_API_KEY -u LAYA_API_KEY -u TURNHELM_ALLOW_HOSTED_JEV npm test
-env -u TYPESAFE_API_KEY -u LAYA_API_KEY -u TURNHELM_ALLOW_HOSTED_JEV npm run test:coverage
+env -u TYPESAFE_API_KEY -u LAYA_API_KEY -u TURNHELM_ALLOW_HOSTED_JEV pnpm test
+env -u TYPESAFE_API_KEY -u LAYA_API_KEY -u TURNHELM_ALLOW_HOSTED_JEV pnpm run test:coverage
 
 # Dependency audit.
-npm audit --audit-level=high
+pnpm audit --audit-level high
 ```
 
 The CI workflow runs the coverage gate and dependency audit on Node 24. The
-separate `npm run test:live` command is opt-in and requires real services and
+separate `pnpm run test:live` command is opt-in and requires real services and
 credentials; it is not part of offline verification. Historical boundary and
 live-test receipts are recorded in
 [`docs/validation/2026-10-03-jev-laya-phase-a.md`](docs/validation/2026-10-03-jev-laya-phase-a.md).
