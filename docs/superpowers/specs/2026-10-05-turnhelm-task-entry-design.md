@@ -1,7 +1,7 @@
 # Turnhelm task entry routing design
 
 Date: 2026-10-05
-Status: design approved in discussion; written specification awaiting user review; not implemented
+Status: approved design re-reviewed for execution planning; not implemented
 
 ## Goal and scope
 
@@ -147,13 +147,24 @@ Use the existing System One choice protocol: `POST /v1/systemone`, with
 `typed-decisions` for Laya and `jev-latest` for Jev. The request contains the exact
 task text and six bounded choice criteria. Remove the old `direct` outcome and
 fallback-profile behavior. Consume the documented `answers.route` choice; it must
-be a string matching one of the six configured IDs. Never interpret returned
-instructions as authority to alter execution.
+use this exact envelope, with an own string `choice` matching one of the six IDs:
+
+```json
+{"answers":{"route":{"type":"choice","choice":"frontier_max"}}}
+```
+
+Reject a bare-string route, arrays, missing fields, unknown IDs, and inherited
+profile names. Returned model/effort, commands, or instructions are not execution
+authority. Validate at the classifier boundary before constructing a decision.
 
 Apply these bounds:
 
-- Task text: at most 8192 UTF-8 bytes. Reject invalid UTF-8, NUL, blank input, and
-  continuation-only text such as "continue" or "do the above" before any request.
+- Task text: at most 8192 UTF-8 bytes. Reject invalid UTF-8, NUL, and blank input.
+  For deterministic continuation rejection, compare the whole trimmed input
+  against `continue`, `go on`, `proceed`, `do the above`, `继续`, `接着做`,
+  `按刚才的方案继续`, and `按上面做`, allowing trailing whitespace or `. ! 。 ！`.
+  Meaningful longer tasks beginning with these words are accepted. This detects
+  known continuation-only forms, not semantic completeness of arbitrary tasks.
   Preserve accepted text without trimming, truncating, or summarizing it.
 - Classification response: at most 8192 bytes actually received, regardless of
   `Content-Length`. Read and decode incrementally; cancel and clean up rejected
@@ -168,10 +179,18 @@ Apply these bounds:
   or invalid choice is a failed attempt. Exhaustion stops before Codex starts.
   User cancellation never triggers Jev failover or execution.
 
+Cleanup is best-effort and bounded: destroy the operation's request/response on
+failure, never await an unbounded response cancellation before failing over or
+returning. Cancellation remains distinguishable from a backend timeout/error.
+
 Laya accepts only origins at `127.0.0.1` or `::1`, without URL credentials, query,
 or fragment. Requests must not follow redirects or divert loopback traffic
 through an environment proxy. Jev uses the fixed HTTPS origin
 `https://api.typesafe.ai` with normal certificate verification and no redirects.
+Use a small explicitly direct `node:http`/`node:https` transport with per-request
+agents; do not add a generic networking framework or assume ordinary fetch is
+immune to proxy environment settings. Cover enabled proxy environments in tests,
+per [Node's documented proxy behavior](https://nodejs.org/learn/http/enterprise-network-configuration).
 
 Do not read repository files, chat history, or environment contents to build a
 classifier context. Users should describe the task and reference project paths
@@ -189,13 +208,19 @@ turnhelm run --project /path/to/project < task.txt
 
 Stdin is the preferred input. A single quoted positional task is also supported;
 supplying both nonempty piped task text and a positional task is a usage error.
-An empty closed pipe does not count as a second task. Do not join positional
-arguments or silently append piped input. Stdin reduces process-argument exposure but does not
+An empty closed pipe does not count as a second task. With TTY stdin, accept a
+positional task immediately; bare `run` is a usage error, not an EOF-delimited
+interactive prompt. Only read non-TTY stdin when checking dual-source conflicts.
+Do not join positional arguments or silently append piped input. Stdin reduces process-argument exposure but does not
 make task content confidential from authorized classifiers or Codex.
 
 Before contacting classifiers, check project configuration, task validity,
 eligible backends, a Git worktree, and a resolvable compatible Codex executable.
 Keep `init` and `doctor` callable even when run prerequisites are missing.
+Share bounded version/help and Git inspection between run and doctor, without
+invoking either command from the other. Scrub classifier credentials from these
+non-inference subprocesses too. Resolve executable paths from the caller's PATH;
+PATH resolution is not proof that an untrusted executable is authentic.
 
 Resolve the worker executable once. Use an argument array with `shell: false`,
 the selected project root, and the exact validated model/effort from the original
@@ -203,9 +228,10 @@ configuration snapshot. Send the original task through stdin; do not reread
 configuration or classify again after inspection.
 
 The first release targets Codex CLI 0.160.0 or newer and requires its documented
-execution controls. Pin `--sandbox read-only` by default; only this invocation's
-`--write` changes it to `workspace-write`. Do not use sandbox, approval, hook-trust,
-or security-rule bypass flags. Preserve stricter applicable client restrictions.
+execution controls. Set the child process working directory to the selected root
+and pin `--sandbox read-only` by default; only this invocation's `--write` changes
+it to `workspace-write`. Do not use sandbox, approval, hook-trust, or security-rule
+bypass flags. Preserve stricter applicable client restrictions.
 
 Use `--ephemeral`, JSONL output, and per-invocation `agents.enabled=false` to keep
 one worker rather than native multi-agent orchestration. JSONL and ephemeral
@@ -234,14 +260,38 @@ stdin was not delivered. Cancel the operation's owned processes on interruption.
 Never automatically rerun with a different model, effort, or permission, and never
 roll back user workspace files after partial execution.
 
+Initial execution support is macOS/Linux. Start the worker in an owned process
+group, drain both output pipes concurrently, and stop that group on cancellation,
+invalid event transport, or parent-output `EPIPE`. Send TERM, wait at most one
+second, then KILL if still alive; wait on `close`, not only `exit`, and remove
+timers/listeners on completion. Never discover or terminate unrelated processes.
+Parent SIGINT/SIGTERM exits with 130/143; internal transport failure exits one.
+Retain the existing early spawn-error listener and failed-stdin-transfer checks.
+Do not add a platform process manager or an overall model-execution timeout.
+
 ## Output and token evidence
 
 Parse worker events incrementally, not by retaining the conversation. Use a
-bounded JSONL reader with a maximum 1 MiB event; protocol failure is reported
-without an automatic rerun. Render completed agent messages to stdout and
+bounded JSONL reader with a maximum 1 MiB event, measured before UTF-8 decoding;
+malformed JSON, invalid UTF-8, oversized frames, or truncated nonempty final frames
+stop the owned worker and are reported without an automatic rerun. Render
+completed agent messages to stdout and
 diagnostics or tool progress to stderr. Tool progress exposes event type/status,
 not raw tool inputs or results. Keep only bounded transport state and
 normalized usage counters; do not save raw event streams as Turnhelm logs.
+
+Pipe and concurrently drain worker stderr without retaining or relaying its raw
+contents. Emit fixed sanitized categories, not arbitrary stderr or native error
+messages. Unknown well-formed JSONL events are ignored or reduced to a known
+type/status; do not build a reasoning/tool renderer, transcript store, or plugin
+output system. Intentional agent-message text is user output, not a diagnostic.
+
+Execution success requires stdin delivery, process exit zero, a final successful
+`turn.completed`, and no terminal `turn.failed` or transport/cancellation failure.
+A `turn.failed` stops the worker even if its process would exit zero. An `error`
+event is surfaced as a fixed category, never raw text; it does not by itself
+override a later valid terminal event. Neither event success nor process success
+is proof that task acceptance checks passed.
 
 Emit a compact completion receipt to stderr containing selected backend and
 profile, model/effort, backend attempt counts and outcomes, routing and execution
@@ -256,6 +306,13 @@ classifier does not expose usable token accounting, report Codex execution usage
 and classifier request counts separately; do not label that an exact total for
 the entire routed task. Do not fetch live pricing, estimate an undocumented token
 count, or build a billing database.
+
+Keep the most recent completed event's valid nonnegative integer usage snapshot;
+never blindly sum repeated completion snapshots. For multiple completions or
+unknown accounting scope, label the run-total scope `unverified` and expose only
+the reported snapshot. Invalid/missing usage degrades accounting, not an otherwise
+valid execution. Exact whole-run benefit claims require confirmed accounting
+scope for the supported client; do not infer that external tool fees are included.
 
 A clean process exit means execution completed, not that the requested change
 passed acceptance. Acceptance comes from task-specific checks or user review.
@@ -303,6 +360,12 @@ and configuration before activating the AGENTS block. This is not a multi-file
 transaction: report partial failure accurately and clean up only unchanged files
 created and owned by that operation. Never recursively remove a user directory.
 Detect concurrent edits before replacing a file.
+
+Revalidate existing parents and file identity/content immediately before each
+replacement. This detects observable changes; Node pathname checks and per-file
+rename are not a race-free filesystem sandbox. Init assumes a trusted project
+without hostile concurrent directory mutation. Refuse detected races rather than
+adding locks, a journal, installation history, or platform-specific filesystem APIs.
 
 Init does not install packages, initialize Git, start Laya, acquire credentials,
 publish the package, write global settings, or claim a generated template proves
@@ -370,6 +433,8 @@ resolve them relative to its module location, never project cwd or a movable
 source-checkout symlink. Test a packed installation in an unrelated project
 without access to the source checkout. Preserve `private: true` unless publication
 is separately authorized; local/tarball installation does not require publishing.
+Ship the canonical `.agents/skills/turnhelm-routing` files directly, plus one
+starter config asset; do not maintain duplicate copies of the same skill.
 
 Keep pnpm, the current Node runtime floor, and the existing hermetic coverage/audit
 workflow. Add dependencies only for a concrete need. Do not add a daemon, gateway,
@@ -391,14 +456,17 @@ Required cases include:
 2. Both eligible backends, each sole backend, no eligible backend, unauthorized
    Jev, Laya success, and one Laya failure followed by one Jev attempt.
 3. Shared deadline, body reading timeout, cancellation, redirects, declared vs
-   actual body size, invalid UTF-8/JSON/choice, and zero worker launches on failure.
+   actual body size, direct transport under proxy env, exact nested choice
+   envelope, invalid UTF-8/JSON/choice, bounded cleanup, and zero worker launches.
 4. UTF-8 task limits, whitespace preservation, blank/continuation-only input,
    stdin/positional conflicts, and zero classifier calls on local rejection.
 5. Immutable decision-to-execution binding, executable/root/sandbox arguments,
    native-agent disable control, ephemeral mode, secret stripping, recursion
    rejection before classification, spawn/stdin failures, and child exit status.
 6. Bounded event parsing, partial/missing usage, no duplicate cached/reasoning
-   accounting, controlled protocol failure, and no sensitive diagnostic records.
+   accounting, completion/failed-event evidence, unknown valid events, stderr
+   sentinel suppression, stdout `EPIPE`, forced shutdown of an ignoring owned
+   group, and no sensitive diagnostic records.
 7. Init dry-run, identical repeats, user-content/CRLF/mode preservation, existing
    config, ownership conflicts, invalid markers, symlinked ancestors/leaves,
    concurrent edits, and truthful partial-failure cleanup.
@@ -406,6 +474,13 @@ Required cases include:
    call or repair, stale metadata, and no cached probe-driven routing policy.
 9. Explicit roots, paths with spaces, nested projects/worktrees, non-Git setup
    reporting, packaged assets, and clean installation outside this checkout.
+
+The existing TypeScript build compiles every test. Stage internal new contracts
+without accepting legacy formats, then cut the CLI over and remove obsolete
+exports/behavior tests. Migrate affected fixtures in the same task as each changed
+seam; do not suppress strict typechecking or discard boundary regression cases to
+make focused tests run. All intermediate changes remain in an implementation
+worktree until the final legacy-code removal and strict full-suite gate.
 
 Source coverage must remain at least 80% for lines, branches, and functions. Run
 the hermetic tests/coverage, dependency audit, and diff checks before an
@@ -430,5 +505,6 @@ classification accuracy is established by this specification.
 This commit records the approved design only. It does not implement the new
 commands, install project artifacts, change global configuration, probe services,
 execute models, or publish anything. The user must review the written
-specification before an implementation plan is prepared. Implementation and paid
-benefit trials require their own subsequent authorization.
+specification and execution plan before implementation starts. This revision was
+requested to fill gaps and remove unnecessary mechanisms; it does not authorize
+implementation or paid benefit trials, which require subsequent authorization.
