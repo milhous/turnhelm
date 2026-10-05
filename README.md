@@ -28,15 +28,15 @@ responsible for its own authentication and provider access.
 flowchart TB
     U["User or agent"] --> CLI["turnhelm CLI"]
     CLI --> CFG["Config loader"]
-    CFG --> SIG["Read-only Codex signals<br/>models_cache.json + config.toml"]
+    CFG --> SIG["Read-only Codex signals (models_cache.json + config.toml)"]
     SIG --> PROFILES["Auto or explicit profiles"]
     CLI --> GATE{"Task gate"}
     PROFILES --> GATE
 
     GATE -->|continuation or overlong| FALLBACK["Fallback profile"]
     GATE -->|eligible task| CLASSIFIER["System One classifier"]
-    CLASSIFIER -->|laya / auto| LAYA["Local Laya<br/>loopback HTTP"]
-    CLASSIFIER -->|jev / opted-in fallback| JEV["Hosted Jev<br/>dual opt-in"]
+    CLASSIFIER -->|"laya / auto"| LAYA["Local Laya (loopback HTTP)"]
+    CLASSIFIER -->|"jev / opted-in fallback"| JEV["Hosted Jev (dual opt-in)"]
 
     FALLBACK --> DECISION["Route decision"]
     LAYA --> DECISION
@@ -70,13 +70,13 @@ sequenceDiagram
         T->>T: Select configured fallback
     else Eligible task
         T->>B: Classify task
-        Note over B: auto: Laya first; Jev only with both opt-ins
+        Note over B: auto: Laya first, Jev only with both opt-ins
         B-->>T: direct or profile
         T->>T: Use fallback if classification fails
     end
 
     alt route command
-        T-->>A: JSON decision; no Codex child
+        T-->>A: JSON decision, no Codex child
     else codex command
         T->>C: exec --sandbox read-only
         C-->>A: Result and exit status
