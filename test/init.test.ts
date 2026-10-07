@@ -520,6 +520,55 @@ test("cleanup reads owned files only within the per-target bound", async (t) => 
   assert.equal(child.configExists, true);
 });
 
+test("unknown-version markers are a conflict, not a masked install", async (t) => {
+  const root = await tempProject(t, { agents: "<!-- turnhelm:begin v2 -->\n# prior owner\n" });
+  const before = await snapshot(root);
+  const dry = await initProject(root, { dryRun: true });
+  assert.equal(dry.code, 1);
+  assert.equal(dry.error, "conflict");
+  assert.deepEqual(dry.applied, []);
+  assert.deepEqual(dry.planned, []);
+  const result = await initProject(root, { dryRun: false });
+  assert.equal(result.code, 1);
+  assert.equal(result.error, "conflict");
+  assert.deepEqual(result.applied, []);
+  assert.deepEqual(await snapshot(root), before);
+});
+
+test("an unknown marker outside a valid v1 block is not masked by it", async (t) => {
+  const root = await tempProject(t, {
+    agents: "<!-- turnhelm:begin v2 -->\n# prior owner\n" + (await readTemplates()).agentsBlock + "\n",
+  });
+  const before = await snapshot(root);
+  const dry = await initProject(root, { dryRun: true });
+  assert.equal(dry.code, 1);
+  assert.equal(dry.error, "conflict");
+  assert.deepEqual(dry.applied, []);
+  assert.deepEqual(await snapshot(root), before);
+});
+
+test("unknown namespace markers fail closed in every shape", async (t) => {
+  const block = (await readTemplates()).agentsBlock;
+  for (const agents of [
+    "<!-- turnhelm:begin v2 -->\n<!-- turnhelm:end v2 -->\n",
+    block + "\n<!-- turnhelm:end -->\n",
+    "<!-- turnhelm:end -->\n" + block,
+  ]) {
+    const root = await tempProject(t, { agents });
+    const result = await initProject(root, { dryRun: true });
+    assert.equal(result.code, 1, "expected conflict for: " + JSON.stringify(agents));
+    assert.equal(result.error, "conflict");
+    assert.deepEqual(result.applied, []);
+  }
+});
+
+test("user prose about markers is not an owned marker", async (t) => {
+  const root = await tempProject(t, { agents: "The docs mention turnhelm:begin v9 in plain text.\n" });
+  const result = await initProject(root, { dryRun: true });
+  assert.equal(result.code, 0);
+  assert.ok(result.planned.includes("AGENTS.md"));
+});
+
 test("init refuses a missing project root without creating it", async (t) => {
   const base = await mkdtemp(join(tmpdir(), "turnhelm-init-"));
   t.after(() => rm(base, { recursive: true, force: true }));

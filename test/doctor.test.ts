@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { initProject } from "../src/init.js";
+import { readTemplates } from "../src/assets.js";
 import { doctorProject } from "../src/doctor.js";
 import { PROFILE_IDS } from "../src/config.js";
 import type { ChoiceRequest, RequestSpec } from "../src/systemone.js";
@@ -126,6 +127,29 @@ test("missing config fails config and skips downstream checks", async (t) => {
   assert.equal(byId.get("instructions")?.status, "warn");
   assert.equal(result.code, 1);
   assert.equal(count(), 0);
+});
+
+// D11/E13: a Turnhelm marker with an unrecognized version must fail closed —
+// never classified as "absent", never masked by an adjacent legal v1 block.
+test("doctor fails instructions on an unknown-version marker", async (t) => {
+  const root = await tempDir(t, "turnhelm-doctor-project-");
+  await writeFile(join(root, "AGENTS.md"), "<!-- turnhelm:begin v2 -->\n# prior owner\n");
+  const bin = await fakeBin(t);
+  const result = await doctorProject(root, { probe: false, env: await doctorEnv(t, bin) });
+  const byId = new Map(result.checks.map(check => [check.id, check]));
+  assert.equal(byId.get("instructions")?.status, "fail");
+  assert.equal(byId.get("assets")?.status, "warn");
+});
+
+test("doctor does not let a legal v1 block mask an unknown marker", async (t) => {
+  const root = await tempDir(t, "turnhelm-doctor-project-");
+  const { agentsBlock } = await readTemplates();
+  await writeFile(join(root, "AGENTS.md"), "<!-- turnhelm:begin v2 -->\n# prior owner\n" + agentsBlock + "\n");
+  const bin = await fakeBin(t);
+  const result = await doctorProject(root, { probe: false, env: await doctorEnv(t, bin) });
+  const byId = new Map(result.checks.map(check => [check.id, check]));
+  assert.equal(byId.get("instructions")?.status, "fail");
+  assert.equal(byId.get("assets")?.status, "warn");
 });
 
 // E5: a corrupted config must not un-verify independently inspectable
