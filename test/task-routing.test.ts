@@ -261,6 +261,72 @@ const EXPECTED_CRITERIA = {
 };
 const EXPECTED_INSTRUCTIONS = "Choose the lightest profile that meets the task's requirements, judged by uncertainty, coupled constraints, required verification, and the consequences of an incorrect result; never by prompt length, file count, or keywords such as security, architecture, or deep analysis.";
 
+test("a late throwing failure past its budget is timeout evidence", async () => {
+  const c = parseProjectConfig({ ...JSON.parse(JSON.stringify(fixtureConfig())), routingTimeoutMs: 100 });
+  const r = await routeTask("Prove the invariants", c, {
+    env: fakeEnv,
+    request: async () => {
+      const until = performance.now() + 150;
+      while (performance.now() < until) { /* block so deadline timers cannot fire */ }
+      throw new Error("TEST_PRIVATE_SENTINEL");
+    }
+  });
+  assert.ok(r.status === "failed");
+  assert.equal(r.attempts.length, 1);
+  assert.equal(r.attempts[0].outcome, "timeout");
+  assert.ok(!("decision" in r));
+});
+
+test("a late invalid choice past its budget is timeout evidence", async () => {
+  const c = parseProjectConfig({ ...JSON.parse(JSON.stringify(fixtureConfig())), routingTimeoutMs: 100 });
+  const r = await routeTask("Prove the invariants", c, {
+    env: fakeEnv,
+    request: async () => {
+      const until = performance.now() + 150;
+      while (performance.now() < until) { /* block so deadline timers cannot fire */ }
+      return {};
+    }
+  });
+  assert.ok(r.status === "failed");
+  assert.equal(r.attempts[0].outcome, "timeout");
+});
+
+test("an elapsed-budget Laya failure keeps its share and still fails over", async () => {
+  const base = fixtureConfig();
+  const c = parseProjectConfig({ ...base, routingTimeoutMs: 400, backends: { ...base.backends, jev: { enabled: true } } });
+  const calls: string[] = [];
+  const r = await routeTask("Prove the invariants", c, {
+    env: fakeEnv,
+    request: async s => {
+      calls.push(s.backend);
+      if (s.backend === "laya") {
+        const until = performance.now() + 150;
+        while (performance.now() < until) { /* block past the min(1000, total/4) share */ }
+        throw new Error("TEST_PRIVATE_SENTINEL");
+      }
+      return decisionReply("deep");
+    }
+  });
+  assert.ok(r.status === "selected");
+  assert.deepEqual(calls, ["laya", "jev"]);
+  assert.deepEqual(r.decision.attempts.map(a => a.outcome), ["timeout", "success"]);
+});
+
+test("caller cancellation outranks a late failure", async () => {
+  const ac = new AbortController();
+  const r = await routeTask("Prove the invariants", fixtureConfig(), {
+    env: fakeEnv, signal: ac.signal,
+    request: async () => {
+      ac.abort();
+      const until = performance.now() + 150;
+      while (performance.now() < until) { /* block so deadline timers cannot fire */ }
+      throw new Error("TEST_PRIVATE_SENTINEL");
+    }
+  });
+  assert.ok(r.status === "cancelled");
+  assert.equal(r.attempts[0].outcome, "cancelled");
+});
+
 const boundedSignal = AbortSignal.timeout(5000);
 const call = (reply: unknown, backend: TaskBackend = "laya", env: NodeJS.ProcessEnv = fakeEnv) =>
   requestTaskChoice(fixtureConfig(), "Prove the invariants", backend, env, boundedSignal, async () => reply);
