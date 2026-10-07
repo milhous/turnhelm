@@ -124,7 +124,15 @@ export function executeWorker(
     let pollTimer: NodeJS.Timeout | undefined;
     let frame: Buffer = Buffer.alloc(0);
     let cancelDrainWait: (() => void) | undefined;
+    let cancelDiagWait: (() => void) | undefined;
+    let diagLine: string | undefined;
     let stdoutEnded = false;
+
+    // The diagnostics sink is owned output: an async sink error or close is a
+    // parent-output failure with the same EPIPE discipline as the message sink.
+    const onDiagFailure = (): void => { recordFailure("output"); };
+    diagnostics.on("error", onDiagFailure);
+    diagnostics.on("close", onDiagFailure);
 
     // A nonempty unfinished frame at EOF is a protocol error, but frames still
     // awaiting a backpressure drain are not a tail; the check waits for the sink.
@@ -155,7 +163,10 @@ export function executeWorker(
       finished = true;
       options.signal?.removeEventListener("abort", onAbort);
       output.removeListener("error", onOutputError);
+      diagnostics.removeListener("error", onDiagFailure);
+      diagnostics.removeListener("close", onDiagFailure);
       cancelDrainWait?.();
+      cancelDiagWait?.();
       let status: WorkerResult["status"];
       let error: WorkerResult["error"];
       if (failure !== undefined) { status = "failed"; error = failure; }
@@ -193,6 +204,7 @@ export function executeWorker(
       if (shutdownStarted) return;
       shutdownStarted = true;
       cancelDrainWait?.();
+      cancelDiagWait?.();
       stopStdin();
       if (child.pid === undefined) { settle(); return; }
       shutdownDischarged = false;
@@ -259,14 +271,53 @@ export function executeWorker(
       cancelDrainWait = waitForDrain();
     };
 
-    // One fixed-category line per diagnostic event; never the raw command,
-    // output, stderr, or native error text behind it.
-    const reportDiagnostic = (category: "worker-event-error" | "tool-progress"): void => {
+    const waitDiagDrain = (): (() => void) => {
+      let settledWait = false;
+      const onDrain = (): void => completeWait(false);
+      const onFailed = (): void => completeWait(true);
+      const completeWait = (failed: boolean): void => {
+        if (settledWait) return;
+        settledWait = true;
+        diagnostics.removeListener("drain", onDrain);
+        diagnostics.removeListener("error", onFailed);
+        diagnostics.removeListener("close", onFailed);
+        cancelDiagWait = undefined;
+        if (failed) { recordFailure("output"); return; }
+        const line = diagLine;
+        diagLine = undefined;
+        if (line !== undefined && !shutdownStarted && !finished) writeDiagLine(line);
+      };
+      diagnostics.once("drain", onDrain);
+      diagnostics.once("error", onFailed);
+      diagnostics.once("close", onFailed);
+      return () => completeWait(false);
+    };
+
+    const writeDiagLine = (line: string): void => {
+      let accepted: boolean;
       try {
-        diagnostics.write("turnhelm: " + category + "\n");
+        accepted = diagnostics.write(line);
       } catch {
-        /* A diagnostic sink failure must not fail the run. */
+        recordFailure("output");
+        return;
       }
+      if (accepted) return;
+      // The sink may have aborted, errored, or closed synchronously inside
+      // write(); a blocked wait after shutdown would be unreachable.
+      if (shutdownStarted || finished) return;
+      diagLine = line;
+      cancelDiagWait = waitDiagDrain();
+    };
+
+    // One fixed-category line per diagnostic event; never the raw command,
+    // output, stderr, or native error text behind it. While the sink is
+    // blocked, at most the latest line is retained — the queue cannot grow
+    // with the event count.
+    const reportDiagnostic = (category: "worker-event-error" | "tool-progress"): void => {
+      if (shutdownStarted || finished) return;
+      const line = "turnhelm: " + category + "\n";
+      if (cancelDiagWait !== undefined) { diagLine = line; return; }
+      writeDiagLine(line);
     };
 
     const dispatch = (event: WorkerEvent): void => {
