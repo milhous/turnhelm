@@ -60,19 +60,8 @@ const deepFreeze = <T>(value: T): T => {
   return value;
 };
 
-const composeSignal = (caller: AbortSignal | undefined, deadline: AbortSignal): AbortSignal => {
-  if (!caller) return deadline;
-  if (typeof AbortSignal.any === "function") return AbortSignal.any([caller, deadline]);
-  const composed = new AbortController();
-  if (caller.aborted || deadline.aborted) {
-    composed.abort();
-  } else {
-    const relay = () => composed.abort();
-    caller.addEventListener("abort", relay, { once: true });
-    deadline.addEventListener("abort", relay, { once: true });
-  }
-  return composed.signal;
-};
+const composeSignal = (caller: AbortSignal | undefined, deadline: AbortSignal): AbortSignal =>
+  caller ? AbortSignal.any([caller, deadline]) : deadline;
 
 type MutableAttempt = { backend: TaskBackend; outcome: TaskAttempt["outcome"]; durationMs: number };
 
@@ -103,6 +92,14 @@ export async function routeTask(
     try {
       const profileId = await requestTaskChoice(config, task, backend, options.env, signal, request);
       attempt.durationMs = Math.round(performance.now() - attemptStarted);
+      if (caller?.aborted) {
+        attempt.outcome = "cancelled";
+        return cancelled();
+      }
+      if (performance.now() - attemptStarted > budget) {
+        attempt.outcome = "timeout";
+        continue;
+      }
       const decision = deepFreeze({
         backend, profileId, profile: config.profiles[profileId], attempts, routingMs: elapsed()
       });

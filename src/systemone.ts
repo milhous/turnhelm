@@ -120,7 +120,7 @@ export function directChoiceRequest(spec: RequestSpec): Promise<unknown> {
   // proxyEnv:{} keeps the built-in environment proxy off where the runtime supports
   // it; runtimes without the option ignore it, so the request stays direct either way.
   const agent: Agent = secure
-    ? new SecureAgent({ keepAlive: false, proxyEnv: {} })
+    ? new SecureAgent({ keepAlive: false, proxyEnv: {}, rejectUnauthorized: true })
     : new Agent({ keepAlive: false, proxyEnv: {} });
   return new Promise((resolve, reject) => {
     let ownedRequest: ClientRequest | undefined;
@@ -226,15 +226,17 @@ export function eligibleBackends(config: ProjectConfig, env: NodeJS.ProcessEnv):
 }
 
 const CHOICE_INSTRUCTIONS =
-  "Choose the lightest profile whose effort meets the task difficulty and correctness requirements.";
+  "Choose the lightest profile that meets the task's requirements, judged by uncertainty, coupled constraints, "
+  + "required verification, and the consequences of an incorrect result; never by prompt length, file count, "
+  + "or keywords such as security, architecture, or deep analysis.";
 
 const CHOICE_CRITERIA: Readonly<Record<ProfileId, string>> = {
-  fast: "Small localized work with clear requirements and acceptance checks",
-  balanced: "Routine multi-file implementation and ordinary debugging",
-  deep: "Complex debugging, review, or multi-step investigation",
-  frontier: "Frontier architecture or reasoning beyond routine complexity",
-  frontier_xhigh: "Frontier reasoning requiring extended effort beyond high",
-  frontier_max: "The hardest reasoning work requiring maximum effort"
+  fast: "Small localized work with clear requirements and acceptance checks.",
+  balanced: "Routine implementation and debugging with bounded scope.",
+  deep: "Difficult but bounded debugging, review, and multistep reasoning.",
+  frontier: "Very difficult work with ambiguity and interacting cross-system constraints.",
+  frontier_xhigh: "Demanding reasoning requiring detailed argument and verification across several constraints.",
+  frontier_max: "Exceptional problems requiring the greatest single-worker reasoning depth."
 };
 
 const ownObject = (value: unknown): Record<string, unknown> | undefined =>
