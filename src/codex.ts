@@ -250,7 +250,16 @@ export function executeWorker(
     // on a dead sink. The other sink's healthy writes keep their own accounting.
     const failSink = (kind: "message" | "diag"): void => {
       pendingWrites[kind] = 0;
+      if (finished) {
+        // A settled run still owns its sinks' late emissions; once this known
+        // failure leaves no write in flight on either sink, release them.
+        if (pendingWrites.message === 0 && pendingWrites.diag === 0) detachSinkListeners();
+        return;
+      }
       recordFailure("output");
+      // A prior first failure or an in-progress shutdown makes recordFailure a
+      // no-op, but the discharge above still has to re-drive settlement.
+      settle();
     };
 
     // Completion or error of every accepted write, per sink.
