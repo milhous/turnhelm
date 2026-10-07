@@ -76,14 +76,37 @@ async function readExisting(root: string, relative: string, max = MAX_FILE_BYTES
   return { bytes, mode: info.mode & 0o777, identity: toIdentity(info) };
 }
 
-function countOccurrences(text: string, needle: string): number {
-  let count = 0;
-  let at = text.indexOf(needle);
-  while (at !== -1) {
-    count += 1;
-    at = text.indexOf(needle, at + needle.length);
+export type AgentsBlockState = "installed" | "absent" | "conflict";
+
+const NAMESPACE_MARKER_PATTERN = /<!--\s*turnhelm:(begin|end)[^>]*-->/g;
+
+function namespaceMarkers(text: string): { begins: string[]; ends: string[] } {
+  const begins: string[] = [];
+  const ends: string[] = [];
+  for (const match of text.matchAll(NAMESPACE_MARKER_PATTERN)) {
+    if (match[1] === "begin") begins.push(match[0]);
+    else ends.push(match[0]);
   }
-  return count;
+  return { begins, ends };
+}
+
+// Single copy of the managed-block marker validation shared by init and
+// doctor: the current exact v1 begin/end pair installed as one block is
+// "installed"; ANY other Turnhelm begin/end namespace marker (unknown
+// version, unbalanced, duplicated, nested) is a conflict, even when a legal
+// v1 block is also present. Plain prose without comment markers is "absent".
+export function classifyAgentsBlock(text: string, block: string): AgentsBlockState {
+  const { begins, ends } = namespaceMarkers(text);
+  if (begins.length === 0 && ends.length === 0) return "absent";
+  if (begins.length !== 1 || ends.length !== 1) return "conflict";
+  if (begins[0] !== MARKER_BEGIN || ends[0] !== MARKER_END) return "conflict";
+  const begin = text.indexOf(MARKER_BEGIN);
+  const end = text.indexOf(MARKER_END);
+  if (begin > end) return "conflict";
+  // Accept either line-ending style for the block itself: a stray CRLF in the
+  // user's own bytes elsewhere must not invalidate an installed LF block.
+  const current = text.slice(begin, end + MARKER_END.length);
+  return current === block || current === block.replaceAll("\n", "\r\n") ? "installed" : "conflict";
 }
 
 function planAgentsFrom(block: string, existing: Existing | undefined): Change | undefined {
@@ -91,29 +114,17 @@ function planAgentsFrom(block: string, existing: Existing | undefined): Change |
     return { path: AGENTS_RELATIVE, after: Buffer.from(block + "\n"), mode: 0o644 };
   }
   const text = existing.bytes.toString("utf8");
-  const beginCount = countOccurrences(text, MARKER_BEGIN);
-  const endCount = countOccurrences(text, MARKER_END);
-  if (!(beginCount === 0 && endCount === 0) && (beginCount !== 1 || endCount !== 1)) {
-    throw new InstallError("conflict", AGENTS_RELATIVE + " managed markers are duplicated or unbalanced");
+  const state = classifyAgentsBlock(text, block);
+  if (state === "conflict") {
+    throw new InstallError("conflict", AGENTS_RELATIVE + " managed markers are duplicated, unbalanced, or of an unrecognized version");
   }
+  if (state === "installed") return undefined;
   const crlf = text.includes("\r\n");
   const newline = crlf ? "\r\n" : "\n";
   const styledBlock = crlf ? block.replaceAll("\n", "\r\n") : block;
-  if (beginCount === 0) {
-    const separator = text.length === 0 || text.endsWith("\n") ? "" : newline;
-    const after = Buffer.concat([existing.bytes, Buffer.from(separator + styledBlock + newline)]);
-    return { path: AGENTS_RELATIVE, before: existing.bytes, beforeIdentity: existing.identity, after, mode: existing.mode };
-  }
-  const begin = text.indexOf(MARKER_BEGIN);
-  const end = text.indexOf(MARKER_END);
-  if (begin > end) throw new InstallError("conflict", AGENTS_RELATIVE + " managed markers are unbalanced");
-  // Accept either line-ending style for the block itself: a stray CRLF in the
-  // user's own bytes elsewhere must not invalidate an installed LF block.
-  const currentBlock = text.slice(begin, end + MARKER_END.length);
-  if (currentBlock !== styledBlock && currentBlock !== block) {
-    throw new InstallError("conflict", AGENTS_RELATIVE + " managed block differs from the installed template");
-  }
-  return undefined;
+  const separator = text.length === 0 || text.endsWith("\n") ? "" : newline;
+  const after = Buffer.concat([existing.bytes, Buffer.from(separator + styledBlock + newline)]);
+  return { path: AGENTS_RELATIVE, before: existing.bytes, beforeIdentity: existing.identity, after, mode: existing.mode };
 }
 
 async function assertRoot(root: string): Promise<void> {

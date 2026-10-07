@@ -2,7 +2,7 @@ import { existsSync, realpathSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { readProjectConfig, type ProjectConfig } from "./config.js";
 import { readTemplates, type Templates } from "./assets.js";
-import { inspectInstallation } from "./init.js";
+import { classifyAgentsBlock, inspectInstallation } from "./init.js";
 import { readProjectFile } from "./project.js";
 import { readCodexSignals } from "./models.js";
 import { inspectCodex, inspectGit } from "./preflight.js";
@@ -33,8 +33,6 @@ const SKILL_MD_RELATIVE = ".agents/skills/turnhelm-routing/SKILL.md";
 const SKILL_YAML_RELATIVE = ".agents/skills/turnhelm-routing/agents/openai.yaml";
 const AGENTS_RELATIVE = "AGENTS.md";
 const AGENTS_OVERRIDE_RELATIVE = "AGENTS.override.md";
-const MARKER_BEGIN = "<!-- turnhelm:begin v1 -->";
-const MARKER_END = "<!-- turnhelm:end -->";
 const MAX_TARGET_BYTES = 65536;
 const MAX_AGENTS_BYTES = 1048576;
 
@@ -117,32 +115,11 @@ async function readTarget(root: string, relative: string, max: number): Promise<
   }
 }
 
-function countOccurrences(text: string, needle: string): number {
-  let count = 0;
-  let at = text.indexOf(needle);
-  while (at !== -1) {
-    count += 1;
-    at = text.indexOf(needle, at + needle.length);
-  }
-  return count;
-}
-
 // E10: absent, conflicted, and installed are distinct facts — the installer
 // treats "no markers" as "will append", but the doctor must never report the
-// managed block as installed when it is missing.
-type AgentsState = "installed" | "absent" | "conflict";
-
-function agentsBlockState(text: string, block: string): AgentsState {
-  const beginCount = countOccurrences(text, MARKER_BEGIN);
-  const endCount = countOccurrences(text, MARKER_END);
-  if (beginCount === 0 && endCount === 0) return "absent";
-  if (beginCount !== 1 || endCount !== 1) return "conflict";
-  const begin = text.indexOf(MARKER_BEGIN);
-  const end = text.indexOf(MARKER_END);
-  if (begin > end) return "conflict";
-  const current = text.slice(begin, end + MARKER_END.length);
-  return current === block || current === block.replaceAll("\n", "\r\n") ? "installed" : "conflict";
-}
+// managed block as installed when it is missing. Marker validation itself is
+// the single shared copy at the init boundary (classifyAgentsBlock), which
+// also fails closed on unknown-version/unbalanced Turnhelm markers (D11/E13).
 
 type InstallFindings = Readonly<{ assets: DoctorCheck; instructions: DoctorCheck }>;
 
@@ -163,7 +140,7 @@ async function independentFindings(root: string, templates: Templates): Promise<
   const agents = await readTarget(root, AGENTS_RELATIVE, MAX_AGENTS_BYTES);
   const agentsState = agents === "unreadable" || agents === undefined
     ? undefined
-    : agentsBlockState(agents.toString("utf8"), templates.agentsBlock);
+    : classifyAgentsBlock(agents.toString("utf8"), templates.agentsBlock);
   const instructions = agentsState === undefined
     ? agents === "unreadable"
       ? check("instructions", "unverified", "AGENTS.md could not be read safely", "inspect AGENTS.md, then re-run turnhelm doctor")
