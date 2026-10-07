@@ -46,6 +46,8 @@ const stubbornChild = `process.on('SIGTERM', function () {}); setInterval(functi
 
 type Gate = "abort-ready" | "abort-received" | "epipe-received";
 
+type OutputMode = "stdout" | "blocker" | "abort-in-write";
+
 type WorkerScenario = {
   script?: string;
   task?: string;
@@ -53,7 +55,7 @@ type WorkerScenario = {
   write?: boolean;
   abortBeforeCall?: boolean;
   gate?: Gate;
-  output?: "stdout" | "blocker";
+  output?: OutputMode;
   drainDelayMs?: number;
 };
 
@@ -80,7 +82,7 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
   await mkdir(root, { recursive: true });
   const moduleUrl = new URL("../src/codex.js", import.meta.url).href;
   const resultFile = join(directory, "result.json");
-  const blocker = scenario.output === "blocker";
+  const blocker = scenario.output !== undefined && scenario.output !== "stdout";
   const inner = `
     import { access, writeFile } from "node:fs/promises";
     import { Writable } from "node:stream";
@@ -102,9 +104,13 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
         received += 1;
         pending += 1;
         maxPending = Math.max(maxPending, pending);
-        setTimeout(() => { pending -= 1; callback(); }, ${scenario.drainDelayMs ?? 30});
+        ${scenario.output === "abort-in-write"
+          ? "controller.abort(); // Deliberately never calls callback and never drains."
+          : `setTimeout(() => { pending -= 1; callback(); }, ${scenario.drainDelayMs ?? 30});`}
       }
     });` : "output = process.stdout;"}
+    // The harness must never hang: exit 89 if the worker promise does not settle.
+    const guard = setTimeout(() => process.exit(89), 2500);
     ${scenario.gate === "abort-ready" ? `
     const waitReady = async () => {
       for (let i = 0; i < 3000; i++) {
@@ -126,8 +132,10 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
       ${scenario.gate === "abort-received" ? "while (received < 1) await new Promise(resolve => setTimeout(resolve, 10)); controller.abort();" : ""}
       ${scenario.gate === "epipe-received" ? "while (received < 1) await new Promise(resolve => setTimeout(resolve, 10)); output.destroy(new Error(\"EPIPE\"));" : ""}
       const result = await running;
+      clearTimeout(guard);
       await writeFile(resultFile, JSON.stringify({ ...result, received, maxPending, emitted: captured }));
     } catch (error) {
+      clearTimeout(guard);
       await writeFile(resultFile, JSON.stringify({ harnessError: error instanceof Error ? error.message : String(error) }));
     }
   `;
@@ -285,8 +293,8 @@ finish(() => {
   assert.equal(recorded.status, "completed");
   assert.equal(recorded.error, undefined);
   assert.deepEqual(recorded.usage, { input_tokens: 4 });
-  forbid(JSON.stringify(recorded) + stdout + stderr, "TEST_PRIVATE_ERROR_SENTINEL", "TEST_PRIVATE_STACK_SENTINEL");
-  assert.equal(stderr, "");
+  forbid(JSON.stringify(recorded) + stdout, "TEST_PRIVATE_ERROR_SENTINEL", "TEST_PRIVATE_STACK_SENTINEL");
+  assert.equal(stderr, "turnhelm: worker-event-error\n");
 });
 
 test("tool progress never relays commands or outputs", { timeout: 30_000 }, async t => {
@@ -301,6 +309,7 @@ finish(() => {
   assert.equal(recorded.status, "completed");
   assert.deepEqual(recorded.usage, { output_tokens: 2 });
   forbid(JSON.stringify(recorded) + stdout + stderr, "TEST_PRIVATE_TOOL_SENTINEL", "TEST_PRIVATE_OUTPUT_SENTINEL");
+  assert.equal(stderr, "turnhelm: tool-progress\n");
 });
 
 test("repeated completions keep the latest usage snapshot, never a sum", { timeout: 30_000 }, async t => {
@@ -340,6 +349,20 @@ finish(() => {
   });
   assert.equal(recorded.status, "completed");
   assert.deepEqual(recorded.usage, { input_tokens: 10 });
+  assert.equal(recorded.usageScope, "unverified");
+});
+
+test("garbage accounting after a valid snapshot keeps the run and earlier usage", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "turn.completed", usage: { input_tokens: 6 } });
+  emit({ type: "turn.completed", usage: [] });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.deepEqual(recorded.usage, { input_tokens: 6 });
   assert.equal(recorded.usageScope, "unverified");
 });
 
@@ -524,6 +547,25 @@ finish(() => {
   });
   assert.equal(recorded.status, "failed");
   assert.equal(recorded.error, "output");
+});
+
+test("an abort raised inside a sink write still resolves the run", { timeout: 30_000 }, async t => {
+  const { recorded, directory } = await runWorker(t, {
+    output: "abort-in-write",
+    script: `
+const { spawn } = require("node:child_process");
+const child = spawn(process.execPath, ["-e", ${JSON.stringify(stubbornChild)}], { stdio: "ignore" });
+fs.writeFileSync(path.join(here, "descendant.pid"), String(child.pid));
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "racing" } });
+  emit({ type: "turn.completed", usage: { input_tokens: 5 } });
+  setInterval(() => {}, 500);
+});
+`
+  });
+  assert.equal(recorded.status, "cancelled");
+  assert.equal(recorded.received, 1);
+  await waitForExit(Number(await fakeFile(directory, "descendant.pid")));
 });
 
 test("a TERM-ignoring worker is killed within the grace window", { timeout: 30_000 }, async t => {

@@ -75,5 +75,13 @@ test("frames that are not well-formed event objects are fatal", () => {
   assert.throws(() => decodeWorkerEvent(frame({ type: 9 })));
   assert.throws(() => decodeWorkerEvent(frame({ type: "item.completed" })));
   assert.throws(() => decodeWorkerEvent(frame({ type: "item.completed", item: "text" })));
-  assert.throws(() => decodeWorkerEvent(frame({ type: "turn.completed", usage: "x" })));
+});
+
+test("non-object accounting degrades to unreported usage, never a failure", () => {
+  for (const usage of [null, false, 8, "unknown", []]) {
+    assert.deepEqual(decodeWorkerEvent(frame({ type: "turn.completed", usage })), { kind: "completed" });
+  }
+  assert.deepEqual(decodeWorkerEvent(frame({
+    type: "turn.completed", usage: { input_tokens: 3, extra: true }
+  })), { kind: "completed", usage: { input_tokens: 3 } });
 });
