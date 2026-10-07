@@ -425,3 +425,82 @@ test("codex evidence reports unresolved config-key semantics rather than full su
   assert.ok(evidence.includes("agents.enabled"), "unresolved agents.enabled semantics must be reported");
   assert.ok(!/supports the required controls/.test(evidence), "help output alone must not be claimed as full runtime support");
 });
+
+// E10: a missing managed block must warn, never pass — even when a sibling
+// conflict stops the shared installation inspection.
+test("missing managed block warns when a config conflict stops the shared inspection (E10)", async (t) => {
+  const root = await preparedProject(t);
+  await writeFile(join(root, "AGENTS.md"), "# ordinary user guidance, no managed markers\n");
+  await writeFile(join(root, ".turnhelm", "config.json"), "{}");
+  const bin = await fakeBin(t);
+  const result = await doctorProject(root, { probe: false, env: await doctorEnv(t, bin) });
+  const byId = new Map(result.checks.map(check => [check.id, check]));
+  assert.equal(byId.get("instructions")?.status, "warn", "a missing block must warn, never pass");
+  assert.ok(!/block is installed/.test(byId.get("instructions")?.evidence ?? ""), "the evidence must not claim the block is installed");
+  assert.equal(byId.get("assets")?.status, "pass", "the sibling skills check stays independently evaluated");
+  assert.equal(result.code, 1, "the corrupted config still fails the doctor");
+});
+
+test("missing managed block warns under a skill conflict too (E10)", async (t) => {
+  const root = await preparedProject(t);
+  await writeFile(join(root, ".agents", "skills", "turnhelm-routing", "SKILL.md"), "user-authored skill");
+  await writeFile(join(root, "AGENTS.md"), "# ordinary user guidance, no managed markers\n");
+  const bin = await fakeBin(t);
+  const result = await doctorProject(root, { probe: false, env: await doctorEnv(t, bin) });
+  const byId = new Map(result.checks.map(check => [check.id, check]));
+  assert.equal(byId.get("instructions")?.status, "warn", "a missing block must warn, never pass");
+  assert.equal(byId.get("assets")?.status, "fail", "the sibling skills conflict still fails independently");
+  assert.equal(result.code, 1);
+});
+
+// E11: the probe deadline is monotonic (performance.now), so neither a
+// backward nor a forward wall-clock correction can swing the budget recheck.
+test("probe deadline ignores a backward wall-clock correction (E11)", async (t) => {
+  const root = await preparedProject(t);
+  await writeProjectConfig(root, config => {
+    config.routingTimeoutMs = 100;
+    const backends = config.backends as Record<string, unknown>;
+    backends.jev = { enabled: false };
+  });
+  const bin = await fakeBin(t);
+  const realNow = Date.now;
+  const request: ChoiceRequest = async () => {
+    const until = performance.now() + 150;
+    while (performance.now() < until) { /* busy-wait: timers cannot run */ }
+    Date.now = () => realNow() - 1000; // clock correction before the valid reply
+    return { answers: { route: { type: "choice", choice: "fast" } } };
+  };
+  try {
+    const result = await doctorProject(root, { probe: true, env: await doctorEnv(t, bin), request });
+    const byId = new Map(result.checks.map(check => [check.id, check]));
+    assert.equal(byId.get("backend.laya")?.status, "fail", "a backward clock correction must not satisfy the budget recheck");
+    assert.equal(result.code, 1);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("probe deadline ignores a forward wall-clock correction (E11)", async (t) => {
+  const root = await preparedProject(t);
+  await writeProjectConfig(root, config => {
+    config.routingTimeoutMs = 100;
+    const backends = config.backends as Record<string, unknown>;
+    backends.jev = { enabled: false };
+  });
+  const bin = await fakeBin(t);
+  const realNow = Date.now;
+  const request: ChoiceRequest = async () => {
+    const until = performance.now() + 10;
+    while (performance.now() < until) { /* brief busy so the reply is later than start */ }
+    Date.now = () => realNow() + 1000; // forward correction before the valid reply
+    return { answers: { route: { type: "choice", choice: "fast" } } };
+  };
+  try {
+    const result = await doctorProject(root, { probe: true, env: await doctorEnv(t, bin), request });
+    const byId = new Map(result.checks.map(check => [check.id, check]));
+    assert.equal(byId.get("backend.laya")?.status, "pass", "a forward clock correction must not fail a timely probe");
+    assert.equal(result.code, 0);
+  } finally {
+    Date.now = realNow;
+  }
+});

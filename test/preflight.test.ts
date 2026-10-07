@@ -1,8 +1,9 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { existsSync } from "node:fs";
 import { inspectCodex, inspectGit } from "../src/preflight.js";
 
 const SENTINELS: NodeJS.ProcessEnv = {
@@ -297,4 +298,97 @@ test("inspectGit subprocess env drops classifier keys and adds no managed marker
   for (const key of ["LAYA_API_KEY", "TYPESAFE_API_KEY", "TURNHELM_ALLOW_HOSTED_JEV", "TURNHELM_CONFIG", "TURNHELM_MANAGED_CHILD"]) {
     assert.ok(!childEnv.includes(key + "="), key + " must not reach the Git subprocess");
   }
+});
+
+// E9: a relative PATH entry must be resolved against the caller's frame
+// before any cwd change — otherwise a same-relative-path binary in the
+// selected project runs instead of the chosen one.
+const WRONG_PROJECT_SCRIPT = `#!/bin/sh
+printf 'wrong-project\\n' > "$FAKE_WRONG_MARKER"
+if [ "$1" = "--version" ]; then printf 'codex-cli 0.160.1\\n'; exit 0; fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  printf 'usage: codex exec\\n  --json\\n  --ephemeral\\n  --sandbox <MODE>\\n  -  read from stdin\\n'
+  exit 0
+fi
+exit 64
+`;
+
+const WRONG_PROJECT_GIT_SCRIPT = `#!/bin/sh
+printf 'wrong-project\\n' > "$FAKE_WRONG_MARKER"
+if [ "$1" = "-C" ] && [ "$3" = "rev-parse" ]; then printf 'true\\n'; exit 0; fi
+exit 64
+`;
+
+test("inspectCodex resolves a relative PATH entry against the caller before cwd changes (E9)", async (t) => {
+  const caller = await tempDir(t, "turnhelm-preflight-caller-");
+  const project = await tempDir(t, "turnhelm-preflight-project-");
+  await mkdir(join(caller, "bin"));
+  await writeFile(join(caller, "bin", "codex"), CODEX_SCRIPT);
+  await chmod(join(caller, "bin", "codex"), 0o755);
+  await mkdir(join(project, "bin"));
+  await writeFile(join(project, "bin", "codex"), WRONG_PROJECT_SCRIPT);
+  await chmod(join(project, "bin", "codex"), 0o755);
+  const sentinel = join(project, "WRONG_PROJECT_RAN");
+  const originalCwd = process.cwd();
+  t.after(() => process.chdir(originalCwd));
+  process.chdir(caller);
+  const result = await inspectCodex(project, { ...SENTINELS, PATH: "./bin", FAKE_HELP: GOOD_HELP, FAKE_WRONG_MARKER: sentinel });
+  assert.equal(result.ok, true, "the caller-resolved binary must satisfy the inspection");
+  assert.equal(result.version, "0.160.1");
+  assert.ok(!existsSync(sentinel), "the wrong project's binary must never run");
+});
+
+test("inspectGit resolves a relative PATH entry against the caller before cwd changes (E9)", async (t) => {
+  const caller = await tempDir(t, "turnhelm-preflight-caller-");
+  const project = await tempDir(t, "turnhelm-preflight-project-");
+  await mkdir(join(caller, "bin"));
+  await writeFile(join(caller, "bin", "git"), GIT_SCRIPT);
+  await chmod(join(caller, "bin", "git"), 0o755);
+  await mkdir(join(project, "bin"));
+  await writeFile(join(project, "bin", "git"), WRONG_PROJECT_GIT_SCRIPT);
+  await chmod(join(project, "bin", "git"), 0o755);
+  const sentinel = join(project, "WRONG_PROJECT_RAN");
+  const originalCwd = process.cwd();
+  t.after(() => process.chdir(originalCwd));
+  process.chdir(caller);
+  const result = await inspectGit(project, { ...SENTINELS, PATH: "./bin", FAKE_WRONG_MARKER: sentinel });
+  assert.equal(result.ok, true);
+  assert.ok(!existsSync(sentinel), "the wrong project's git must never run");
+});
+
+// E12: a same-group descendant with stdio:ignore does not hold the leader
+// pipes, so leader close alone must not discharge the owned group.
+const DETACHED_DESCENDANT_SCRIPT = `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  /bin/sleep 30 >/dev/null 2>&1 </dev/null &
+  printf '%s\\n' "$!" > "$FAKE_DESCENDANT_PID"
+  printf 'codex-cli 0.160.1\\n'
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  printf 'usage: codex exec\\n  --json\\n  --ephemeral\\n  --sandbox <MODE>\\n  -  read from stdin\\n'
+  exit 0
+fi
+exit 64
+`;
+
+test("inspectCodex kills a same-group descendant that does not hold the leader pipes (E12)", async (t) => {
+  const bin = await fakeBin(t, "codex", DETACHED_DESCENDANT_SCRIPT);
+  const pidFile = join(await tempDir(t, "turnhelm-preflight-pid-"), "pid");
+  const result = await inspectCodex("/tmp", fakeEnv(bin, { FAKE_DESCENDANT_PID: pidFile }));
+  assert.equal(result.ok, true, "the leader itself completed its inspection");
+  const pid = Number((await readFile(pidFile, "utf8")).trim());
+  assert.ok(Number.isInteger(pid) && pid > 0, "the fixture must record the descendant pid");
+  const deadline = Date.now() + 1500;
+  let alive = true;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0); // Probe only; the fixture-owned group must be gone.
+      await new Promise(resolve => setTimeout(resolve, 50));
+    } catch {
+      alive = false;
+      break;
+    }
+  }
+  assert.equal(alive, false, "the owned descendant must not outlive the settled inspection");
 });
