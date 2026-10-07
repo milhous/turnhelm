@@ -1,6 +1,7 @@
 # Turnhelm task entry routing design
 
 Date: 2026-10-05
+Re-reviewed: 2026-10-07 against the current Phase A implementation and execution plan
 Status: approved design re-reviewed for execution planning; not implemented
 
 ## Goal and scope
@@ -9,6 +10,11 @@ Make Turnhelm the direct entry point for a complete coding task. Laya or Jev
 classifies its difficulty, Turnhelm selects one configured model and reasoning
 effort, and one Codex worker executes it. Optimize token consumption per accepted
 task without relaxing security or adding unnecessary coordination.
+
+Jev and Laya are alternative classification backends, not the execution models
+selected by difficulty. Backend choice follows eligibility and local-first
+failover; difficulty selects the Codex worker's configured model/effort pair.
+Selection happens once per complete task, not midway through an existing session.
 
 Use a stateless CLI with project-scoped `init`, `doctor`, and `run`. There is no
 parent model that must first interpret or summarize the task. The first release
@@ -167,7 +173,7 @@ Apply these bounds:
   known continuation-only forms, not semantic completeness of arbitrary tasks.
   Preserve accepted text without trimming, truncating, or summarizing it.
 - Classification response: at most 8192 bytes actually received, regardless of
-  `Content-Length`. Read and decode incrementally; cancel and clean up rejected
+  `Content-Length`. Read incrementally and fatal-decode the bounded body; clean up rejected
   responses without exposing their bodies.
 - One monotonic total deadline covers classification, response reading, and
   failover. With two backends, Laya receives at most
@@ -213,6 +219,8 @@ positional task immediately; bare `run` is a usage error, not an EOF-delimited
 interactive prompt. Only read non-TTY stdin when checking dual-source conflicts.
 Do not join positional arguments or silently append piped input. Stdin reduces process-argument exposure but does not
 make task content confidential from authorized classifiers or Codex.
+Use `--` before a positional task that begins with an option-like token.
+Install operation cancellation handling before waiting for non-TTY task input.
 
 Before contacting classifiers, check project configuration, task validity,
 eligible backends, a Git worktree, and a resolvable compatible Codex executable.
@@ -239,6 +247,10 @@ execution are described in the
 [official non-interactive documentation](https://learn.chatgpt.com/docs/non-interactive-mode);
 the agent control is documented in
 [subagent configuration](https://learn.chatgpt.com/docs/agent-configuration/subagents).
+The version floor is a compatibility target, not proof that every later release
+honors each control. Version/help inspection cannot establish config-key
+semantics, model access, or whole-run usage scope; report tested clients and
+unresolved evidence separately rather than silently changing the floor.
 One worker can still make multiple model turns and tool calls needed to complete
 and verify its task. Turnhelm does not promise one inference request or a hard
 execution-token budget.
@@ -265,6 +277,8 @@ group, drain both output pipes concurrently, and stop that group on cancellation
 invalid event transport, or parent-output `EPIPE`. Send TERM, wait at most one
 second, then KILL if still alive; wait on `close`, not only `exit`, and remove
 timers/listeners on completion. Never discover or terminate unrelated processes.
+The owned group, not merely its leader, is the shutdown target: a leader's exit
+must not cancel pending KILL escalation while its owned descendants remain.
 Parent SIGINT/SIGTERM exits with 130/143; internal transport failure exits one.
 Retain the existing early spawn-error listener and failed-stdin-transfer checks.
 Do not add a platform process manager or an overall model-execution timeout.
@@ -280,6 +294,11 @@ diagnostics or tool progress to stderr. Tool progress exposes event type/status,
 not raw tool inputs or results. Keep only bounded transport state and
 normalized usage counters; do not save raw event streams as Turnhelm logs.
 
+Respect stdout backpressure without accumulating agent messages. Waiting for
+`drain` must remain interruptible by cancellation, output errors, or `EPIPE`;
+stderr continues to drain independently. A bounded event is not permission to
+build an unbounded output queue.
+
 Pipe and concurrently drain worker stderr without retaining or relaying its raw
 contents. Emit fixed sanitized categories, not arbitrary stderr or native error
 messages. Unknown well-formed JSONL events are ignored or reduced to a known
@@ -292,6 +311,7 @@ A `turn.failed` stops the worker even if its process would exit zero. An `error`
 event is surfaced as a fixed category, never raw text; it does not by itself
 override a later valid terminal event. Neither event success nor process success
 is proof that task acceptance checks passed.
+Once `turn.failed` is observed, a later completion cannot restore success.
 
 Emit a compact completion receipt to stderr containing selected backend and
 profile, model/effort, backend attempt counts and outcomes, routing and execution
@@ -300,6 +320,14 @@ text, response bodies, headers, credential values, or source-file contents in
 diagnostic records. User-visible model output may contain project information;
 redirecting it to a file is the user's deliberate action.
 
+Once classification has started, emit one final receipt when the invocation ends,
+whether routing succeeds, exhausts, or is cancelled; a selected route is reported
+with the eventual worker outcome. Retain outcomes/durations for requests already
+initiated, including an interrupted attempt. A routing failure has no selected
+profile or model and a worker status of `not-started`; never fill these with defaults.
+Local input/configuration/preflight rejection needs only its fixed diagnostic
+and exit status, not a fabricated completion receipt or another telemetry layer.
+
 Retain reported input, output, cached-input, and reasoning-detail fields without
 adding overlapping counts twice. Missing usage is `unreported`, never zero. If a
 classifier does not expose usable token accounting, report Codex execution usage
@@ -307,12 +335,15 @@ and classifier request counts separately; do not label that an exact total for
 the entire routed task. Do not fetch live pricing, estimate an undocumented token
 count, or build a billing database.
 
-Keep the most recent completed event's valid nonnegative integer usage snapshot;
-never blindly sum repeated completion snapshots. For multiple completions or
-unknown accounting scope, label the run-total scope `unverified` and expose only
-the reported snapshot. Invalid/missing usage degrades accounting, not an otherwise
-valid execution. Exact whole-run benefit claims require confirmed accounting
-scope for the supported client; do not infer that external tool fees are included.
+Keep the most recent completion snapshot containing valid nonnegative integer
+usage fields, including partial accounting; do not merge fields from different
+snapshots or blindly sum repeated completions. Missing/invalid fields are
+`unreported`, not zero. A later completion without usable accounting does not
+erase earlier reported counters or establish a total. For multiple completions,
+partial accounting, or unknown accounting scope, label the run-total scope
+`unverified` and expose only the reported snapshot. Accounting defects do not
+fail an otherwise valid execution. Exact whole-run benefit claims require
+confirmed scope for the supported client; external tool fees are not inferred.
 
 A clean process exit means execution completed, not that the requested change
 passed acceptance. Acceptance comes from task-specific checks or user review.
@@ -385,8 +416,8 @@ turnhelm doctor --probe
 
 Default doctor is read-only and offline. Its checks are independent; missing or
 invalid configuration must produce findings rather than one opaque exception.
-Allow bounded, non-inference CLI version/capability queries, but never `codex exec`,
-login, a model-access probe, or an automatic repair.
+Allow bounded, non-inference CLI version/capability queries, but never a Codex
+inference run, login, a model-access probe, or an automatic repair.
 
 Report `pass`, `warn`, `fail`, `unverified`, or `skipped`, with stable check IDs,
 sanitized evidence, and a suggested next action. Check:
@@ -457,16 +488,18 @@ Required cases include:
    Jev, Laya success, and one Laya failure followed by one Jev attempt.
 3. Shared deadline, body reading timeout, cancellation, redirects, declared vs
    actual body size, direct transport under proxy env, exact nested choice
-   envelope, invalid UTF-8/JSON/choice, bounded cleanup, and zero worker launches.
+   envelope, invalid UTF-8/JSON/choice, bodyless responses, bounded cleanup,
+   retained failed/cancelled attempt evidence, and zero worker launches.
 4. UTF-8 task limits, whitespace preservation, blank/continuation-only input,
-   stdin/positional conflicts, and zero classifier calls on local rejection.
+   stdin/positional conflicts, option-like tasks, cancellation while awaiting
+   stdin, and zero classifier calls on local rejection.
 5. Immutable decision-to-execution binding, executable/root/sandbox arguments,
    native-agent disable control, ephemeral mode, secret stripping, recursion
    rejection before classification, spawn/stdin failures, and child exit status.
 6. Bounded event parsing, partial/missing usage, no duplicate cached/reasoning
-   accounting, completion/failed-event evidence, unknown valid events, stderr
-   sentinel suppression, stdout `EPIPE`, forced shutdown of an ignoring owned
-   group, and no sensitive diagnostic records.
+   accounting, sticky failed-event evidence, unknown valid events, stderr
+   sentinel suppression, stdout backpressure/`EPIPE`, forced shutdown of an
+   ignoring owned group even after its leader exits, and sanitized receipts.
 7. Init dry-run, identical repeats, user-content/CRLF/mode preservation, existing
    config, ownership conflicts, invalid markers, symlinked ancestors/leaves,
    concurrent edits, and truthful partial-failure cleanup.
