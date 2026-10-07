@@ -135,8 +135,8 @@ async function fixture(t: TestContext, classifier: Classifier = {}, options: Fix
       requests.push({ url: request.url, method: request.method, body });
       await classifier.onRequest?.();
       if (classifier.mode === "hang") {
+        // Hang means never respond; cancellation is the client's abort.
         request.resume();
-        request.on("close", () => { response.destroy(); });
         return;
       }
       response.setHeader("content-type", "application/json");
@@ -484,6 +484,22 @@ test("raw worker stderr and raw error events never reach the parent", async t =>
   assert.equal(result.stderr.includes("RAW-ERROR-TEXT-SENTINEL"), false);
   assert.ok(result.stderr.includes("turnhelm: worker-event-error"));
   assert.equal(parseReceipt(result.stderr).type, "turnhelm.receipt");
+});
+
+test("parent stdout EPIPE cancels the worker and exits 1", async t => {
+  const f = await fixture(t);
+  const child = f.spawn(["run", TASK]);
+  const pending = capture(child);
+  // The CLI writes stdout only when relaying agent messages, so destroying the
+  // parent side up front guarantees the worker's first write hits EPIPE.
+  child.stdout?.destroy();
+  child.stdin?.end("");
+  const result = await pending;
+  assert.equal(result.code, 1);
+  assert.equal(await workerRecords(f).then(records => records.runs), 1);
+  const receipt = parseReceipt(result.stderr);
+  assert.equal((receipt.worker as { status: string }).status, "failed");
+  assert.equal(result.stderr.includes("EPIPE"), false, "no native error text on stderr");
 });
 
 test("routing exhaustion launches zero workers and emits one receipt without a selection", async t => {
