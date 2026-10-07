@@ -326,6 +326,22 @@ const proxyChild = async (t: TestContext, nodePath: string) => {
   assert.equal(fixture.requests.length, 2);
 };
 
+test("explicit verification ignores NODE_TLS_REJECT_UNAUTHORIZED=0", async t => {
+  const fixture = await startServer(t, (request, response) => { response.end(jsonReply); }, true);
+  const directory = await mkdtemp(join(tmpdir(), "turnhelm-tls-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const script = join(directory, "tls-child.mjs");
+  await writeFile(script, CHILD_SCRIPT);
+  const dist = pathToFileURL(fileURLToPath(new URL("../src/systemone.js", import.meta.url))).href;
+  const env: NodeJS.ProcessEnv = { ...process.env, NODE_TLS_REJECT_UNAUTHORIZED: "0" };
+  const outcome = await execute(process.execPath, [script, dist, fixture.url.href], { encoding: "utf8", timeout: 30000, env })
+    .then((run: { stdout: string }) => run.stdout,
+      (failure: { stdout?: string }) => String(failure.stdout ?? ""));
+  assert.match(outcome, /TRANSPORT_ERROR classifier request failed/);
+  assert.doesNotMatch(outcome, /REPLY/);
+  assert.equal(fixture.requests.length, 0, "the request must die in the TLS handshake");
+});
+
 test("direct transport ignores an enabled environment proxy (current runtime)", async t => {
   await proxyChild(t, process.execPath);
 });

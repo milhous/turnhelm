@@ -220,6 +220,47 @@ test("a final failure retains both attempts with their outcomes", async () => {
   assert.ok(!("decision" in r));
 });
 
+test("a reply landing after caller cancellation is cancelled, never selected", async () => {
+  const ac = new AbortController();
+  const c = jevEnabled();
+  const calls: string[] = [];
+  const r = await routeTask("Fix cache invalidation", c, {
+    env: fakeEnv, signal: ac.signal,
+    request: async s => { calls.push(s.backend); ac.abort(); return decisionReply("fast"); }
+  });
+  assert.ok(r.status === "cancelled");
+  assert.deepEqual(calls, ["laya"]);
+  assert.equal(r.attempts[0].outcome, "cancelled");
+  assert.ok(!("decision" in r));
+});
+
+test("a reply landing past its deadlines is timeout evidence, never selected or failed over", async () => {
+  const c = jevEnabled();
+  const parsed = parseProjectConfig({ ...JSON.parse(JSON.stringify(c)), routingTimeoutMs: 100 });
+  const calls: string[] = [];
+  const busy = async (spec: RequestSpec) => {
+    calls.push(spec.backend);
+    const until = performance.now() + 150;
+    while (performance.now() < until) { /* block the loop so deadline timers cannot fire */ }
+    return decisionReply("fast");
+  };
+  const r = await routeTask("Prove the invariants", parsed, { env: fakeEnv, request: busy });
+  assert.ok(r.status === "failed");
+  assert.deepEqual(calls, ["laya"]);
+  assert.equal(r.attempts[0].outcome, "timeout");
+  assert.ok(!("decision" in r));
+});
+
+const EXPECTED_CRITERIA = {
+  fast: "Small localized work with clear requirements and acceptance checks.",
+  balanced: "Routine implementation and debugging with bounded scope.",
+  deep: "Difficult but bounded debugging, review, and multistep reasoning.",
+  frontier: "Very difficult work with ambiguity and interacting cross-system constraints.",
+  frontier_xhigh: "Demanding reasoning requiring detailed argument and verification across several constraints.",
+  frontier_max: "Exceptional problems requiring the greatest single-worker reasoning depth."
+};
+const EXPECTED_INSTRUCTIONS = "Choose the lightest profile that meets the task's requirements, judged by uncertainty, coupled constraints, required verification, and the consequences of an incorrect result; never by prompt length, file count, or keywords such as security, architecture, or deep analysis.";
+
 const boundedSignal = AbortSignal.timeout(5000);
 const call = (reply: unknown, backend: TaskBackend = "laya", env: NodeJS.ProcessEnv = fakeEnv) =>
   requestTaskChoice(fixtureConfig(), "Prove the invariants", backend, env, boundedSignal, async () => reply);
@@ -270,9 +311,9 @@ test("the Laya request carries the task, model, six criteria and credentials", a
   assert.equal(body.state, "Prove the coupled invariants");
   assert.equal(body.model, "typed-decisions");
   assert.equal(body.questions.route.type, "choice");
-  assert.ok(typeof body.questions.route.instructions === "string" && body.questions.route.instructions.length > 0);
+  assert.equal(body.questions.route.instructions, EXPECTED_INSTRUCTIONS);
   assert.deepEqual(Object.keys(body.questions.route.criteria), [...PROFILE_IDS]);
-  for (const id of PROFILE_IDS) assert.equal(typeof body.questions.route.criteria[id], "string");
+  assert.deepEqual(body.questions.route.criteria, EXPECTED_CRITERIA);
 });
 
 test("the Jev request targets the fixed hosted origin with its own model", async () => {
