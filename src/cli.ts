@@ -100,18 +100,34 @@ const initCommand = async (root: string, dryRun: boolean): Promise<number> => {
 };
 
 const doctorCommand = async (root: string, json: boolean, probe: boolean): Promise<number> => {
-  // The direct transport is only dialed when probe mode asks for it; a plain
-  // doctor never sends a request.
-  const result = await doctorProject(root, { probe, env: process.env, request: directChoiceRequest });
-  if (json) {
-    console.log(JSON.stringify(result));
-    return result.code;
+  // Doctor owns its operation like run does: a received parent signal aborts
+  // the bounded inspections and probes through the controller, so the owned
+  // groups are stopped instead of orphaned by a default-disposition death.
+  const controller = new AbortController();
+  let signal: "SIGINT" | "SIGTERM" | undefined;
+  const onSignal = (received: NodeJS.Signals): void => {
+    signal = received === "SIGTERM" ? "SIGTERM" : "SIGINT";
+    controller.abort();
+  };
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+  try {
+    // The direct transport is only dialed when probe mode asks for it; a plain
+    // doctor never sends a request.
+    const result = await doctorProject(root, { probe, env: process.env, request: directChoiceRequest, signal: controller.signal });
+    if (json) {
+      console.log(JSON.stringify(result));
+    } else {
+      for (const check of result.checks) {
+        console.error("turnhelm doctor: [" + check.status + "] " + check.id + ": " + check.evidence
+          + (check.next === "" ? "" : " (next: " + check.next + ")"));
+      }
+    }
+    return signal !== undefined ? signalExit(signal) : result.code;
+  } finally {
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
   }
-  for (const check of result.checks) {
-    console.error("turnhelm doctor: [" + check.status + "] " + check.id + ": " + check.evidence
-      + (check.next === "" ? "" : " (next: " + check.next + ")"));
-  }
-  return result.code;
 };
 
 const runCommand = async (root: string, write: boolean, positionalTask: string | undefined): Promise<number> => {
