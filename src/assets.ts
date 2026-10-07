@@ -10,29 +10,34 @@ const READ_CHUNK_BYTES = 4096;
 
 function readTemplate(url: URL, what: string): Buffer {
   const path = fileURLToPath(url);
-  const chunks: Buffer[] = [];
-  let total = 0;
-  let descriptor: number | undefined;
   try {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let descriptor: number | undefined;
     try {
-      descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new TemplateError(what + " template is missing");
       throw error;
     }
-    if (!fstatSync(descriptor).isFile()) throw new TemplateError(what + " template is not a regular file");
-    const chunk = Buffer.alloc(READ_CHUNK_BYTES);
-    while (total <= MAX_TEMPLATE_BYTES) {
-      const read = readSync(descriptor, chunk, 0, Math.min(chunk.length, MAX_TEMPLATE_BYTES + 1 - total), null);
-      if (read === 0) break;
-      total += read;
-      chunks.push(Buffer.from(chunk.subarray(0, read)));
+    try {
+      if (!fstatSync(descriptor).isFile()) throw new TemplateError(what + " template is not a regular file");
+      const chunk = Buffer.alloc(READ_CHUNK_BYTES);
+      while (total <= MAX_TEMPLATE_BYTES) {
+        const read = readSync(descriptor, chunk, 0, Math.min(chunk.length, MAX_TEMPLATE_BYTES + 1 - total), null);
+        if (read === 0) break;
+        total += read;
+        chunks.push(Buffer.from(chunk.subarray(0, read)));
+      }
+    } finally {
+      closeSync(descriptor);
     }
-  } finally {
-    if (descriptor !== undefined) closeSync(descriptor);
+    if (total > MAX_TEMPLATE_BYTES) throw new TemplateError(what + " template exceeds " + MAX_TEMPLATE_BYTES + " bytes");
+    return Buffer.concat(chunks);
+  } catch (error) {
+    if (error instanceof TemplateError) throw error;
+    throw new TemplateError(what + " template is unreadable: " + (error as Error).message);
   }
-  if (total > MAX_TEMPLATE_BYTES) throw new TemplateError(what + " template exceeds " + MAX_TEMPLATE_BYTES + " bytes");
-  return Buffer.concat(chunks);
 }
 
 export function readTemplates(): Templates {

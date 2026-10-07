@@ -1,3 +1,4 @@
+import { statSync } from "node:fs";
 import { lstat, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { TemplateError, readTemplates, type Templates } from "./assets.js";
@@ -29,6 +30,7 @@ class InstallError extends Error {
 }
 
 const MAX_FILE_BYTES = 65536;
+const MAX_AGENTS_BYTES = 1048576;
 const CONFIG_RELATIVE = ".turnhelm/config.json";
 const SKILL_MD_RELATIVE = ".agents/skills/turnhelm-routing/SKILL.md";
 const SKILL_YAML_RELATIVE = ".agents/skills/turnhelm-routing/agents/openai.yaml";
@@ -52,7 +54,7 @@ const MANAGED_BLOCK = [
 
 type Existing = { bytes: Buffer; mode: number };
 
-async function readExisting(root: string, relative: string): Promise<Existing | undefined> {
+async function readExisting(root: string, relative: string, max = MAX_FILE_BYTES): Promise<Existing | undefined> {
   let path: string;
   try {
     path = projectPath(root, relative);
@@ -69,7 +71,7 @@ async function readExisting(root: string, relative: string): Promise<Existing | 
   if (!info.isFile()) throw new InstallError("conflict", relative + " is not a regular file");
   let bytes: Buffer | undefined;
   try {
-    bytes = await readProjectFile(root, relative, MAX_FILE_BYTES);
+    bytes = await readProjectFile(root, relative, max);
   } catch (error) {
     throw new InstallError("conflict", relative + " could not be read: " + (error as Error).message);
   }
@@ -97,21 +99,21 @@ function planAgentsFrom(existing: Existing | undefined): Change | undefined {
   if (!(beginCount === 0 && endCount === 0) && (beginCount !== 1 || endCount !== 1)) {
     throw new InstallError("conflict", AGENTS_RELATIVE + " managed markers are duplicated or unbalanced");
   }
-  const begin = text.indexOf(MARKER_BEGIN);
-  const end = text.indexOf(MARKER_END);
+  const crlf = text.includes("\r\n");
+  const newline = crlf ? "\r\n" : "\n";
+  const block = crlf ? MANAGED_BLOCK.replaceAll("\n", "\r\n") : MANAGED_BLOCK;
   if (beginCount === 0) {
-    const crlf = text.includes("\r\n");
-    const newline = crlf ? "\r\n" : "\n";
-    const block = crlf ? MANAGED_BLOCK.replaceAll("\n", "\r\n") : MANAGED_BLOCK;
-    const separator = text.endsWith("\n") ? "" : newline;
+    const separator = text.length === 0 || text.endsWith("\n") ? "" : newline;
     const content = Buffer.concat([existing.bytes, Buffer.from(separator + block + newline)]);
     return { relative: AGENTS_RELATIVE, content, created: false, previous: { bytes: existing.bytes, mode: existing.mode } };
   }
+  const begin = text.indexOf(MARKER_BEGIN);
+  const end = text.indexOf(MARKER_END);
   if (begin > end) throw new InstallError("conflict", AGENTS_RELATIVE + " managed markers are unbalanced");
-  const crlf = text.includes("\r\n");
-  const newline = crlf ? "\r\n" : "\n";
-  const expectedBlock = crlf ? MANAGED_BLOCK.replaceAll("\n", "\r\n") : MANAGED_BLOCK;
-  if (text.slice(begin, end + MARKER_END.length) !== expectedBlock) {
+  // Accept either line-ending style for the block itself: a stray CRLF in the
+  // user's own bytes elsewhere must not invalidate an installed LF block.
+  const currentBlock = text.slice(begin, end + MARKER_END.length);
+  if (currentBlock !== block && currentBlock !== MANAGED_BLOCK) {
     throw new InstallError("conflict", AGENTS_RELATIVE + " managed block differs from the installed template");
   }
   return undefined;
@@ -119,6 +121,13 @@ function planAgentsFrom(existing: Existing | undefined): Change | undefined {
 
 export async function inspectInstallation(root: string, templates: Templates): Promise<Inspection> {
   const changes: Change[] = [];
+  let rootInfo;
+  try {
+    rootInfo = statSync(root);
+  } catch {
+    throw new InstallError("io", "project root is not readable");
+  }
+  if (!rootInfo.isDirectory()) throw new InstallError("io", "project root is not a directory");
   const config = await readExisting(root, CONFIG_RELATIVE);
   if (config === undefined) {
     changes.push({ relative: CONFIG_RELATIVE, content: templates.config, created: true });
@@ -137,7 +146,7 @@ export async function inspectInstallation(root: string, templates: Templates): P
       throw new InstallError("conflict", relative + " differs from the owned template");
     }
   }
-  const agents = await planAgentsFrom(await readExisting(root, AGENTS_RELATIVE));
+  const agents = await planAgentsFrom(await readExisting(root, AGENTS_RELATIVE, MAX_AGENTS_BYTES));
   if (agents !== undefined) changes.push(agents);
   return { changes, planned: changes.map(change => change.relative) };
 }
@@ -201,7 +210,7 @@ async function applyChange(root: string, change: Change): Promise<"written" | "s
   if (info === undefined || !info.isFile()) throw new InstallError("race", change.relative + " changed during the installation");
   let current: Buffer | undefined;
   try {
-    current = await readProjectFile(root, change.relative, MAX_FILE_BYTES);
+    current = await readProjectFile(root, change.relative, change.relative === AGENTS_RELATIVE ? MAX_AGENTS_BYTES : MAX_FILE_BYTES);
   } catch {
     throw new InstallError("race", change.relative + " changed during the installation");
   }

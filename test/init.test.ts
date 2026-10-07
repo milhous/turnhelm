@@ -267,3 +267,38 @@ async function snapshotThenMissing(root: string): Promise<boolean> {
   }
   return true;
 }
+
+test("init refuses a missing project root without creating it", async (t) => {
+  const base = await mkdtemp(join(tmpdir(), "turnhelm-init-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const missing = join(base, "does-not-exist");
+  const result = await initProject(missing, { dryRun: false });
+  assert.equal(result.code, 1);
+  assert.equal(result.error, "io");
+  assert.equal(await lstat(missing).then(() => true, () => false), false);
+});
+
+test("stray CRLF outside the block does not invalidate an installed LF block", async (t) => {
+  const root = await tempProject(t, { agents: "# Team rules\n" });
+  assert.equal((await initProject(root, { dryRun: false })).code, 0);
+  const agentsPath = join(root, "AGENTS.md");
+  const installed = await readFile(agentsPath, "utf8");
+  await writeFile(agentsPath, installed.replace("# Team rules\n", "# Team rules\r\n"));
+  const result = await initProject(root, { dryRun: false });
+  assert.equal(result.code, 0);
+  assert.equal(result.planned.includes("AGENTS.md"), false);
+});
+
+test("empty AGENTS.md receives the block without a leading newline", async (t) => {
+  const root = await tempProject(t, { agents: "" });
+  assert.equal((await initProject(root, { dryRun: false })).code, 0);
+  assert.ok((await readAgents(root)).startsWith("<!-- turnhelm:begin v1 -->\n"));
+});
+
+test("a large AGENTS.md still installs the managed block", async (t) => {
+  const root = await tempProject(t, { agents: "# Big\n\n" + "x".repeat(70000) + "\n" });
+  const result = await initProject(root, { dryRun: false });
+  assert.equal(result.code, 0);
+  assert.ok((await readAgents(root)).includes("<!-- turnhelm:begin v1 -->"));
+  assert.ok((await readAgents(root)).includes("<!-- turnhelm:end -->"));
+});
