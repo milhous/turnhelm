@@ -1,5 +1,5 @@
 import { statSync } from "node:fs";
-import { chmod, lstat, mkdir, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { TemplateError, readTemplates, type Templates } from "./assets.js";
 import { parseProjectConfig } from "./config.js";
@@ -128,6 +128,8 @@ async function assertRoot(root: string): Promise<void> {
 
 async function recordParentIdentities(root: string, changes: readonly Change[]): Promise<void> {
   const identities = new Map<string, Identity | undefined>();
+  // The root itself is an existing parent of every target.
+  identities.set(root, toIdentity(await lstat(root)));
   for (const change of changes) {
     let current = root;
     for (const segment of change.path.split("/").slice(0, -1)) {
@@ -173,6 +175,24 @@ export async function inspectInstallation(root: string, templates: Templates): P
 
 async function verifyParents(root: string, change: Change): Promise<void> {
   const recorded = PARENT_IDENTITIES.get(change);
+  if (recorded !== undefined && recorded.has(root)) {
+    const expectedRoot = recorded.get(root);
+    let rootInfo;
+    try {
+      rootInfo = await lstat(root);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new InstallError("race", "project root disappeared during the installation");
+      }
+      throw new InstallError("race", "project root is unreadable");
+    }
+    if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) {
+      throw new InstallError("race", "project root changed under the installation");
+    }
+    if (expectedRoot !== undefined && (rootInfo.dev !== expectedRoot.dev || rootInfo.ino !== expectedRoot.ino)) {
+      throw new InstallError("race", "project root identity changed under the installation");
+    }
+  }
   let current = root;
   for (const segment of change.path.split("/").slice(0, -1)) {
     current = join(current, segment);
@@ -262,6 +282,12 @@ async function applyChange(root: string, change: Change): Promise<void> {
     // rename so an ordinary concurrent edit between the temp write and the
     // rename is detected and refused.
     await verifyChange(root, change);
+    // Owned identity is the temp's identity, captured before the rename and
+    // carried through: whichever inode appears at the target afterwards is
+    // never treated as ours.
+    if (change.before === undefined) {
+      CREATED_IDENTITIES.set(change, toIdentity(await lstat(temp)));
+    }
     await rename(temp, path);
   } catch (error) {
     await rm(temp, { force: true }).catch(() => {});
@@ -284,9 +310,9 @@ export async function applyInstallation(root: string, changes: readonly Change[]
     try {
       path = projectPath(root, change.path);
       await applyChange(root, change);
-      if (change.before === undefined) {
-        CREATED_IDENTITIES.set(change, toIdentity(await lstat(path)));
-      }
+      // A successful write is always reported, regardless of any later
+      // bookkeeping: owned identity was captured from the temp before the
+      // rename, so nothing needs to be read from the target here.
       applied.push({ change, path });
     } catch (error) {
       const category: FaultCategory = error instanceof InstallError ? error.category : "write";
@@ -297,7 +323,6 @@ export async function applyInstallation(root: string, changes: readonly Change[]
           retained.push(entry.change.path);
           continue;
         }
-        const expected = CREATED_IDENTITIES.get(entry.change);
         let info;
         try {
           info = await lstat(entry.path);
@@ -305,22 +330,27 @@ export async function applyInstallation(root: string, changes: readonly Change[]
           if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT") retained.push(entry.change.path);
           continue;
         }
+        // Identity first: never read bytes of a file we do not own.
+        const expected = CREATED_IDENTITIES.get(entry.change);
+        if (!info.isFile() || expected === undefined || info.dev !== expected.dev || info.ino !== expected.ino) {
+          retained.push(entry.change.path);
+          continue;
+        }
+        let current: Buffer | undefined;
         try {
-          const current = await readFile(entry.path);
-          const unchanged = expected !== undefined
-            && info.dev === expected.dev && info.ino === expected.ino
-            && current.equals(entry.change.after);
-          if (unchanged) {
-            try {
-              await unlink(entry.path);
-            } catch {
-              retained.push(entry.change.path);
-            }
-          } else {
-            retained.push(entry.change.path);
-          }
-        } catch (cleanupError) {
-          if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT") retained.push(entry.change.path);
+          current = await readProjectFile(root, entry.change.path, maxFor(entry.change.path));
+        } catch {
+          retained.push(entry.change.path);
+          continue;
+        }
+        if (current === undefined || !current.equals(entry.change.after)) {
+          retained.push(entry.change.path);
+          continue;
+        }
+        try {
+          await unlink(entry.path);
+        } catch {
+          retained.push(entry.change.path);
         }
       }
       return { code: 1, applied: retained, error: category };

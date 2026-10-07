@@ -56,6 +56,7 @@ async function runChild(t: TestContext, root: string, scenario: string): Promise
     const originalReadSync = mutableFs.readSync;
     let writes = 0;
     let cleanupArmed = false;
+    let configWritten = false;
     let cleanupReadBytes = 0;
     const cleanupReads = [];
     const fsp0 = await import("node:fs/promises");
@@ -106,7 +107,6 @@ async function runChild(t: TestContext, root: string, scenario: string): Promise
       await fsp0.mkdir(root);
     }
     if (scenario === "d8a" || scenario === "d8b" || scenario === "d10a" || scenario === "d10b") {
-      let configWritten = false;
       mutableFs.promises.rename = async function (from, to) {
         if (String(to) === skillPath) {
           cleanupArmed = true;
