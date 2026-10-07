@@ -1,44 +1,6 @@
 import { spawn } from "node:child_process";
 import { decodeWorkerEvent, MAX_EVENT_BYTES, type WorkerEvent, type WorkerUsage } from "./codex-events.js";
-import type { RouteDecision, TaskDecision } from "./route.js";
-
-export function buildCodexArgs(route: RouteDecision, write: boolean): string[] {
-  const args = ["exec", "--sandbox", write ? "workspace-write" : "read-only"];
-  if (route.kind === "profile") {
-    args.push("--model", route.profile.model, "--config", `model_reasoning_effort="${route.profile.effort}"`);
-  }
-  return [...args, "-"];
-}
-
-export function codexEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const copy = { ...env };
-  delete copy.TYPESAFE_API_KEY;
-  delete copy.LAYA_API_KEY;
-  delete copy.TURNHELM_CONFIG;
-  return copy;
-}
-
-export async function runCodex(route: RouteDecision, prompt: string, write: boolean): Promise<number> {
-  const child = spawn("codex", buildCodexArgs(route, write), {
-    shell: false,
-    stdio: ["pipe", "inherit", "inherit"],
-    env: codexEnvironment()
-  });
-  let processFailed = false;
-  child.once("error", () => { processFailed = true; });
-  if (!child.stdin) throw new Error("Codex could not start");
-  const stdin = child.stdin;
-  return await new Promise<number>((resolve, reject) => {
-    let inputFailed = false;
-    stdin.on("error", () => { inputFailed = true; });
-    // close follows stdio shutdown, including pending stdin errors.
-    child.once("close", code => {
-      if (processFailed) reject(new Error("Codex could not start"));
-      else resolve(code === 0 && inputFailed ? 1 : (code ?? 1));
-    });
-    stdin.end(prompt);
-  });
-}
+import type { TaskDecision } from "./route.js";
 
 export type WorkerResult = Readonly<{
   code: number;
@@ -282,7 +244,7 @@ export function executeWorker(
     const onMessageAck = (error?: Error | null): void => ackWrite("message", error);
     const onDiagAck = (error?: Error | null): void => ackWrite("diag", error);
     options.signal?.addEventListener("abort", onAbort, { once: true });
-    // Early spawn-error listener precedes any stdin use (same pattern as runCodex).
+    // Early spawn-error listener precedes any stdin use.
     child.once("error", () => { recordFailure("spawn"); });
     output.on("error", onOutputError);
     output.on("close", onOutputError);

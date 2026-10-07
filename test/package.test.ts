@@ -131,8 +131,11 @@ test("the packed distribution installs offline and serves the project entry end 
     }
     await readFile(join(nested, ".turnhelm", "config.json"), "utf8");
     const repeat = await execute(bin, ["init", "--project", nested], { env: childEnv() });
-    assert.ok(repeat.stderr.includes("nothing to install"),
-      "a repeated init must report an already-initialized project");
+    assert.ok(!repeat.stderr.includes("applied "),
+      "a repeated init must apply nothing");
+    const repeatDry = await execute(bin, ["init", "--dry-run", "--project", nested], { env: childEnv() });
+    assert.ok(repeatDry.stderr.includes("nothing to install"),
+      "a repeated dry-run must report an already-initialized project");
 
     // 6. Offline doctor through the installed bin, with the fake Codex first
     //    on PATH and nothing else reachable but the real toolchain.
