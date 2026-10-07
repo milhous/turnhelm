@@ -48,6 +48,8 @@ type Gate = "abort-ready" | "abort-received" | "epipe-received";
 
 type OutputMode = "stdout" | "blocker" | "abort-in-write";
 
+type DiagMode = "stall" | "error";
+
 type WorkerScenario = {
   script?: string;
   task?: string;
@@ -57,6 +59,7 @@ type WorkerScenario = {
   gate?: Gate;
   output?: OutputMode;
   drainDelayMs?: number;
+  diag?: DiagMode;
 };
 
 type Recorded = {
@@ -69,6 +72,9 @@ type Recorded = {
   received?: number;
   maxPending?: number;
   emitted?: string;
+  diagWrites?: number;
+  diagMaxLength?: number;
+  diagFinalLength?: number;
   harnessError?: string;
 };
 
@@ -95,6 +101,10 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
     let pending = 0;
     let maxPending = 0;
     let captured = "";
+    let diagWrites = 0;
+    let diagMaxLength = 0;
+    let diagFinalLength = 0;
+    let diagSink;
     let output;
     ${blocker ? `
     output = new Writable({
@@ -109,6 +119,21 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
           : `setTimeout(() => { pending -= 1; callback(); }, ${scenario.drainDelayMs ?? 30});`}
       }
     });` : "output = process.stdout;"}
+    ${scenario.diag === "stall" ? `
+    diagSink = new Writable({
+      highWaterMark: 0,
+      write(_chunk, _encoding, callback) {
+        diagWrites += 1;
+        diagMaxLength = Math.max(diagMaxLength, diagSink.writableLength);
+        // Deliberately never calls callback: the diagnostics sink stays stalled.
+      }
+    });` : ""}
+    ${scenario.diag === "error" ? `
+    diagSink = new Writable({
+      write(_chunk, _encoding, callback) {
+        callback(new Error("PRIVATE_DIAGNOSTIC_EPIPE"));
+      }
+    });` : ""}
     // The harness must never hang: exit 89 if the worker promise does not settle.
     const guard = setTimeout(() => process.exit(89), 2500);
     ${scenario.gate === "abort-ready" ? `
@@ -126,14 +151,16 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
         write: ${scenario.write ?? false},
         env: process.env,
         signal: controller.signal,
-        output
+        output,
+        ...(diagSink ? { diagnostics: diagSink } : {})
       });
       ${scenario.gate === "abort-ready" ? "await waitReady(); controller.abort();" : ""}
       ${scenario.gate === "abort-received" ? "while (received < 1) await new Promise(resolve => setTimeout(resolve, 10)); controller.abort();" : ""}
       ${scenario.gate === "epipe-received" ? "while (received < 1) await new Promise(resolve => setTimeout(resolve, 10)); output.destroy(new Error(\"EPIPE\"));" : ""}
       const result = await running;
       clearTimeout(guard);
-      await writeFile(resultFile, JSON.stringify({ ...result, received, maxPending, emitted: captured }));
+      diagFinalLength = diagSink ? diagSink.writableLength : 0;
+      await writeFile(resultFile, JSON.stringify({ ...result, received, maxPending, emitted: captured, diagWrites, diagMaxLength, diagFinalLength }));
     } catch (error) {
       clearTimeout(guard);
       await writeFile(resultFile, JSON.stringify({ harnessError: error instanceof Error ? error.message : String(error) }));
@@ -233,7 +260,10 @@ finish(() => {
     usageScope: "unverified",
     received: 0,
     maxPending: 0,
-    emitted: ""
+    emitted: "",
+    diagWrites: 0,
+    diagMaxLength: 0,
+    diagFinalLength: 0
   });
   assert.equal(await fakeFile(directory, "argv.json"), JSON.stringify(buildWorkerArgs(decision("balanced"), true)));
   assert.equal(await fakeFile(directory, "cwd.txt"), await realpath(join(directory, "root")));
@@ -310,6 +340,51 @@ finish(() => {
   assert.deepEqual(recorded.usage, { output_tokens: 2 });
   forbid(JSON.stringify(recorded) + stdout + stderr, "TEST_PRIVATE_TOOL_SENTINEL", "TEST_PRIVATE_OUTPUT_SENTINEL");
   assert.equal(stderr, "turnhelm: tool-progress\n");
+});
+
+test("an async diagnostics sink error is a sanitized output failure that stops the group", { timeout: 30_000 }, async t => {
+  const outcome = await runWorker(t, {
+    diag: "error",
+    script: `
+const { spawn } = require("node:child_process");
+const child = spawn(process.execPath, ["-e", ${JSON.stringify(stubbornChild)}], { stdio: "ignore" });
+fs.writeFileSync(path.join(here, "descendant.pid"), String(child.pid));
+finish(() => {
+  emit({ type: "error", message: "TEST_PRIVATE_ERROR_SENTINEL" });
+  emit({ type: "turn.completed", usage: { input_tokens: 1 } });
+  setInterval(() => {}, 500);
+});
+`
+  }).then(
+    value => ({ kind: "settled" as const, value }),
+    error => ({ kind: "crashed" as const, error })
+  );
+  if (outcome.kind === "crashed") {
+    const error = outcome.error as NodeJS.ErrnoException & { code?: number | null; stderr?: string };
+    assert.fail("diagnostics sink error crashed the harness: exit " + error.code
+      + ", raw error text on stderr: " + String(error.stderr ?? "").includes("PRIVATE_DIAGNOSTIC_EPIPE"));
+  }
+  const { recorded, stderr, directory } = outcome.value;
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "output");
+  forbid(JSON.stringify(recorded) + stderr, "PRIVATE_DIAGNOSTIC_EPIPE", "TEST_PRIVATE_ERROR_SENTINEL");
+  await waitForExit(Number(await fakeFile(directory, "descendant.pid")));
+});
+
+test("a stalled diagnostics sink retains a bounded queue and keeps completion effective", { timeout: 30_000 }, async t => {
+  const { recorded, stderr } = await runWorker(t, {
+    diag: "stall",
+    script: `
+finish(() => {
+  for (let i = 0; i < 10000; i++) emit({ type: "error", message: "TEST_PRIVATE_ERROR_SENTINEL_" + i });
+  emit({ type: "turn.completed" });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.ok((recorded.diagWrites ?? 0) <= 8, "diagnostic writes must be bounded, saw " + recorded.diagWrites);
+  assert.ok((recorded.diagFinalLength ?? 0) <= 256, "retained diagnostic bytes must be bounded, saw " + recorded.diagFinalLength);
+  forbid(JSON.stringify(recorded) + stderr, "TEST_PRIVATE_ERROR_SENTINEL");
 });
 
 test("repeated completions keep the latest usage snapshot, never a sum", { timeout: 30_000 }, async t => {
