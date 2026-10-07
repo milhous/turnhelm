@@ -46,7 +46,7 @@ const stubbornChild = `process.on('SIGTERM', function () {}); setInterval(functi
 
 type Gate = "abort-ready" | "abort-received" | "epipe-received" | "abort-diag-late";
 
-type OutputMode = "stdout" | "blocker" | "abort-in-write" | "accepted-delay" | "accepted-error";
+type OutputMode = "stdout" | "blocker" | "abort-in-write" | "abort-late-error" | "accepted-delay" | "accepted-error";
 
 type DiagMode = "stall" | "error" | "delay" | "delay-error" | "slow";
 
@@ -80,6 +80,8 @@ type Recorded = {
   diagMaxLength?: number;
   diagFinalLength?: number;
   harnessError?: string;
+  outputErrBefore?: number;
+  outputErrAfter?: number;
 };
 
 async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ recorded: Recorded; stdout: string; stderr: string; directory: string }> {
@@ -112,6 +114,9 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
     let diagAcked = false;
     let diagSink;
     let output;
+    let storedCb = null;
+    let outputErrBefore;
+    let outputErrAfter;
     ${blocker ? `
     output = new Writable({
       highWaterMark: ${scenario.output === "accepted-delay" || scenario.output === "accepted-error" ? 65536 : 0},
@@ -122,7 +127,9 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
         maxPending = Math.max(maxPending, pending);
         ${scenario.output === "abort-in-write"
           ? "controller.abort(); // Deliberately never calls callback and never drains."
-          : scenario.output === "accepted-delay"
+          : scenario.output === "abort-late-error"
+            ? "storedCb = callback; controller.abort(); // Deliberately never acks this write."
+            : scenario.output === "accepted-delay"
             ? `setTimeout(() => { pending -= 1; outputAcked = true; callback(); }, ${scenario.tailDelayMs ?? 500});`
             : scenario.output === "accepted-error"
               ? `setTimeout(() => { pending -= 1; callback(new Error("PRIVATE_LATE_EPIPE")); }, ${scenario.tailDelayMs ?? 500});`
@@ -200,8 +207,14 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
       ${scenario.gate === "epipe-received" ? "while (received < 1) await new Promise(resolve => setTimeout(resolve, 10)); output.destroy(new Error(\"EPIPE\"));" : ""}
       const result = await running;
       clearTimeout(guard);
+      if (storedCb) {
+        outputErrBefore = output.listenerCount("error");
+        storedCb(new Error("PRIVATE_LATE_ACK"));
+        await new Promise(resolve => setTimeout(resolve, 50));
+        outputErrAfter = output.listenerCount("error");
+      }
       diagFinalLength = diagSink ? diagSink.writableLength : 0;
-      await writeFile(resultFile, JSON.stringify({ ...result, received, maxPending, emitted: captured, outputAcked, diagAcked, diagWrites, diagMaxLength, diagFinalLength }));
+      await writeFile(resultFile, JSON.stringify({ ...result, received, maxPending, emitted: captured, outputAcked, diagAcked, diagWrites, diagMaxLength, diagFinalLength, outputErrBefore, outputErrAfter }));
       ${scenario.lingerMs ? `setTimeout(() => {}, ${scenario.lingerMs});` : ""}
     } catch (error) {
       clearTimeout(guard);
@@ -789,6 +802,24 @@ finish(() => {
   assert.equal(recorded.status, "cancelled");
   assert.equal(recorded.received, 1);
   await waitForExit(Number(await fakeFile(directory, "descendant.pid")));
+});
+
+test("a late error ack after a settled cancelled run detaches owned sink listeners", { timeout: 30_000 }, async t => {
+  const { recorded, stderr } = await runWorker(t, {
+    output: "abort-late-error",
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "racing" } });
+  emit({ type: "turn.completed", usage: { input_tokens: 5 } });
+  setInterval(() => {}, 500);
+});
+`
+  });
+  assert.equal(recorded.status, "cancelled");
+  assert.equal(recorded.outputErrBefore, 1, "the sink must own its error listener while the write is unacked");
+  assert.equal(recorded.outputErrAfter, 0, "the late error ack must detach owned listeners from the sink");
+  assert.equal(recorded.harnessError, undefined);
+  forbid(stderr, "PRIVATE_LATE_ACK");
 });
 
 test("a TERM-ignoring worker is killed within the grace window", { timeout: 30_000 }, async t => {
