@@ -445,7 +445,7 @@ finish(() => {
   });
   assert.equal(recorded.status, "completed");
   assert.equal(recorded.diagWrites, 1, "one fixed-category event must surface exactly once, saw " + recorded.diagWrites);
-  assert.equal(stderr, "turnhelm: worker-event-error\n");
+  assert.equal(stderr, "");
   forbid(JSON.stringify(recorded) + stderr, "TEST_PRIVATE_ERROR_SENTINEL");
 });
 
@@ -505,7 +505,7 @@ finish(() => {
   });
   assert.equal(recorded.status, "completed");
   assert.equal(recorded.diagAcked, true, "the result must not settle before the accepted write completes");
-  assert.equal(stderr, "turnhelm: worker-event-error\n");
+  assert.equal(stderr, "");
 });
 
 test("a late diagnostics-write error is a sanitized output failure, not a crash", { timeout: 30_000 }, async t => {

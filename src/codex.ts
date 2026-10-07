@@ -127,6 +127,7 @@ export function executeWorker(
     let cancelDiagWait: (() => void) | undefined;
     let diagLine: string | undefined;
     let stdoutEnded = false;
+    let pendingOutputs = 0;
 
     // The diagnostics sink is owned output: an async sink error or close is a
     // parent-output failure with the same EPIPE discipline as the message sink.
@@ -162,9 +163,9 @@ export function executeWorker(
       if (finished) return;
       finished = true;
       options.signal?.removeEventListener("abort", onAbort);
-      output.removeListener("error", onOutputError);
-      diagnostics.removeListener("error", onDiagFailure);
-      diagnostics.removeListener("close", onDiagFailure);
+      // With writes still in flight the listeners stay attached (they detach
+      // from the last write callback); cancellation may settle despite them.
+      if (pendingOutputs === 0) detachSinkListeners();
       cancelDrainWait?.();
       cancelDiagWait?.();
       let status: WorkerResult["status"];
@@ -186,9 +187,12 @@ export function executeWorker(
     };
 
     // Settling requires the child close, the bounded group-shutdown obligation,
-    // and an empty message pipeline: a blocked sink holds the result open.
+    // and an empty message pipeline. An accepted write that has neither
+    // completed nor errored holds settlement open — an accepted write is not a
+    // flushed write — unless cancellation resolves the run.
     const settle = (): void => {
       if (!closed || finished || !shutdownDischarged || cancelDrainWait !== undefined) return;
+      if (pendingOutputs !== 0 && !cancelled) return;
       finish();
     };
 
@@ -219,15 +223,36 @@ export function executeWorker(
       }, GROUP_POLL_MS);
     };
 
-    // The first transport cause wins; consequences of our own shutdown are not causes.
+    // The first transport cause wins; consequences of our own shutdown are not
+    // causes, and nothing after settlement changes the reported outcome.
     const recordFailure = (cause: "spawn" | "stdin" | "protocol" | "output"): void => {
-      if (failure !== undefined || shutdownStarted) return;
+      if (failure !== undefined || shutdownStarted || finished) return;
       failure = cause;
       beginShutdown();
     };
 
     const onAbort = (): void => { cancelled = true; beginShutdown(); };
     const onOutputError = (): void => { recordFailure("output"); };
+
+    // Listener lifetime must cover our accepted bytes: while any write this
+    // invocation made is still in flight, the sinks keep their error listeners,
+    // so a late sink error can never be an unhandled emission.
+    const detachSinkListeners = (): void => {
+      output.removeListener("error", onOutputError);
+      diagnostics.removeListener("error", onDiagFailure);
+      diagnostics.removeListener("close", onDiagFailure);
+    };
+
+    // Completion or error of every accepted write, on both sinks.
+    const onWriteAck = (error?: Error | null): void => {
+      pendingOutputs -= 1;
+      if (error !== null && error !== undefined) { recordFailure("output"); return; }
+      if (finished) {
+        if (pendingOutputs === 0) detachSinkListeners();
+        return;
+      }
+      settle();
+    };
     options.signal?.addEventListener("abort", onAbort, { once: true });
     // Early spawn-error listener precedes any stdin use (same pattern as runCodex).
     child.once("error", () => { recordFailure("spawn"); });
@@ -255,10 +280,12 @@ export function executeWorker(
     };
 
     const emitMessage = (text: string): void => {
+      pendingOutputs += 1;
       let accepted: boolean;
       try {
-        accepted = output.write(text + "\n");
+        accepted = output.write(text + "\n", onWriteAck);
       } catch {
+        pendingOutputs -= 1;
         recordFailure("output");
         return;
       }
@@ -294,25 +321,29 @@ export function executeWorker(
     };
 
     const writeDiagLine = (line: string): void => {
+      pendingOutputs += 1;
       let accepted: boolean;
       try {
-        accepted = diagnostics.write(line);
+        accepted = diagnostics.write(line, onWriteAck);
       } catch {
+        pendingOutputs -= 1;
         recordFailure("output");
         return;
       }
       if (accepted) return;
       // The sink may have aborted, errored, or closed synchronously inside
-      // write(); a blocked wait after shutdown would be unreachable.
+      // write(); a blocked wait after shutdown would be unreachable. A false
+      // return means the line was ACCEPTED (queued), never that it was
+      // rejected: only a NEW event arriving while blocked may occupy the
+      // lossy slot, so the drain never replays this line.
       if (shutdownStarted || finished) return;
-      diagLine = line;
       cancelDiagWait = waitDiagDrain();
     };
 
     // One fixed-category line per diagnostic event; never the raw command,
     // output, stderr, or native error text behind it. While the sink is
-    // blocked, at most the latest line is retained — the queue cannot grow
-    // with the event count.
+    // blocked, at most the latest new event's line is retained — the queue
+    // cannot grow with the event count, and accepted lines are never rewritten.
     const reportDiagnostic = (category: "worker-event-error" | "tool-progress"): void => {
       if (shutdownStarted || finished) return;
       const line = "turnhelm: " + category + "\n";
