@@ -1,12 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readProjectConfig } from "../src/config.js";
+import { parseProjectConfig, readProjectConfig } from "../src/config.js";
 import { routeTask } from "../src/route.js";
 
 // This file is intentionally excluded from `pnpm test`; `pnpm run test:live`
 // is an explicit real-service gate. It never probes or qualifies models:
-// routeTask's selected profile IDs are the only routing outcomes, and usage
-// totals stay unverified. Compile-only for offline verification.
+// routeTask's selected backend and profile IDs are the only routing outcomes,
+// and usage totals stay unverified. Compile-only for offline verification.
 
 const cases = [
   ["What is this repository called? Do not change files.", "fast"],
@@ -20,22 +20,41 @@ const cases = [
 const percentile = (values: number[], p: number) => values.sort((a, b) => a - b)[Math.ceil(values.length * p) - 1];
 
 for (const backend of ["laya", "jev"] as const) {
-  test("real " + backend + " routes labelled prompts through the project entry", async () => {
-    if (backend === "jev" && process.env.TURNHELM_ALLOW_HOSTED_JEV !== "1") {
-      throw new Error("real jev live test requires TURNHELM_ALLOW_HOSTED_JEV=1");
+  test("real " + backend + " routes labelled prompts through the isolated backend", async () => {
+    const base = await readProjectConfig(process.cwd());
+    // Gate exactly as production would: the project config must already enable
+    // the requested backend and the environment must already authorize hosted
+    // Jev. This harness never auto-enables a backend or bypasses gating.
+    if (backend === "jev") {
+      if (!base.backends.jev.enabled) {
+        throw new Error("real jev live test requires backends.jev.enabled=true in .turnhelm/config.json");
+      }
+      if (process.env.TURNHELM_ALLOW_HOSTED_JEV !== "1") {
+        throw new Error("real jev live test requires TURNHELM_ALLOW_HOSTED_JEV=1");
+      }
+    } else if (!base.backends.laya.enabled) {
+      throw new Error("real laya live test requires backends.laya.enabled=true in .turnhelm/config.json");
     }
-    const config = await readProjectConfig(process.cwd());
-    const env = backend === "jev"
-      ? { ...process.env, TURNHELM_ALLOW_HOSTED_JEV: "1" }
-      : process.env;
+    // Isolate the requested backend for the iteration: the other backend is
+    // disabled, so a printed count can only come from the requested one.
+    const config = parseProjectConfig({
+      version: 1,
+      routingTimeoutMs: base.routingTimeoutMs,
+      backends: backend === "laya"
+        ? { laya: { enabled: true, url: base.backends.laya.url }, jev: { enabled: false } }
+        : { laya: { enabled: false, url: base.backends.laya.url }, jev: { enabled: true } },
+      profiles: { ...base.profiles }
+    });
     const times: number[] = [];
     const selected = new Map<string, number>();
     for (let repeat = 0; repeat < 4; repeat++) {
       for (const [prompt, expected] of cases) {
         const start = performance.now();
-        const result = await routeTask(prompt, config, { env });
+        const result = await routeTask(prompt, config, { env: process.env });
         times.push(performance.now() - start);
         assert.equal(result.status, "selected");
+        // The requested backend is asserted before that backend's count is printed.
+        assert.equal(result.decision.backend, backend);
         assert.equal(result.decision.profileId, expected);
         selected.set(expected, (selected.get(expected) ?? 0) + 1);
       }

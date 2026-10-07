@@ -20,9 +20,12 @@ responsible for its own authentication and provider access.
 
 The task comes from one self-contained positional argument or piped stdin
 (bounded at 8192 UTF-8 bytes; never truncated). `doctor --probe` sends exactly
-one synthetic classification request to the configured backend; a plain
-`doctor` never sends a request. A `run` emits exactly one JSON receipt on
-stderr describing routing attempts, the selection, and the worker outcome.
+one synthetic classification request to each eligible backend (two when both
+gates are eligible); a plain `doctor` never sends a request. A `run` emits
+exactly one JSON receipt on stderr once classification starts, describing
+routing attempts, the selection, and the worker outcome; local task-input,
+configuration, and preflight rejections happen before classification and
+emit no receipt.
 
 ## Quick start
 
@@ -124,13 +127,14 @@ accepted response shape is the nested choice answer:
 
 ## Backend failover
 
-Local Laya is tried first when `backends.laya.enabled` is true; it receives at
-most one quarter of the routing budget (capped at 1000 ms) so a hosted
-attempt can still run. Hosted Jev is attempted only when **all** of the
-following hold: `backends.jev.enabled` is true in the project config,
-`TURNHELM_ALLOW_HOSTED_JEV=1` is present in the environment, and
-`TYPESAFE_API_KEY` is set. Both settings are deliberate, explicit opt-ins;
-Turnhelm never enables them automatically.
+Local Laya is tried first when `backends.laya.enabled` is true. When **both**
+backends are eligible, Laya receives `min(1000, floor(routingTimeoutMs / 4))`
+of the routing budget so a hosted attempt can still run; a sole eligible
+backend receives the total remaining budget. Hosted Jev is attempted only
+when **all** of the following hold: `backends.jev.enabled` is true in the
+project config, `TURNHELM_ALLOW_HOSTED_JEV=1` is present in the environment,
+and `TYPESAFE_API_KEY` is set. Both settings are deliberate, explicit
+opt-ins; Turnhelm never enables them automatically.
 
 A classification failure never triggers an unapproved model retry; the run
 fails with its recorded attempts. Local Laya may require `LAYA_API_KEY`.
