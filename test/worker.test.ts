@@ -50,6 +50,8 @@ type OutputMode = "stdout" | "blocker" | "abort-in-write" | "abort-late-error" |
 
 type DiagMode = "stall" | "error" | "delay" | "delay-error" | "slow";
 
+type TailSpec = { target: "output" | "diag"; hwm: 0 | 65536; action: "destroy-error" | "destroy-quiet" };
+
 type WorkerScenario = {
   script?: string;
   task?: string;
@@ -62,6 +64,7 @@ type WorkerScenario = {
   diag?: DiagMode;
   tailDelayMs?: number;
   lingerMs?: number;
+  tail?: TailSpec;
 };
 
 type Recorded = {
@@ -79,6 +82,7 @@ type Recorded = {
   diagWrites?: number;
   diagMaxLength?: number;
   diagFinalLength?: number;
+  tailWrites?: number;
   harnessError?: string;
   outputErrBefore?: number;
   outputErrAfter?: number;
@@ -117,7 +121,19 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
     let storedCb = null;
     let outputErrBefore;
     let outputErrAfter;
-    ${blocker ? `
+    let tailWrites = 0;
+    ${scenario.tail ? `
+    let tailSink;
+    tailSink = new Writable({
+      highWaterMark: ${scenario.tail.hwm},
+      write(_chunk, _encoding, callback) {
+        tailWrites += 1;
+        // Deliberately never calls callback nor drains; the sink then destroys
+        // itself, so this write's callback can never arrive.
+        setTimeout(() => { tailSink.destroy(${scenario.tail.action === "destroy-error" ? 'new Error("PRIVATE_EPIPE")' : ""}); }, 20);
+      }
+    });` : ""}
+    ${scenario.tail?.target === "output" ? "output = tailSink;" : blocker ? `
     output = new Writable({
       highWaterMark: ${scenario.output === "accepted-delay" || scenario.output === "accepted-error" ? 65536 : 0},
       write(chunk, _encoding, callback) {
@@ -136,6 +152,7 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
               : `setTimeout(() => { pending -= 1; callback(); }, ${scenario.drainDelayMs ?? 30});`}
       }
     });` : "output = process.stdout;"}
+    ${scenario.tail?.target === "diag" ? "diagSink = tailSink;" : ""}
     ${scenario.diag === "stall" ? `
     diagSink = new Writable({
       highWaterMark: 0,
@@ -214,7 +231,7 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
         outputErrAfter = output.listenerCount("error");
       }
       diagFinalLength = diagSink ? diagSink.writableLength : 0;
-      await writeFile(resultFile, JSON.stringify({ ...result, received, maxPending, emitted: captured, outputAcked, diagAcked, diagWrites, diagMaxLength, diagFinalLength, outputErrBefore, outputErrAfter }));
+      await writeFile(resultFile, JSON.stringify({ ...result, received, maxPending, emitted: captured, outputAcked, diagAcked, diagWrites, diagMaxLength, diagFinalLength, outputErrBefore, outputErrAfter, tailWrites }));
       ${scenario.lingerMs ? `setTimeout(() => {}, ${scenario.lingerMs});` : ""}
     } catch (error) {
       clearTimeout(guard);
@@ -320,7 +337,8 @@ finish(() => {
     diagAcked: false,
     diagWrites: 0,
     diagMaxLength: 0,
-    diagFinalLength: 0
+    diagFinalLength: 0,
+    tailWrites: 0
   });
   assert.equal(await fakeFile(directory, "argv.json"), JSON.stringify(buildWorkerArgs(decision("balanced"), true)));
   assert.equal(await fakeFile(directory, "cwd.txt"), await realpath(join(directory, "root")));
@@ -855,6 +873,36 @@ finish(() => {
   assert.equal(recorded.status, "cancelled");
   await waitForExit(Number(await fakeFile(directory, "descendant.pid")));
 });
+
+for (const [target, hwm, action] of [
+  ["output", 0, "destroy-error"],
+  ["output", 65536, "destroy-error"],
+  ["output", 0, "destroy-quiet"],
+  ["output", 65536, "destroy-quiet"],
+  ["diag", 0, "destroy-error"],
+  ["diag", 65536, "destroy-error"],
+  ["diag", 0, "destroy-quiet"],
+  ["diag", 65536, "destroy-quiet"]
+] as const) {
+  test(`a destroyed ${target} sink (hwm ${hwm}, ${action}) settles bounded as an output failure`, { timeout: 30_000 }, async t => {
+    const { recorded, stderr } = await runWorker(t, {
+      tail: { target, hwm, action },
+      script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "done" } });
+  emit({ type: "error", message: "TEST_PRIVATE_ERROR_SENTINEL" });
+  emit({ type: "turn.completed" });
+  setTimeout(() => {}, 10000);
+});
+`
+    });
+    assert.equal(recorded.status, "failed");
+    assert.equal(recorded.error, "output");
+    assert.equal(recorded.tailWrites, 1);
+    assert.ok((recorded.durationMs ?? 0) < 5000, "settlement must be bounded, took " + recorded.durationMs + "ms");
+    forbid(JSON.stringify(recorded) + stderr, "PRIVATE_EPIPE", "TEST_PRIVATE_ERROR_SENTINEL");
+  });
+}
 
 test("a missing executable is a sanitized spawn failure", { timeout: 30_000 }, async t => {
   const { recorded, stderr } = await runWorker(t, {});
