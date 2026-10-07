@@ -247,8 +247,16 @@ export async function applyInstallation(root: string, changes: readonly Change[]
         }
         try {
           const current = await readFile(entry.path);
-          if (entry.content !== undefined && current.equals(entry.content)) await unlink(entry.path);
-          else retained.push(entry.relative);
+          if (entry.content === undefined || !current.equals(entry.content)) {
+            retained.push(entry.relative);
+            continue;
+          }
+          try {
+            await unlink(entry.path);
+          } catch {
+            // Unlink refused: the file still exists, so keep it in the report.
+            retained.push(entry.relative);
+          }
         } catch {
           // Already gone or unreadable: nothing retained for this entry.
         }
