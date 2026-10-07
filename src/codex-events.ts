@@ -27,7 +27,9 @@ const counter = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 
 const usageSnapshot = (value: unknown): WorkerUsage | undefined => {
-  if (!object(value)) throw new Error("worker event usage must be an object");
+  // A non-object accounting container is an accounting defect, not a transport
+  // failure: it degrades to "no usable usage" and never fails the run.
+  if (!object(value)) return undefined;
   const snapshot: Record<string, number> = {};
   for (const field of USAGE_FIELDS) {
     if (!Object.hasOwn(value, field)) continue;

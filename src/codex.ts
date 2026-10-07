@@ -89,6 +89,7 @@ export function executeWorker(
     env: NodeJS.ProcessEnv;
     signal?: AbortSignal;
     output: NodeJS.WritableStream;
+    diagnostics?: NodeJS.WritableStream;
   }
 ): Promise<WorkerResult> {
   const started = performance.now();
@@ -104,6 +105,7 @@ export function executeWorker(
       env: workerEnvironment(options.env)
     });
     const output = options.output;
+    const diagnostics = options.diagnostics ?? process.stderr;
     const stdin = child.stdin;
     const stdout = child.stdout;
     const stderr = child.stderr;
@@ -249,8 +251,22 @@ export function executeWorker(
         return;
       }
       if (accepted) return;
+      // The sink may have aborted, errored, or closed synchronously inside
+      // write(); once shutdown owns the outcome a fresh blocked drain wait
+      // would be unreachable and could never be cancelled.
+      if (shutdownStarted || finished) return;
       stdout.pause();
       cancelDrainWait = waitForDrain();
+    };
+
+    // One fixed-category line per diagnostic event; never the raw command,
+    // output, stderr, or native error text behind it.
+    const reportDiagnostic = (category: "worker-event-error" | "tool-progress"): void => {
+      try {
+        diagnostics.write("turnhelm: " + category + "\n");
+      } catch {
+        /* A diagnostic sink failure must not fail the run. */
+      }
     };
 
     const dispatch = (event: WorkerEvent): void => {
@@ -268,8 +284,11 @@ export function executeWorker(
           stickyFailed = true;
           beginShutdown();
           return;
+        case "diagnostic":
+          reportDiagnostic(event.category);
+          return;
         default:
-          return; // Fixed-category diagnostics and unknown events carry no payload.
+          return; // Unknown well-formed events are ignored.
       }
     };
 
