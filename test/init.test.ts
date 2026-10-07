@@ -51,7 +51,14 @@ async function runChild(t: TestContext, root: string, scenario: string): Promise
     const originalWrite = mutableFs.promises.writeFile;
     const originalRename = mutableFs.promises.rename;
     const originalUnlink = mutableFs.promises.unlink;
+    const originalReadFile = mutableFs.promises.readFile;
+    const originalLstat = mutableFs.promises.lstat;
+    const originalReadSync = mutableFs.readSync;
     let writes = 0;
+    let cleanupArmed = false;
+    let cleanupReadBytes = 0;
+    const cleanupReads = [];
+    const fsp0 = await import("node:fs/promises");
     const templates = await assets.readTemplates();
     const changes = await init.inspectInstallation(root, templates);
     const skillPath = join(root, ".agents", "skills", "turnhelm-routing", "SKILL.md");
@@ -86,13 +93,75 @@ async function runChild(t: TestContext, root: string, scenario: string): Promise
       };
       await originalWrite(agentsPath, "# Team rules edited\\n\\n");
     }
+    if (scenario === "d9") {
+      mutableFs.promises.writeFile = function (...args) {
+        writes += 1;
+        return originalWrite.apply(this, args);
+      };
+      mutableFs.promises.rename = function (...args) {
+        writes += 1;
+        return originalRename.apply(this, args);
+      };
+      await fsp0.rm(root, { recursive: true, force: true });
+      await fsp0.mkdir(root);
+    }
+    if (scenario === "d8a" || scenario === "d8b" || scenario === "d10a" || scenario === "d10b") {
+      let configWritten = false;
+      mutableFs.promises.rename = async function (from, to) {
+        if (String(to) === skillPath) {
+          cleanupArmed = true;
+          const e = new Error("simulated EIO"); e.code = "EIO"; throw e;
+        }
+        const r = await originalRename.call(this, from, to);
+        if (String(to) === configPath) {
+          configWritten = true;
+          if (scenario === "d8a") {
+            const bytes = await originalReadFile(to);
+            await originalUnlink(to);
+            await originalWrite(to, bytes);
+          }
+          if (scenario === "d10a") {
+            await originalUnlink(to);
+            await fsp0.symlink(join(root, ".cleanup-sentinel"), to);
+          }
+          if (scenario === "d10b") {
+            const handle = await fsp0.open(to, "a");
+            await handle.write(Buffer.alloc(2 * 1024 * 1024, 0x78));
+            await handle.close();
+          }
+        }
+        return r;
+      };
+    }
+    if (scenario === "d8b") {
+      mutableFs.promises.lstat = async function (p) {
+        if (configWritten && String(p) === configPath) { const e = new Error("simulated EIO"); e.code = "EIO"; throw e; }
+        return originalLstat.call(this, p);
+      };
+    }
+    if (scenario === "d10a" || scenario === "d10b") {
+      mutableFs.promises.readFile = async function (p, opts) {
+        const buf = await originalReadFile.call(this, p, opts);
+        if (cleanupArmed) {
+          cleanupReads.push(String(p));
+          cleanupReadBytes += buf.length;
+        }
+        return buf;
+      };
+      mutableFs.readSync = function (fd, buffer, offset, length, position) {
+        if (cleanupArmed) cleanupReadBytes += length;
+        return originalReadSync.call(this, fd, buffer, offset, length, position);
+      };
+    }
+    if (scenario === "d10a") await originalWrite(join(root, ".cleanup-sentinel"), "TOP SECRET SENTINEL BYTES");
     syncBuiltinESMExports();
     const result = await init.applyInstallation(root, changes);
+    cleanupArmed = false;
     const fsp = await import("node:fs/promises");
     const agents = await fsp.readFile(agentsPath, "utf8").catch(e => e.code);
     const configExists = await fsp.readFile(configPath).then(() => true, e => e.code === "ENOENT" ? false : e.code);
     const skillExists = await fsp.readFile(skillPath).then(() => true, e => e.code === "ENOENT" ? false : e.code);
-    console.log(JSON.stringify({ ...result, writes, agents, configExists, skillExists }));
+    console.log(JSON.stringify({ ...result, writes, agents, configExists, skillExists, cleanupReads, cleanupReadBytes }));
     process.exit(0);
   `], { timeout: 15000 });
   return JSON.parse(result.stdout);
@@ -402,6 +471,54 @@ async function snapshotThenMissing(root: string): Promise<boolean> {
   }
   return true;
 }
+
+test("cleanup keeps a same-byte user replacement of a created file", async (t) => {
+  const root = await tempProject(t);
+  const child = await runChild(t, root, "d8a");
+  assert.equal(child.code, 1);
+  assert.equal(child.error, "write");
+  assert.deepEqual(child.applied, [".turnhelm/config.json"]);
+  assert.equal(child.configExists, true);
+  assert.equal(child.skillExists, false);
+});
+
+test("post-rename identity bookkeeping failure keeps applied evidence", async (t) => {
+  const root = await tempProject(t);
+  const child = await runChild(t, root, "d8b");
+  assert.equal(child.code, 1);
+  assert.equal(child.error, "write");
+  assert.deepEqual(child.applied, [".turnhelm/config.json"]);
+  assert.equal(child.configExists, true);
+});
+
+test("a replaced root at the same path is refused before any write", async (t) => {
+  const root = await tempProject(t);
+  const child = await runChild(t, root, "d9");
+  assert.equal(child.code, 1);
+  assert.equal(child.error, "race");
+  assert.deepEqual(child.applied, []);
+  assert.equal(child.writes, 0);
+});
+
+test("cleanup never reads a file it does not own", async (t) => {
+  const root = await tempProject(t);
+  const child = await runChild(t, root, "d10a");
+  assert.equal(child.code, 1);
+  assert.equal(child.error, "write");
+  assert.deepEqual(child.applied, [".turnhelm/config.json"]);
+  assert.deepEqual(child.cleanupReads, []);
+  assert.equal(child.configExists, true);
+});
+
+test("cleanup reads owned files only within the per-target bound", async (t) => {
+  const root = await tempProject(t);
+  const child = await runChild(t, root, "d10b");
+  assert.equal(child.code, 1);
+  assert.equal(child.error, "write");
+  assert.deepEqual(child.applied, [".turnhelm/config.json"]);
+  assert.ok(child.cleanupReadBytes < 131072, "cleanup read " + child.cleanupReadBytes + " unbounded bytes");
+  assert.equal(child.configExists, true);
+});
 
 test("init refuses a missing project root without creating it", async (t) => {
   const base = await mkdtemp(join(tmpdir(), "turnhelm-init-"));
