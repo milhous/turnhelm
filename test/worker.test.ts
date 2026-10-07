@@ -50,7 +50,7 @@ type OutputMode = "stdout" | "blocker" | "abort-in-write" | "abort-late-error" |
 
 type DiagMode = "stall" | "error" | "delay" | "delay-error" | "slow";
 
-type TailSpec = { target: "output" | "diag"; hwm: 0 | 65536; action: "destroy-error" | "destroy-quiet" };
+type TailSpec = { target: "output" | "diag"; hwm: 0 | 65536; action: "destroy-error" | "destroy-quiet"; delayMs?: number };
 
 type WorkerScenario = {
   script?: string;
@@ -65,6 +65,7 @@ type WorkerScenario = {
   tailDelayMs?: number;
   lingerMs?: number;
   tail?: TailSpec;
+  lateDestroy?: "error" | "quiet";
 };
 
 type Recorded = {
@@ -83,6 +84,8 @@ type Recorded = {
   diagMaxLength?: number;
   diagFinalLength?: number;
   tailWrites?: number;
+  lateErrBefore?: number;
+  lateErrAfter?: number;
   harnessError?: string;
   outputErrBefore?: number;
   outputErrAfter?: number;
@@ -122,6 +125,8 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
     let outputErrBefore;
     let outputErrAfter;
     let tailWrites = 0;
+    let lateErrBefore;
+    let lateErrAfter;
     ${scenario.tail ? `
     let tailSink;
     tailSink = new Writable({
@@ -130,7 +135,7 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
         tailWrites += 1;
         // Deliberately never calls callback nor drains; the sink then destroys
         // itself, so this write's callback can never arrive.
-        setTimeout(() => { tailSink.destroy(${scenario.tail.action === "destroy-error" ? 'new Error("PRIVATE_EPIPE")' : ""}); }, 20);
+        setTimeout(() => { tailSink.destroy(${scenario.tail.action === "destroy-error" ? 'new Error("PRIVATE_EPIPE")' : ""}); }, ${scenario.tail.delayMs ?? 20});
       }
     });` : ""}
     ${scenario.tail?.target === "output" ? "output = tailSink;" : blocker ? `
@@ -231,7 +236,16 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
         outputErrAfter = output.listenerCount("error");
       }
       diagFinalLength = diagSink ? diagSink.writableLength : 0;
-      await writeFile(resultFile, JSON.stringify({ ...result, received, maxPending, emitted: captured, outputAcked, diagAcked, diagWrites, diagMaxLength, diagFinalLength, outputErrBefore, outputErrAfter, tailWrites }));
+      ${scenario.lateDestroy ? `
+      {
+        // The run has settled; a known sink failure arrives afterwards.
+        const lateSink = ${scenario.diag === "stall" ? "diagSink" : "output"};
+        lateErrBefore = lateSink.listenerCount("error");
+        lateSink.destroy(${scenario.lateDestroy === "error" ? 'new Error("PRIVATE_LATE_CLOSE")' : ""});
+        await new Promise(resolve => setTimeout(resolve, 50));
+        lateErrAfter = lateSink.listenerCount("error");
+      }` : ""}
+      await writeFile(resultFile, JSON.stringify({ ...result, received, maxPending, emitted: captured, outputAcked, diagAcked, diagWrites, diagMaxLength, diagFinalLength, outputErrBefore, outputErrAfter, tailWrites, lateErrBefore, lateErrAfter }));
       ${scenario.lingerMs ? `setTimeout(() => {}, ${scenario.lingerMs});` : ""}
     } catch (error) {
       clearTimeout(guard);
@@ -901,6 +915,66 @@ finish(() => {
     assert.equal(recorded.tailWrites, 1);
     assert.ok((recorded.durationMs ?? 0) < 5000, "settlement must be bounded, took " + recorded.durationMs + "ms");
     forbid(JSON.stringify(recorded) + stderr, "PRIVATE_EPIPE", "TEST_PRIVATE_ERROR_SENTINEL");
+  });
+}
+
+for (const [target, action] of [
+  ["output", "destroy-error"],
+  ["output", "destroy-quiet"],
+  ["diag", "destroy-error"],
+  ["diag", "destroy-quiet"]
+] as const) {
+  test(`a late failed ${target} sink (${action}) settles a prior protocol failure`, { timeout: 30_000 }, async t => {
+    const { recorded, stderr } = await runWorker(t, {
+      tail: { target, hwm: 65536, action, delayMs: 250 },
+      script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "done" } });
+  emit({ type: "error", message: "TEST_PRIVATE_ERROR_SENTINEL" });
+  process.stdout.write("{bad-json}\\n");
+  setTimeout(() => {}, 10000);
+});
+`
+    });
+    assert.equal(recorded.status, "failed");
+    assert.equal(recorded.error, "protocol", "the first cause must be preserved, saw " + recorded.error);
+    assert.equal(recorded.tailWrites, 1);
+    assert.ok((recorded.durationMs ?? 0) < 5000, "settlement must be bounded, took " + recorded.durationMs + "ms");
+    forbid(JSON.stringify(recorded) + stderr, "PRIVATE_EPIPE", "TEST_PRIVATE_ERROR_SENTINEL");
+  });
+}
+
+for (const [target, mode] of [
+  ["output", "error"],
+  ["output", "quiet"],
+  ["diag", "error"],
+  ["diag", "quiet"]
+] as const) {
+  test(`a settled cancelled run releases listeners on a late known ${target} sink ${mode} close`, { timeout: 30_000 }, async t => {
+    const outcome = await runWorker(t, {
+      ...(target === "output" ? { output: "abort-in-write" as const } : { diag: "stall" as const, gate: "abort-diag-late" as const }),
+      lateDestroy: mode,
+      script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "held" } });
+  emit({ type: "error", message: "TEST_PRIVATE_ERROR_SENTINEL" });
+  setTimeout(() => {}, 10000);
+});
+`
+    }).then(
+      value => ({ kind: "settled" as const, value }),
+      error => ({ kind: "crashed" as const, error })
+    );
+    if (outcome.kind === "crashed") {
+      const error = outcome.error as NodeJS.ErrnoException & { code?: number | null; stderr?: string };
+      assert.fail("late known sink failure crashed the harness: exit " + error.code
+        + ", raw error text on stderr: " + String(error.stderr ?? "").includes("PRIVATE_LATE_CLOSE"));
+    }
+    const { recorded, stderr } = outcome.value;
+    assert.equal(recorded.status, "cancelled");
+    assert.equal(recorded.lateErrBefore, 1, "the in-flight sink must still own its error listener at settlement");
+    assert.equal(recorded.lateErrAfter, 0, "the late known failure must release the listener");
+    forbid(JSON.stringify(recorded) + stderr, "PRIVATE_LATE_CLOSE", "TEST_PRIVATE_ERROR_SENTINEL");
   });
 }
 
