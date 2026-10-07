@@ -180,6 +180,9 @@ const ownKeys = (value: Record<string, unknown>, allowed: readonly string[], wha
   for (const key of Object.keys(value)) {
     if (!allowed.includes(key)) throw new Error(what + " must not contain unknown field " + JSON.stringify(key));
   }
+  for (const key of allowed) {
+    if (!Object.hasOwn(value, key)) throw new Error(what + " must contain own field " + JSON.stringify(key));
+  }
 };
 
 const layaOrigin = (value: unknown): string => {

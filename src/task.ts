@@ -13,6 +13,10 @@ const CONTINUATION_TASK = /^(?:continue|go on|proceed|do the above|继续|接着
 
 type TaskStdin = NodeJS.ReadableStream & { isTTY?: boolean };
 
+const destroyStdin = (stdin: TaskStdin): void => {
+  (stdin as unknown as { destroy(): void }).destroy();
+};
+
 const checkTask = (task: string): string => {
   if (task.includes("\0")) throw new Error("task must not contain NUL");
   if (!task.trim()) throw new Error("task must not be blank");
@@ -47,7 +51,7 @@ const collectInput = (stdin: TaskStdin, signal?: AbortSignal): Promise<Buffer> =
       settle();
     };
     const fail = (error: unknown) => {
-      (stdin as unknown as { destroy(): void }).destroy();
+      destroyStdin(stdin);
       finish(() => reject(error));
     };
     const onData = (chunk: unknown) => {
@@ -73,6 +77,10 @@ const collectInput = (stdin: TaskStdin, signal?: AbortSignal): Promise<Buffer> =
   });
 
 export async function readTask(positional: string | undefined, stdin: TaskStdin, signal?: AbortSignal): Promise<string> {
+  if (signal?.aborted) {
+    destroyStdin(stdin);
+    throw new Error("task input was cancelled");
+  }
   if (stdin.isTTY) {
     if (positional === undefined) throw new Error("a task is required as an argument or on stdin");
     return validateTask(positional);

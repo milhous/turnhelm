@@ -36,7 +36,7 @@ export async function readProjectFile(root: string, relative: string, max: numbe
   let descriptor: number | undefined;
   try {
     try {
-      descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       throw error;
@@ -44,7 +44,7 @@ export async function readProjectFile(root: string, relative: string, max: numbe
     if (!fstatSync(descriptor).isFile()) throw new Error("project file is not a regular file");
     const chunk = Buffer.alloc(READ_CHUNK_BYTES);
     while (total <= max) {
-      const read = readSync(descriptor, chunk, 0, chunk.length, null);
+      const read = readSync(descriptor, chunk, 0, Math.min(chunk.length, max + 1 - total), null);
       if (read === 0) break;
       total += read;
       chunks.push(Buffer.from(chunk.subarray(0, read)));

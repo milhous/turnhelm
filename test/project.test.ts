@@ -18,7 +18,7 @@ const makeRoot = async (t: TestContext) => {
 
 // The child patches node:fs.readSync (synced into the compiled module's ESM
 // bindings), so patched-binding effects never reach this suite's process.
-const runReadChild = async (root: string, file: string, script: string) => {
+const runReadChild = async (root: string, file: string, script: string, max = 65536) => {
   const moduleUrl = new URL("../src/project.js", import.meta.url).href;
   const result = await execute(process.execPath, ["--input-type=module", "--eval", `
     import { readProjectFile } from ${JSON.stringify(moduleUrl)};
@@ -34,7 +34,7 @@ const runReadChild = async (root: string, file: string, script: string) => {
     };
     syncBuiltinESMExports();
     try {
-      const content = await readProjectFile(${JSON.stringify(root)}, ${JSON.stringify(file)}, 65536);
+      const content = await readProjectFile(${JSON.stringify(root)}, ${JSON.stringify(file)}, ${JSON.stringify(max)});
       console.log(JSON.stringify({ ok: true, content: content.toString(), calls }));
     } catch (error) {
       console.log(JSON.stringify({ ok: false, message: error.message, calls }));
@@ -140,7 +140,7 @@ test("caps every read to the remaining max+1 budget", async t => {
   const root = await makeRoot(t);
   await writeFile(join(root, "big.bin"), Buffer.alloc(10000, 1));
   const payload = await runReadChild(root, "big.bin",
-    "return original(fd, buffer, offset, length, position);");
+    "return original(fd, buffer, offset, length, position);", 9);
   assert.equal(payload.ok, false);
   assert.match(payload.message, /exceeds 9 bytes/);
   assert.ok(payload.calls.length > 0);
