@@ -89,7 +89,8 @@ test("managed block names the run entry and the safety rules", async (t) => {
   const root = await tempProject(t, { agents: "# Team rules\n\n" });
   assert.equal((await initProject(root, { dryRun: false })).code, 0);
   const agents = await readAgents(root);
-  assert.ok(agents.startsWith("<!-- turnhelm:begin v1 -->\n"));
+  assert.ok(agents.startsWith("# Team rules\n\n"));
+  assert.ok(agents.includes("<!-- turnhelm:begin v1 -->\n"));
   assert.ok(agents.endsWith("<!-- turnhelm:end -->\n"));
   assert.match(agents, /turnhelm run/);
   assert.match(agents, /frontier_max/);

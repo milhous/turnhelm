@@ -1,3 +1,4 @@
+# turnhelm-template v1
 interface:
   display_name: "Turnhelm Routing"
-  short_description: "Safely inspect and run Turnhelm-routed Codex tasks"
+  short_description: "Safely run Turnhelm-routed Codex tasks"
