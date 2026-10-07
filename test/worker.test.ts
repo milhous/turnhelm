@@ -1,7 +1,7 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -22,6 +22,8 @@ const decision = (profileId: ProfileId): TaskDecision => ({
 });
 
 // The only executable on PATH is our temporary Node fixture; no real Codex can run.
+// Scenarios that never call finish() leave stdin unread, which is what the
+// failed-stdin-delivery regressions need.
 const FAKE_PREAMBLE = `
 const fs = require("node:fs");
 const path = require("node:path");
@@ -30,16 +32,19 @@ fs.writeFileSync(path.join(here, "runs"), (fs.existsSync(path.join(here, "runs")
 fs.writeFileSync(path.join(here, "argv.json"), JSON.stringify(process.argv.slice(2)));
 fs.writeFileSync(path.join(here, "cwd.txt"), process.cwd());
 fs.writeFileSync(path.join(here, "env.json"), JSON.stringify(process.env));
-let taskText = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", chunk => { taskText += chunk; });
+const ready = () => fs.writeFileSync(path.join(here, "ready"), "1");
 const emit = event => process.stdout.write(JSON.stringify(event) + "\\n");
-const finish = body => process.stdin.on("end", () => { fs.writeFileSync(path.join(here, "task.txt"), taskText); body(); });
+const finish = body => {
+  let taskText = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", chunk => { taskText += chunk; });
+  process.stdin.on("end", () => { fs.writeFileSync(path.join(here, "task.txt"), taskText); body(); });
+};
 `;
 
 const stubbornChild = `process.on('SIGTERM', function () {}); setInterval(function () {}, 500);`;
 
-type OutputMode = "stdout" | "blocker-drain" | "blocker-stall" | "blocker-epipe";
+type Gate = "abort-ready" | "abort-received" | "epipe-received";
 
 type WorkerScenario = {
   script?: string;
@@ -47,8 +52,8 @@ type WorkerScenario = {
   profileId?: ProfileId;
   write?: boolean;
   abortBeforeCall?: boolean;
-  abortAfterMs?: number;
-  output?: OutputMode;
+  gate?: Gate;
+  output?: "stdout" | "blocker";
   drainDelayMs?: number;
 };
 
@@ -61,6 +66,7 @@ type Recorded = {
   error?: string;
   received?: number;
   maxPending?: number;
+  emitted?: string;
   harnessError?: string;
 };
 
@@ -74,32 +80,41 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
   await mkdir(root, { recursive: true });
   const moduleUrl = new URL("../src/codex.js", import.meta.url).href;
   const resultFile = join(directory, "result.json");
-  const output = scenario.output ?? "stdout";
+  const blocker = scenario.output === "blocker";
   const inner = `
-    import { writeFile } from "node:fs/promises";
+    import { access, writeFile } from "node:fs/promises";
     import { Writable } from "node:stream";
     import { executeWorker } from ${JSON.stringify(moduleUrl)};
     const decision = ${JSON.stringify(decision(scenario.profileId ?? "balanced"))};
+    const resultFile = ${JSON.stringify(resultFile)};
     const controller = new AbortController();
     ${scenario.abortBeforeCall ? "controller.abort();" : ""}
-    ${scenario.abortAfterMs !== undefined ? `const abortTimer = setTimeout(() => controller.abort(), ${scenario.abortAfterMs}); abortTimer.unref();` : ""}
     let received = 0;
     let pending = 0;
     let maxPending = 0;
+    let captured = "";
     let output;
-    ${output === "stdout" ? "output = process.stdout;" : `
+    ${blocker ? `
     output = new Writable({
       highWaterMark: 0,
-      write(_chunk, _encoding, callback) {
+      write(chunk, _encoding, callback) {
+        captured += chunk.toString();
         received += 1;
         pending += 1;
         maxPending = Math.max(maxPending, pending);
-        ${output === "blocker-drain" ? `setTimeout(() => { pending -= 1; callback(); }, ${scenario.drainDelayMs ?? 30});` : ""}
+        setTimeout(() => { pending -= 1; callback(); }, ${scenario.drainDelayMs ?? 30});
       }
-    });
-    ${output === "blocker-epipe" ? `setTimeout(() => output.destroy(new Error("EPIPE")), 300);` : ""}`}
+    });` : "output = process.stdout;"}
+    ${scenario.gate === "abort-ready" ? `
+    const waitReady = async () => {
+      for (let i = 0; i < 3000; i++) {
+        try { await access(${JSON.stringify(join(directory, "ready"))}); return; } catch { /* poll until the fake signals readiness. */ }
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      throw new Error("fake worker never became ready");
+    };` : ""}
     try {
-      const result = await executeWorker(decision, ${JSON.stringify(scenario.task ?? "the original task")}, {
+      const running = executeWorker(decision, ${JSON.stringify(scenario.task ?? "the original task")}, {
         executable: "codex",
         root: ${JSON.stringify(root)},
         write: ${scenario.write ?? false},
@@ -107,7 +122,11 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
         signal: controller.signal,
         output
       });
-      await writeFile(resultFile, JSON.stringify({ ...result, received, maxPending }));
+      ${scenario.gate === "abort-ready" ? "await waitReady(); controller.abort();" : ""}
+      ${scenario.gate === "abort-received" ? "while (received < 1) await new Promise(resolve => setTimeout(resolve, 10)); controller.abort();" : ""}
+      ${scenario.gate === "epipe-received" ? "while (received < 1) await new Promise(resolve => setTimeout(resolve, 10)); output.destroy(new Error(\"EPIPE\"));" : ""}
+      const result = await running;
+      await writeFile(resultFile, JSON.stringify({ ...result, received, maxPending, emitted: captured }));
     } catch (error) {
       await writeFile(resultFile, JSON.stringify({ harnessError: error instanceof Error ? error.message : String(error) }));
     }
@@ -205,10 +224,11 @@ finish(() => {
     usage: { input_tokens: 12, output_tokens: 5 },
     usageScope: "unverified",
     received: 0,
-    maxPending: 0
+    maxPending: 0,
+    emitted: ""
   });
   assert.equal(await fakeFile(directory, "argv.json"), JSON.stringify(buildWorkerArgs(decision("balanced"), true)));
-  assert.equal(await fakeFile(directory, "cwd.txt"), join(directory, "root"));
+  assert.equal(await fakeFile(directory, "cwd.txt"), await realpath(join(directory, "root")));
   assert.equal(await fakeFile(directory, "task.txt"), task);
   assert.equal(await fakeFile(directory, "runs"), "1");
   const env = JSON.parse(await fakeFile(directory, "env.json")) as Record<string, string>;
@@ -230,20 +250,24 @@ test("exit zero without a completion is a worker failure", { timeout: 30_000 }, 
   assert.equal(recorded.code, 0);
 });
 
-test("turn.failed stops the owned group even when the leader exits zero", { timeout: 30_000 }, async t => {
+test("turn.failed stops the owned group even though the leader would exit zero", { timeout: 30_000 }, async t => {
   const { recorded, directory } = await runWorker(t, {
     script: `
+const { spawn } = require("node:child_process");
+const child = spawn(process.execPath, ["-e", ${JSON.stringify(stubbornChild)}], { stdio: "ignore" });
+fs.writeFileSync(path.join(here, "descendant.pid"), String(child.pid));
 finish(() => {
-  const { spawn } = require("node:child_process");
-  const child = spawn(process.execPath, ["-e", ${JSON.stringify(stubbornChild)}], { stdio: "ignore" });
-  fs.writeFileSync(path.join(here, "descendant.pid"), String(child.pid));
   emit({ type: "turn.failed" });
+  emit({ type: "turn.completed", usage: { input_tokens: 99 } });
+  ready();
+  setTimeout(() => {}, 5000);
 });
 `
   });
   assert.equal(recorded.status, "failed");
   assert.equal(recorded.error, "worker");
-  assert.equal(recorded.code, 0);
+  // The group TERM from the sticky failure lands before the leader's natural exit.
+  assert.equal(recorded.code, 143);
   assert.equal(await fakeFile(directory, "runs"), "1");
   await waitForExit(Number(await fakeFile(directory, "descendant.pid")));
 });
@@ -451,8 +475,8 @@ for (const exitCode of [7, 0]) {
 }
 
 test("stdout backpressure queues one message at the sink while stderr drains", { timeout: 30_000 }, async t => {
-  const { recorded, stdout, stderr } = await runWorker(t, {
-    output: "blocker-drain",
+  const { recorded, stderr } = await runWorker(t, {
+    output: "blocker",
     drainDelayMs: 30,
     script: `
 finish(() => {
@@ -466,14 +490,14 @@ finish(() => {
   assert.equal(recorded.status, "completed");
   assert.equal(recorded.received, 20);
   assert.equal(recorded.maxPending, 1);
-  for (let i = 0; i < 20; i++) assert.ok(stdout.includes("message-" + i + "\n"));
-  forbid(JSON.stringify(recorded) + stdout + stderr, "TEST_PRIVATE_STDERR_SENTINEL");
+  for (let i = 0; i < 20; i++) assert.ok((recorded.emitted ?? "").includes("message-" + i + "\n"));
+  forbid(JSON.stringify(recorded) + stderr, "TEST_PRIVATE_STDERR_SENTINEL");
 });
 
 test("cancellation interrupts a stalled drain wait", { timeout: 30_000 }, async t => {
   const { recorded, stderr } = await runWorker(t, {
-    output: "blocker-stall",
-    abortAfterMs: 300,
+    output: "blocker",
+    gate: "abort-received",
     script: `
 finish(() => {
   emit({ type: "item.completed", item: { type: "agent_message", text: "held" } });
@@ -489,7 +513,8 @@ finish(() => {
 
 test("an output EPIPE interrupts the drain wait as an output failure", { timeout: 30_000 }, async t => {
   const { recorded } = await runWorker(t, {
-    output: "blocker-epipe",
+    output: "blocker",
+    gate: "epipe-received",
     script: `
 finish(() => {
   emit({ type: "item.completed", item: { type: "agent_message", text: "held" } });
@@ -503,11 +528,12 @@ finish(() => {
 
 test("a TERM-ignoring worker is killed within the grace window", { timeout: 30_000 }, async t => {
   const { recorded } = await runWorker(t, {
-    abortAfterMs: 200,
+    gate: "abort-ready",
     script: `
 process.on("SIGTERM", () => {});
 finish(() => {
   emit({ type: "item.completed", item: { type: "agent_message", text: "stubborn" } });
+  ready();
   setInterval(() => {}, 250);
 });
 `
@@ -519,13 +545,14 @@ finish(() => {
 
 test("a leader exiting before a TERM-ignoring descendant cannot cancel the escalation", { timeout: 30_000 }, async t => {
   const { recorded, directory } = await runWorker(t, {
-    abortAfterMs: 100,
+    gate: "abort-ready",
     script: `
+const { spawn } = require("node:child_process");
+const child = spawn(process.execPath, ["-e", ${JSON.stringify(stubbornChild)}], { stdio: "ignore" });
+fs.writeFileSync(path.join(here, "descendant.pid"), String(child.pid));
+ready();
 finish(() => {
-  const { spawn } = require("node:child_process");
-  const child = spawn(process.execPath, ["-e", ${JSON.stringify(stubbornChild)}], { stdio: "ignore" });
-  fs.writeFileSync(path.join(here, "descendant.pid"), String(child.pid));
-  setTimeout(() => {}, 300);
+  setTimeout(() => {}, 5000);
 });
 `
   });
