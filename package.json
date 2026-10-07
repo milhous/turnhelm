@@ -6,7 +6,8 @@
   "type": "module",
   "files": [
     "dist/src",
-    "examples"
+    "assets/config.json",
+    ".agents/skills/turnhelm-routing"
   ],
   "bin": {
     "turnhelm": "./dist/src/cli.js"
