@@ -82,7 +82,7 @@ test("split multibyte stdin decodes once at the end", async () => {
   const bytes = Buffer.from("界界", "utf8");
   const pending = readTask(undefined, stdin);
   stdin.write(bytes.subarray(0, 1));
-  stdin.write(bytes.subarray(1, 5));
+  stdin.write(bytes.subarray(1));
   stdin.end();
   assert.equal(await pending, "界界");
 });

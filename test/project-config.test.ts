@@ -128,7 +128,7 @@ test("accepts loopback origins only, without credentials, path, query or fragmen
     "http://0.0.0.0:8765",
     "not a url"
   ]) {
-    assert.throws(() => withLaya(url), /loopback origin/);
+    assert.throws(() => withLaya(url), /laya url/);
   }
 });
 
