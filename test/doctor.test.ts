@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { initProject } from "../src/init.js";
 import { doctorProject } from "../src/doctor.js";
+import { PROFILE_IDS } from "../src/config.js";
 import type { ChoiceRequest, RequestSpec } from "../src/systemone.js";
 
 const SENTINELS: NodeJS.ProcessEnv = {
@@ -77,8 +78,11 @@ function countingRequest(): { request: ChoiceRequest; specs: RequestSpec[]; coun
   return { request, specs, count: () => specs.length };
 }
 
-function doctorEnv(bin: string, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
-  return { ...SENTINELS, PATH: bin, ...extra };
+// R7: every doctor test gets a hermetic fake CODEX_HOME so the models check
+// never consults the developer's real ~/.codex cache.
+async function doctorEnv(t: TestContext, bin: string, extra: NodeJS.ProcessEnv = {}): Promise<NodeJS.ProcessEnv> {
+  const codexHome = await tempDir(t, "turnhelm-doctor-codexhome-");
+  return { ...SENTINELS, PATH: bin, CODEX_HOME: codexHome, ...extra };
 }
 
 function templateConfigJson(): Record<string, unknown> {
@@ -97,7 +101,7 @@ test("offline doctor inspects without classifier requests and without writing", 
   const bin = await fakeBin(t);
   const { request, count } = countingRequest();
   const before = await snapshot(root);
-  const result = await doctorProject(root, { probe: false, env: doctorEnv(bin), request });
+  const result = await doctorProject(root, { probe: false, env: await doctorEnv(t, bin), request });
   assert.deepEqual(result.checks.map(check => check.id), CHECK_IDS);
   assert.equal(count(), 0, "offline doctor must make zero classifier requests");
   assert.equal(result.code, 0);
@@ -112,7 +116,7 @@ test("missing config fails config and skips downstream checks", async (t) => {
   const root = await tempDir(t, "turnhelm-doctor-project-");
   const bin = await fakeBin(t);
   const { request, count } = countingRequest();
-  const result = await doctorProject(root, { probe: false, env: doctorEnv(bin), request });
+  const result = await doctorProject(root, { probe: false, env: await doctorEnv(t, bin), request });
   const byId = new Map(result.checks.map(check => [check.id, check]));
   assert.equal(byId.get("config")?.status, "fail");
   assert.equal(byId.get("backends")?.status, "skipped");
@@ -124,39 +128,44 @@ test("missing config fails config and skips downstream checks", async (t) => {
   assert.equal(count(), 0);
 });
 
-test("malformed config fails independently and marks install inspection unverified", async (t) => {
-  const root = await tempDir(t, "turnhelm-doctor-project-");
+// E5: a corrupted config must not un-verify independently inspectable
+// assets and instructions — each install finding stands on its own.
+test("malformed config fails config while installed assets and instructions stay verified (E5)", async (t) => {
+  const root = await preparedProject(t);
   await mkdir(join(root, ".turnhelm"), { recursive: true });
   await writeFile(join(root, ".turnhelm", "config.json"), "{ not json");
   const bin = await fakeBin(t);
-  const result = await doctorProject(root, { probe: false, env: doctorEnv(bin) });
+  const result = await doctorProject(root, { probe: false, env: await doctorEnv(t, bin) });
   const byId = new Map(result.checks.map(check => [check.id, check]));
   assert.equal(byId.get("config")?.status, "fail");
-  assert.equal(byId.get("assets")?.status, "unverified");
-  assert.equal(byId.get("instructions")?.status, "unverified");
+  assert.equal(byId.get("assets")?.status, "pass");
+  assert.equal(byId.get("instructions")?.status, "pass");
   assert.equal(byId.get("backends")?.status, "skipped");
   assert.equal(result.code, 1);
 });
 
-test("unowned skill is a failing assets check and leaves instructions unverified", async (t) => {
+// E5: a skill conflict must not un-verify the independently inspectable
+// AGENTS.md managed block.
+test("unowned skill is a failing assets check while instructions stay verified (E5)", async (t) => {
   const root = await preparedProject(t);
   await writeFile(join(root, ".agents", "skills", "turnhelm-routing", "SKILL.md"), "user-authored skill");
   const bin = await fakeBin(t);
-  const result = await doctorProject(root, { probe: false, env: doctorEnv(bin) });
+  const result = await doctorProject(root, { probe: false, env: await doctorEnv(t, bin) });
   const byId = new Map(result.checks.map(check => [check.id, check]));
   assert.equal(byId.get("assets")?.status, "fail");
-  assert.equal(byId.get("instructions")?.status, "unverified");
+  assert.equal(byId.get("instructions")?.status, "pass");
   assert.equal(result.code, 1);
 });
 
-test("unmanaged AGENTS.md markers fail the instructions check and leave assets unverified", async (t) => {
+// E5: an AGENTS.md conflict must not un-verify the already-checked skills.
+test("unmanaged AGENTS.md markers fail the instructions check while assets stay verified (E5)", async (t) => {
   const root = await preparedProject(t);
   await writeFile(join(root, "AGENTS.md"), "<!-- turnhelm:begin v1 -->\n");
   const bin = await fakeBin(t);
-  const result = await doctorProject(root, { probe: false, env: doctorEnv(bin) });
+  const result = await doctorProject(root, { probe: false, env: await doctorEnv(t, bin) });
   const byId = new Map(result.checks.map(check => [check.id, check]));
   assert.equal(byId.get("instructions")?.status, "fail");
-  assert.equal(byId.get("assets")?.status, "unverified");
+  assert.equal(byId.get("assets")?.status, "pass");
   assert.equal(result.code, 1);
 });
 
@@ -169,7 +178,7 @@ test("non-Git root warns but does not fail the doctor", async (t) => {
   const codexScript = join(bin, "codex");
   await writeFile(codexScript, CODEX_SCRIPT);
   await chmod(codexScript, 0o755);
-  const result = await doctorProject(root, { probe: false, env: doctorEnv(bin) });
+  const result = await doctorProject(root, { probe: false, env: await doctorEnv(t, bin) });
   const byId = new Map(result.checks.map(check => [check.id, check]));
   assert.equal(byId.get("git")?.status, "warn");
   assert.equal(result.code, 0);
@@ -183,7 +192,7 @@ test("no eligible backend fails", async (t) => {
     backends.jev = { enabled: false };
   });
   const bin = await fakeBin(t);
-  const result = await doctorProject(root, { probe: false, env: doctorEnv(bin, { TURNHELM_ALLOW_HOSTED_JEV: undefined, TYPESAFE_API_KEY: undefined }) });
+  const result = await doctorProject(root, { probe: false, env: await doctorEnv(t, bin, { TURNHELM_ALLOW_HOSTED_JEV: undefined, TYPESAFE_API_KEY: undefined }) });
   const byId = new Map(result.checks.map(check => [check.id, check]));
   assert.equal(byId.get("backends")?.status, "fail");
   assert.equal(result.code, 1);
@@ -196,7 +205,7 @@ test("stale model metadata is advisory and never fails the doctor", async (t) =>
   await writeFile(join(codexHome, "models_cache.json"), JSON.stringify({
     models: [{ slug: "not-a-known-model", visibility: "list", supported_in_api: true, supported_reasoning_levels: [{ effort: "low" }] }]
   }));
-  const result = await doctorProject(root, { probe: false, env: doctorEnv(bin, { CODEX_HOME: codexHome }) });
+  const result = await doctorProject(root, { probe: false, env: await doctorEnv(t, bin, { CODEX_HOME: codexHome }) });
   const byId = new Map(result.checks.map(check => [check.id, check]));
   assert.ok(["pass", "warn", "unverified"].includes(byId.get("models")?.status ?? ""));
   assert.notEqual(byId.get("models")?.status, "fail");
@@ -213,7 +222,7 @@ test("probe mode requests each eligible backend exactly once and persists nothin
   const bin = await fakeBin(t);
   const { request, specs, count } = countingRequest();
   const before = await snapshot(root);
-  const result = await doctorProject(root, { probe: true, env: doctorEnv(bin), request });
+  const result = await doctorProject(root, { probe: true, env: await doctorEnv(t, bin), request });
   assert.equal(count(), 2, "probe mode must make exactly one request per eligible backend");
   assert.deepEqual(specs.map(spec => spec.backend), ["laya", "jev"]);
   for (const spec of specs) {
@@ -237,7 +246,7 @@ test("a probe that never answers terminates on its configured budget", async (t)
   const bin = await fakeBin(t);
   const request: ChoiceRequest = () => new Promise(() => { /* never settles, ignores signal */ });
   const started = Date.now();
-  const result = await doctorProject(root, { probe: true, env: doctorEnv(bin), request });
+  const result = await doctorProject(root, { probe: true, env: await doctorEnv(t, bin), request });
   assert.ok(Date.now() - started < 5000, "the probe budget must terminate the wait");
   const byId = new Map(result.checks.map(check => [check.id, check]));
   assert.equal(byId.get("backend.laya")?.status, "fail");
@@ -261,7 +270,7 @@ test("caller cancellation stops a probe without a failure", async (t) => {
       spec.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
     });
   };
-  const running = doctorProject(root, { probe: true, env: doctorEnv(bin), request, signal: controller.signal });
+  const running = doctorProject(root, { probe: true, env: await doctorEnv(t, bin), request, signal: controller.signal });
   await started;
   controller.abort();
   const result = await running;
@@ -276,8 +285,143 @@ test("an already-cancelled signal never issues probe requests", async (t) => {
   const { request, count } = countingRequest();
   const controller = new AbortController();
   controller.abort();
-  const result = await doctorProject(root, { probe: true, env: doctorEnv(bin), request, signal: controller.signal });
+  const result = await doctorProject(root, { probe: true, env: await doctorEnv(t, bin), request, signal: controller.signal });
   assert.equal(count(), 0);
   const byId = new Map(result.checks.map(check => [check.id, check]));
   assert.ok(["unverified", "skipped"].includes(byId.get("backend.laya")?.status ?? ""));
+});
+
+// E6: without --probe an eligible backend stays honestly unverified — never a
+// false readiness pass — and an unauthorized one is skipped.
+test("offline backend checks are unverified when eligible and skipped when unauthorized (E6)", async (t) => {
+  const root = await preparedProject(t);
+  await writeProjectConfig(root, config => {
+    const backends = config.backends as Record<string, unknown>;
+    backends.jev = { enabled: true };
+  });
+  const bin = await fakeBin(t);
+  const result = await doctorProject(root, { probe: false, env: await doctorEnv(t, bin) });
+  const byId = new Map(result.checks.map(check => [check.id, check]));
+  assert.equal(byId.get("backend.laya")?.status, "unverified");
+  assert.equal(byId.get("backend.jev")?.status, "unverified");
+  assert.equal(result.code, 0, "unverified must not fail the offline exit code");
+  const scrubbed = await doctorEnv(t, bin, { TYPESAFE_API_KEY: undefined, TURNHELM_ALLOW_HOSTED_JEV: undefined });
+  const unauthorized = await doctorProject(root, { probe: false, env: scrubbed });
+  const byId2 = new Map(unauthorized.checks.map(check => [check.id, check]));
+  assert.equal(byId2.get("backend.jev")?.status, "skipped");
+  assert.equal(byId2.get("backend.laya")?.status, "unverified");
+});
+
+// E4: probes must travel the validated single-backend choice boundary — the
+// real six-criteria request with instructions — and only a valid choice
+// envelope may count as a pass.
+test("probe sends the real six-criteria choice request and rejects invalid envelopes (E4)", async (t) => {
+  const root = await preparedProject(t);
+  await writeProjectConfig(root, config => {
+    const backends = config.backends as Record<string, unknown>;
+    backends.jev = { enabled: true };
+  });
+  const bin = await fakeBin(t);
+  const specs: RequestSpec[] = [];
+  const request: ChoiceRequest = spec => {
+    specs.push(spec);
+    return Promise.resolve({ not_a_choice: true });
+  };
+  const result = await doctorProject(root, { probe: true, env: await doctorEnv(t, bin), request });
+  assert.equal(specs.length, 2, "still exactly one request per eligible backend");
+  assert.deepEqual(specs.map(spec => spec.backend), ["laya", "jev"]);
+  for (const spec of specs) {
+    const body = JSON.parse(spec.body) as {
+      questions: { route: { type: string; instructions: string; criteria: Record<string, string> } };
+    };
+    assert.equal(body.questions.route.type, "choice");
+    assert.ok(body.questions.route.instructions.trim() !== "", "the choice request must carry instructions");
+    assert.deepEqual(Object.keys(body.questions.route.criteria), [...PROFILE_IDS], "all six approved criteria ids are required");
+  }
+  const byId = new Map(result.checks.map(check => [check.id, check]));
+  assert.equal(byId.get("backend.laya")?.status, "fail", "an invalid envelope must not pass");
+  assert.equal(byId.get("backend.jev")?.status, "fail", "an invalid envelope must not pass");
+  assert.equal(result.code, 1);
+});
+
+test("probe rejects bare, inherited, and unknown choice envelopes (E4)", async (t) => {
+  const root = await preparedProject(t);
+  const bin = await fakeBin(t);
+  for (const reply of [
+    {},
+    { answers: {} },
+    { answers: { route: { type: "choice", choice: "direct" } } },
+    { answers: { route: { type: "choice", choice: "turbo" } } }
+  ]) {
+    const request: ChoiceRequest = () => Promise.resolve(reply);
+    const result = await doctorProject(root, { probe: true, env: await doctorEnv(t, bin), request });
+    const byId = new Map(result.checks.map(check => [check.id, check]));
+    assert.equal(byId.get("backend.laya")?.status, "fail", JSON.stringify(reply) + " must not pass");
+    assert.equal(result.code, 1);
+  }
+});
+
+// E7: a request that throws synchronously must be contained — doctorProject
+// still resolves and the raw error text never reaches the evidence.
+test("a synchronously throwing probe request is contained and sanitized (E7)", async (t) => {
+  const root = await preparedProject(t);
+  const bin = await fakeBin(t);
+  const request: ChoiceRequest = () => {
+    throw new Error("PRIVATE_SYNC_PROBE");
+  };
+  const result = await doctorProject(root, { probe: true, env: await doctorEnv(t, bin), request });
+  const byId = new Map(result.checks.map(check => [check.id, check]));
+  assert.equal(byId.get("backend.laya")?.status, "fail");
+  assert.equal(result.code, 1);
+  const evidence = JSON.stringify(result.checks);
+  assert.ok(!evidence.includes("PRIVATE_SYNC_PROBE"), "native/private error text must be sanitized away");
+});
+
+// E7: a request that resolves after its budget must not pass — the budget
+// timer cannot run while a busy request blocks the event loop, so the doctor
+// rechecks a monotonic deadline before settling success.
+test("a probe that resolves after its budget fails instead of passing (E7)", async (t) => {
+  const root = await preparedProject(t);
+  await writeProjectConfig(root, config => {
+    config.routingTimeoutMs = 100;
+    const backends = config.backends as Record<string, unknown>;
+    backends.jev = { enabled: false };
+  });
+  const bin = await fakeBin(t);
+  const request: ChoiceRequest = async () => {
+    const until = Date.now() + 150;
+    while (Date.now() < until) { /* busy-wait: timers cannot run */ }
+    return { answers: { route: { type: "choice", choice: "fast" } } };
+  };
+  const result = await doctorProject(root, { probe: true, env: await doctorEnv(t, bin), request });
+  const byId = new Map(result.checks.map(check => [check.id, check]));
+  assert.equal(byId.get("backend.laya")?.status, "fail");
+  assert.equal(result.code, 1);
+});
+
+// E8: a root AGENTS.override.md is an ascertainable discovery restriction; the
+// semantic question of which instructions Codex discovers stays unverified.
+test("a root AGENTS.override.md is reported and discovery stays unverified (E8)", async (t) => {
+  const root = await preparedProject(t);
+  await writeFile(join(root, "AGENTS.override.md"), "# user override\n");
+  const bin = await fakeBin(t);
+  const result = await doctorProject(root, { probe: false, env: await doctorEnv(t, bin) });
+  const byId = new Map(result.checks.map(check => [check.id, check]));
+  assert.equal(byId.get("instructions")?.status, "unverified");
+  assert.ok(byId.get("instructions")?.evidence.includes("AGENTS.override.md"), "the override must be named in the evidence");
+  assert.equal(byId.get("assets")?.status, "pass", "the skills check stays independent");
+  assert.equal(result.code, 0, "unverified must not fail the exit code");
+});
+
+// E8: version/help facts are not proof of runtime config-key semantics; the
+// codex evidence must say so instead of claiming full support.
+test("codex evidence reports unresolved config-key semantics rather than full support (E8)", async (t) => {
+  const root = await preparedProject(t);
+  const bin = await fakeBin(t);
+  const result = await doctorProject(root, { probe: false, env: await doctorEnv(t, bin) });
+  const byId = new Map(result.checks.map(check => [check.id, check]));
+  assert.equal(byId.get("codex")?.status, "pass", "the CLI flag facts still pass");
+  const evidence = byId.get("codex")?.evidence ?? "";
+  assert.ok(evidence.includes("agents.enabled"), "unresolved agents.enabled semantics must be reported");
+  assert.ok(!/supports the required controls/.test(evidence), "help output alone must not be claimed as full runtime support");
 });

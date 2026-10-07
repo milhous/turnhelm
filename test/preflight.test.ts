@@ -113,6 +113,22 @@ test("inspectCodex rejects malformed version output", async (t) => {
   assert.equal(result.version, undefined);
 });
 
+// E2: only well-formed `codex-cli <major>.<minor>.<patch>` evidence with safe
+// numeric components may count as a version.
+test("inspectCodex requires anchored codex-cli version evidence with safe numerics (E2)", async (t) => {
+  const bin = await fakeBin(t, "codex", CODEX_SCRIPT);
+  for (const text of [
+    "garbage 999.999.999",
+    "codex-cli 0.160.0beta",
+    "codex-cli 1e+37.160.0",
+    "codex-cli 99999999999.160.0"
+  ]) {
+    const result = await inspectCodex("/tmp", fakeEnv(bin, { FAKE_VERSION_TEXT: text, FAKE_HELP: GOOD_HELP }));
+    assert.equal(result.ok, false, JSON.stringify(text) + " must not count as valid version evidence");
+    assert.equal(result.version, undefined, "a rejected version must not be reported as attested");
+  }
+});
+
 test("inspectCodex rejects a missing required control", async (t) => {
   const bin = await fakeBin(t, "codex", CODEX_SCRIPT);
   const withoutEphemeral = GOOD_HELP.split("\n").filter(line => !line.includes("--ephemeral")).join("\n");
@@ -128,6 +144,16 @@ test("inspectCodex never infers agents.enabled support from generic --config hel
   assert.equal(result.ok, true);
   assert.ok(!result.controls?.includes("agents.enabled"));
   assert.deepEqual([...(result.controls ?? [])], ["--json", "--ephemeral", "--sandbox", "-"]);
+});
+
+// E3: a required control must appear as an exact flag token, so unrelated
+// strings that merely contain it as a prefix cannot satisfy the check.
+test("inspectCodex matches exact flag tokens, not unrelated prefixes (E3)", async (t) => {
+  const bin = await fakeBin(t, "codex", CODEX_SCRIPT);
+  const hijacked = "usage: codex exec\n  - --json-disabled --ephemeral-disabled --sandbox-disabled\n";
+  const result = await inspectCodex("/tmp", fakeEnv(bin, { FAKE_HELP: hijacked }));
+  assert.equal(result.ok, false);
+  assert.deepEqual([...(result.controls ?? [])], ["-"]);
 });
 
 test("inspectCodex reports a missing executable without throwing", async (t) => {
@@ -157,19 +183,76 @@ test("inspectCodex honors caller cancellation", async (t) => {
   const result = await inspectCodex("/tmp", fakeEnv(bin, { FAKE_DELAY: "30" }), controller.signal);
   const elapsed = Date.now() - started;
   assert.equal(result.ok, false);
-  assert.ok(elapsed < 10000, "cancellation must terminate the inspection before the delay ends");
+  // R2: the bound sits below TIMEOUT_MS so a signal-ignoring implementation
+  // cannot pass via the 2s timeout path.
+  assert.ok(elapsed < 1900, `cancellation must settle below the 2s budget, took ${elapsed}ms`);
 });
 
-test("inspectCodex rejects output beyond the 64 KiB cap", async (t) => {
-  const bin = await fakeBin(t, "codex", CODEX_SCRIPT);
-  const oversize = `#!/bin/sh
-printf '%s\\n' "$*" >> "$FAKE_ARG_LOG"
-dd if=/dev/zero bs=1024 count=200 2>/dev/null
+// E1: the leader exits while a TERM-ignoring same-group descendant inherits
+// the pipes, so only a group kill (with escalation) can bound the inspection.
+const DESCENDANT_SCRIPT = `#!/bin/sh
+trap '' TERM
+printf 'codex-cli 0.160.1\\n'
+/bin/sh -c 'trap "" TERM; exec /bin/sleep 30' &
+printf '%s\\n' "$!" > "$FAKE_DESCENDANT_PID"
 exit 0
 `;
-  const dir = await fakeBin(t, "codex", oversize);
-  const result = await inspectCodex("/tmp", fakeEnv(dir));
+
+test("inspectCodex bounds a TERM-ignoring descendant that outlives the leader (E1)", async (t) => {
+  const bin = await fakeBin(t, "codex", DESCENDANT_SCRIPT);
+  const pidFile = join(await tempDir(t, "turnhelm-preflight-pid-"), "pid");
+  const started = Date.now();
+  const result = await inspectCodex("/tmp", fakeEnv(bin, { FAKE_DESCENDANT_PID: pidFile }));
+  const elapsed = Date.now() - started;
+  assert.equal(result.ok, false, "a killed inspection must not report success");
+  assert.ok(elapsed < 5000, `the inspection must settle boundedly, took ${elapsed}ms`);
+  const pid = Number((await readFile(pidFile, "utf8")).trim());
+  assert.ok(Number.isInteger(pid) && pid > 0, "the fixture must record the descendant pid");
+  const deadline = Date.now() + 5000;
+  let alive = true;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0); // Probe only; the fixture-owned group must be gone.
+      await new Promise(resolve => setTimeout(resolve, 100));
+    } catch {
+      alive = false;
+      break;
+    }
+  }
+  assert.equal(alive, false, "the TERM-ignoring group descendant must be killed, not left behind");
+});
+
+test("inspectCodex settles caller cancellation below the timeout despite a TERM-ignoring group (E1)", async (t) => {
+  const bin = await fakeBin(t, "codex", DESCENDANT_SCRIPT);
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 500);
+  const started = Date.now();
+  const result = await inspectCodex("/tmp", fakeEnv(bin), controller.signal);
+  const elapsed = Date.now() - started;
   assert.equal(result.ok, false);
+  assert.ok(elapsed < 1900, `cancellation must settle below the 2s budget, took ${elapsed}ms`);
+});
+
+test("inspectCodex settles a non-executable spawn failure without throwing (E1)", async (t) => {
+  const bin = await tempDir(t, "turnhelm-preflight-bin-");
+  const script = join(bin, "codex");
+  await writeFile(script, "\u007fELF-garbage-not-an-executable");
+  await chmod(script, 0o755);
+  const result = await inspectCodex("/tmp", fakeEnv(bin));
+  assert.equal(result.ok, false);
+});
+
+// R6: the 64 KiB cap is pinned independently of the malformed-version path —
+// the version line itself is valid and the padding is whitespace, so only the
+// cap can reject this output (a cap-less implementation would parse the
+// version, run `exec --help`, and accept).
+test("inspectCodex rejects output beyond the 64 KiB cap even with valid version evidence (R6)", async (t) => {
+  const bin = await fakeBin(t, "codex", CODEX_SCRIPT);
+  const log = join(await tempDir(t, "turnhelm-preflight-log-"), "args");
+  const padded = "codex-cli 0.160.1" + " ".repeat(200 * 1024);
+  const result = await inspectCodex("/tmp", fakeEnv(bin, { FAKE_ARG_LOG: log, FAKE_VERSION_TEXT: padded, FAKE_HELP: GOOD_HELP }));
+  assert.equal(result.ok, false);
+  assert.deepEqual(await argLog(log), ["--version"], "overflow must stop the inspection at the version step");
 });
 
 test("inspectCodex subprocess env drops classifier keys and adds no managed marker", async (t) => {
