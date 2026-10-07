@@ -1,7 +1,7 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -50,20 +50,45 @@ record("argv.json", JSON.stringify(argv));
 record("cwd.txt", process.cwd());
 record("env.json", JSON.stringify(process.env));
 fs.appendFileSync(path.join(__dirname, "runs"), "1");
-const emit = event => process.stdout.write(JSON.stringify(event) + "\\n");
-let task = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", chunk => { task += chunk; });
-process.stdin.on("end", () => {
-  record("task.txt", task);
-  if (process.env.TEST_CODEX_RAW_STDERR) process.stderr.write(process.env.TEST_CODEX_RAW_STDERR + "\\n");
-  if (process.env.TEST_CODEX_RAW_ERROR) emit({ type: "error", message: process.env.TEST_CODEX_RAW_ERROR });
-  emit({ type: "item.completed", item: { type: "agent_message", text: ${JSON.stringify(AGENT_MESSAGE)} } });
-  if (process.env.TEST_CODEX_MODE !== "failed") {
-    emit({ type: "turn.completed", usage: { input_tokens: 11, output_tokens: 7 } });
-  }
-  process.exit(Number(process.env.TEST_CODEX_EXIT ?? 0));
-});
+if (process.env.TEST_CODEX_MODE === "hang") {
+  // A live worker: signal readiness, then keep the process alive until TERM.
+  record("ready", "1");
+  record("pid", String(process.pid));
+  setInterval(() => {}, 500);
+} else {
+  const emit = event => process.stdout.write(JSON.stringify(event) + "\\n");
+  let task = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", chunk => { task += chunk; });
+  process.stdin.on("end", () => {
+    record("task.txt", task);
+    if (process.env.TEST_CODEX_RAW_STDERR) process.stderr.write(process.env.TEST_CODEX_RAW_STDERR + "\\n");
+    if (process.env.TEST_CODEX_RAW_ERROR) emit({ type: "error", message: process.env.TEST_CODEX_RAW_ERROR });
+    emit({ type: "item.completed", item: { type: "agent_message", text: ${JSON.stringify(AGENT_MESSAGE)} } });
+    if (process.env.TEST_CODEX_MODE === "failed") {
+      // Terminal failure without a completion event or usage snapshot.
+    } else if (process.env.TEST_CODEX_OMIT_USAGE === "1") {
+      emit({ type: "turn.completed" });
+    } else {
+      emit({ type: "turn.completed", usage: { input_tokens: 11, output_tokens: 7 } });
+    }
+    process.exit(Number(process.env.TEST_CODEX_EXIT ?? 0));
+  });
+}
+`;
+
+// Root's F4 repro shape: a preload that flips an env tag when the classifier
+// response arrives, so a worker launched after classification can be told
+// apart from one seeing the pre-classification snapshot.
+const ENVFLIP_SCRIPT = `
+const http = require("node:http");
+const originalRequest = http.request;
+http.request = function (...args) {
+  const request = originalRequest.apply(this, args);
+  request.on("response", () => { process.env.ROOT_SNAPSHOT_TAG = "after"; });
+  return request;
+};
+require("node:module").syncBuiltinESMExports();
 `;
 
 const GIT_SCRIPT = `#!/bin/sh
@@ -282,6 +307,21 @@ test("plain doctor writes only to stderr and still exits zero", async t => {
   assert.ok(result.stderr.includes("[pass] config"));
 });
 
+test("doctor --probe sends exactly one synthetic request to the eligible backend", async t => {
+  const f = await fixture(t);
+  assert.equal((await f.run(["init"])).code, 0);
+  const result = await f.run(["doctor", "--probe", "--json"]);
+  assert.equal(result.code, 0);
+  assert.equal(f.requests.length, 1, "exactly one probe for the one eligible backend");
+  assert.equal(f.requests[0].url, "/v1/systemone");
+  const report = JSON.parse(result.stdout) as { code: number; checks: { id: string; status: string }[] };
+  assert.equal(report.code, 0);
+  const byId = new Map(report.checks.map(check => [check.id, check.status]));
+  assert.equal(byId.get("backend.laya"), "pass");
+  assert.equal(byId.get("backend.jev"), "skipped", "disabled Jev is not probed");
+  assert.equal(await workerRecords(f).then(records => records.runs), 0, "doctor never starts a worker");
+});
+
 test("run routes once, executes one read-only worker, and emits one accurate receipt", async t => {
   const f = await fixture(t, { choice: "balanced" });
   const result = await f.run(["run", TASK], { input: "" });
@@ -463,7 +503,12 @@ test("a worker terminal failure fails the run despite exit zero", async t => {
   assert.equal(result.code, 1);
   assert.equal(result.stdout, AGENT_MESSAGE + "\n");
   const receipt = parseReceipt(result.stderr);
-  assert.deepEqual((receipt.worker as { status: string; code: number }).status, "failed");
+  assert.deepEqual(receipt.worker, {
+    status: "failed",
+    code: 0,
+    durationMs: (receipt.worker as { durationMs: number }).durationMs,
+    usage: "unreported"
+  });
 });
 
 test("a nonzero worker exit code is preserved", async t => {
@@ -514,10 +559,63 @@ test("routing exhaustion launches zero workers and emits one receipt without a s
     [{ backend: "laya", outcome: "failed" }]);
   assert.deepEqual(routing.requestCounts, { laya: 1, jev: 0 });
   assert.equal("selection" in receipt, false);
-  assert.deepEqual(receipt.worker, { status: "not-started" });
+  assert.deepEqual(receipt.worker, { status: "not-started", usage: "unreported" });
   assert.equal(receipt.classifierUsage, "unreported");
   assert.equal(receipt.wholeRunUsageScope, "unverified");
   assert.equal(await workerRecords(f).then(records => records.runs), 0);
+});
+
+test("a completed run without usage reports it explicitly unreported", async t => {
+  const f = await fixture(t);
+  const result = await f.run(["run", TASK], { input: "", env: { TEST_CODEX_OMIT_USAGE: "1" } });
+  assert.equal(result.code, 0);
+  const receipt = parseReceipt(result.stderr);
+  assert.deepEqual(receipt.worker, {
+    status: "completed",
+    code: 0,
+    durationMs: (receipt.worker as { durationMs: number }).durationMs,
+    usage: "unreported"
+  });
+  assert.equal(receipt.classifierUsage, "unreported");
+  assert.equal(receipt.wholeRunUsageScope, "unverified");
+});
+
+for (const [name, expectedCode] of [["SIGINT", 130], ["SIGTERM", 143]] as const) {
+  test(`a live worker cancelled by ${name} exits ${expectedCode} with one sanitized receipt`, async t => {
+    const f = await fixture(t);
+    const child = f.spawn(["run", TASK], { env: { TEST_CODEX_MODE: "hang" } });
+    const pending = capture(child);
+    child.stdin?.end("");
+    await until(() => existsSync(join(f.bin, "ready")), "the live worker");
+    child.kill(name);
+    const result = await pending;
+    assert.equal(result.code, expectedCode);
+    const receipt = parseReceipt(result.stderr);
+    assert.deepEqual(receipt.worker, {
+      status: "cancelled",
+      code: (receipt.worker as { code: number }).code,
+      durationMs: (receipt.worker as { durationMs: number }).durationMs,
+      usage: "unreported"
+    });
+    assert.equal((await workerRecords(f)).runs, 1);
+    const pid = Number(await readFile(join(f.bin, "pid"), "utf8"));
+    let alive = true;
+    try { process.kill(pid, 0); } catch { alive = false; }
+    assert.equal(alive, false, "the owned worker must not survive cancellation");
+  });
+}
+
+test("the worker sees the environment as it was before classification", async t => {
+  const f = await fixture(t);
+  const preload = join(f.bin, "envflip.js");
+  await writeFile(preload, ENVFLIP_SCRIPT);
+  const result = await f.run(["run", TASK], {
+    input: "",
+    env: { NODE_OPTIONS: `--require ${preload}`, ROOT_SNAPSHOT_TAG: "before" }
+  });
+  assert.equal(result.code, 0);
+  assert.equal(f.requests.length, 1, "classification still runs exactly once");
+  assert.equal(await workerRecords(f).then(records => records.env.ROOT_SNAPSHOT_TAG), "before");
 });
 
 test("a classifier HTTP failure is sanitized", async t => {
@@ -543,7 +641,7 @@ test("SIGINT during routing keeps one cancelled attempt and launches no worker",
   assert.equal((receipt.routing as { status: string }).status, "cancelled");
   assert.equal((receipt.routing as { attempts: { outcome: string }[] }).attempts[0].outcome, "cancelled");
   assert.equal("selection" in receipt, false);
-  assert.deepEqual(receipt.worker, { status: "not-started" });
+  assert.deepEqual(receipt.worker, { status: "not-started", usage: "unreported" });
   assert.equal(await workerRecords(f).then(records => records.runs), 0);
 });
 
