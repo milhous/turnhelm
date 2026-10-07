@@ -25,8 +25,8 @@ Options:
 // Fake codex/git scripts record argv into FAKE_ARG_LOG so tests can pin that
 // only `--version` / `exec --help` (and the git rev-parse form) are invoked.
 const CODEX_SCRIPT = `#!/bin/sh
+if [ -n "$FAKE_DELAY" ]; then /bin/sleep "$FAKE_DELAY" >/dev/null; fi
 printf '%s\\n' "$*" >> "$FAKE_ARG_LOG"
-if [ -n "$FAKE_DELAY" ]; then sleep "$FAKE_DELAY"; fi
 if [ -n "$FAKE_ENV_DUMP" ]; then env > "$FAKE_ENV_DUMP"; fi
 if [ "$1" = "--version" ]; then
   if [ -n "$FAKE_VERSION_TEXT" ]; then printf '%s\\n' "$FAKE_VERSION_TEXT";
@@ -49,6 +49,11 @@ if [ "$1" = "-C" ] && [ "$3" = "rev-parse" ] && [ "$4" = "--is-inside-work-tree"
 fi
 exit 64
 `;
+
+// The inspection runs with cwd = root, so the fake root must exist.
+async function gitRoot(t: TestContext): Promise<string> {
+  return tempDir(t, "turnhelm-preflight-root-");
+}
 
 async function tempDir(t: TestContext, prefix: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), prefix));
@@ -179,31 +184,32 @@ test("inspectCodex subprocess env drops classifier keys and adds no managed mark
 
 test("inspectGit reports a Git work tree with the exact bounded invocation", async (t) => {
   const bin = await fakeBin(t, "git", GIT_SCRIPT);
+  const root = await gitRoot(t);
   const log = join(await tempDir(t, "turnhelm-preflight-log-"), "args");
-  const result = await inspectGit("/tmp/some-root", fakeEnv(bin, { FAKE_ARG_LOG: log }));
+  const result = await inspectGit(root, fakeEnv(bin, { FAKE_ARG_LOG: log }));
   assert.equal(result.ok, true);
   assert.equal(result.executable, join(bin, "git"));
   const logged = await argLog(log);
   assert.equal(logged.length, 1);
-  assert.deepEqual(logged[0].split(" "), ["-C", "/tmp/some-root", "rev-parse", "--is-inside-work-tree"]);
+  assert.deepEqual(logged[0].split(" "), ["-C", root, "rev-parse", "--is-inside-work-tree"]);
 });
 
 test("inspectGit reports outside-work-tree as not ok without failing hard", async (t) => {
   const bin = await fakeBin(t, "git", GIT_SCRIPT);
-  const result = await inspectGit("/tmp", fakeEnv(bin, { FAKE_GIT_ANSWER: "false" }));
+  const result = await inspectGit(await gitRoot(t), fakeEnv(bin, { FAKE_GIT_ANSWER: "false" }));
   assert.equal(result.ok, false);
 });
 
 test("inspectGit reports a failing rev-parse as not ok", async (t) => {
   const bin = await fakeBin(t, "git", GIT_SCRIPT);
-  const result = await inspectGit("/tmp", fakeEnv(bin, { FAKE_GIT_EXIT: "128" }));
+  const result = await inspectGit(await gitRoot(t), fakeEnv(bin, { FAKE_GIT_EXIT: "128" }));
   assert.equal(result.ok, false);
 });
 
 test("inspectGit subprocess env drops classifier keys and adds no managed marker", async (t) => {
   const bin = await fakeBin(t, "git", GIT_SCRIPT);
   const dump = join(await tempDir(t, "turnhelm-preflight-dump-"), "env");
-  await inspectGit("/tmp", fakeEnv(bin, { FAKE_ENV_DUMP: dump }));
+  await inspectGit(await gitRoot(t), fakeEnv(bin, { FAKE_ENV_DUMP: dump }));
   const childEnv = await readFile(dump, "utf8");
   for (const key of ["LAYA_API_KEY", "TYPESAFE_API_KEY", "TURNHELM_ALLOW_HOSTED_JEV", "TURNHELM_CONFIG", "TURNHELM_MANAGED_CHILD"]) {
     assert.ok(!childEnv.includes(key + "="), key + " must not reach the Git subprocess");

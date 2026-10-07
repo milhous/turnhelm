@@ -138,25 +138,25 @@ test("malformed config fails independently and marks install inspection unverifi
   assert.equal(result.code, 1);
 });
 
-test("unowned skill is a failing assets check without failing instructions", async (t) => {
+test("unowned skill is a failing assets check and leaves instructions unverified", async (t) => {
   const root = await preparedProject(t);
   await writeFile(join(root, ".agents", "skills", "turnhelm-routing", "SKILL.md"), "user-authored skill");
   const bin = await fakeBin(t);
   const result = await doctorProject(root, { probe: false, env: doctorEnv(bin) });
   const byId = new Map(result.checks.map(check => [check.id, check]));
   assert.equal(byId.get("assets")?.status, "fail");
-  assert.equal(byId.get("instructions")?.status, "pass");
+  assert.equal(byId.get("instructions")?.status, "unverified");
   assert.equal(result.code, 1);
 });
 
-test("unmanaged AGENTS.md markers fail the instructions check", async (t) => {
+test("unmanaged AGENTS.md markers fail the instructions check and leave assets unverified", async (t) => {
   const root = await preparedProject(t);
   await writeFile(join(root, "AGENTS.md"), "<!-- turnhelm:begin v1 -->\n");
   const bin = await fakeBin(t);
   const result = await doctorProject(root, { probe: false, env: doctorEnv(bin) });
   const byId = new Map(result.checks.map(check => [check.id, check]));
   assert.equal(byId.get("instructions")?.status, "fail");
-  assert.equal(byId.get("assets")?.status, "pass");
+  assert.equal(byId.get("assets")?.status, "unverified");
   assert.equal(result.code, 1);
 });
 
@@ -253,11 +253,16 @@ test("caller cancellation stops a probe without a failure", async (t) => {
   });
   const bin = await fakeBin(t);
   const controller = new AbortController();
-  const request: ChoiceRequest = spec => new Promise((_, reject) => {
-    spec.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
-  });
+  let probeStarted: () => void = () => {};
+  const started = new Promise<void>(resolve => { probeStarted = resolve; });
+  const request: ChoiceRequest = spec => {
+    probeStarted();
+    return new Promise((_, reject) => {
+      spec.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    });
+  };
   const running = doctorProject(root, { probe: true, env: doctorEnv(bin), request, signal: controller.signal });
-  await new Promise(resolve => setTimeout(resolve, 50));
+  await started;
   controller.abort();
   const result = await running;
   const byId = new Map(result.checks.map(check => [check.id, check]));
