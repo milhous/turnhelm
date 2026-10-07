@@ -1,15 +1,49 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { appendFile, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { projectPath, readProjectFile, resolveProject } from "../src/project.js";
+
+const execute = promisify(execFile);
 
 const makeRoot = async (t: TestContext) => {
   const root = await mkdtemp(join(tmpdir(), "turnhelm-project-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   return root;
+};
+
+// The child patches node:fs.readSync (synced into the compiled module's ESM
+// bindings), so patched-binding effects never reach this suite's process.
+const runReadChild = async (root: string, file: string, script: string) => {
+  const moduleUrl = new URL("../src/project.js", import.meta.url).href;
+  const result = await execute(process.execPath, ["--input-type=module", "--eval", `
+    import { readProjectFile } from ${JSON.stringify(moduleUrl)};
+    const { createRequire } = await import("node:module");
+    const mutableFs = createRequire(import.meta.url)("node:fs");
+    const { syncBuiltinESMExports } = createRequire(import.meta.url)("node:module");
+    const original = mutableFs.readSync;
+    const calls = [];
+    const target = ${JSON.stringify(join(root, file))};
+    mutableFs.readSync = function (fd, buffer, offset, length, position) {
+      calls.push(length);
+      ${script}
+    };
+    syncBuiltinESMExports();
+    try {
+      const content = await readProjectFile(${JSON.stringify(root)}, ${JSON.stringify(file)}, 65536);
+      console.log(JSON.stringify({ ok: true, content: content.toString(), calls }));
+    } catch (error) {
+      console.log(JSON.stringify({ ok: false, message: error.message, calls }));
+    } finally {
+      mutableFs.readSync = original;
+      syncBuiltinESMExports();
+    }
+  `], { timeout: 10000 });
+  return JSON.parse(result.stdout);
 };
 
 test("explicit roots resolve canonically and never walk to a Git ancestor", async t => {
@@ -89,4 +123,57 @@ test("readProjectFile reads all bytes of a file that grew after an earlier read"
   assert.ok(grown);
   assert.equal(grown.length, 1500);
   assert.ok(grown.equals(Buffer.concat([Buffer.alloc(1000, 1), Buffer.alloc(500, 2)])));
+});
+
+test("assembles full content across real non-EOF short reads", async t => {
+  const root = await makeRoot(t);
+  await writeFile(join(root, "short.bin"), "0123456789");
+  const payload = await runReadChild(root, "short.bin",
+    "return original(fd, buffer, offset, Math.min(length, 3), position);");
+  assert.equal(payload.ok, true, payload.message);
+  assert.equal(payload.content, "0123456789");
+  assert.ok(payload.calls.length >= 4, JSON.stringify(payload.calls));
+  assert.ok(payload.calls.every((length: number) => length <= 4096), JSON.stringify(payload.calls));
+});
+
+test("caps every read to the remaining max+1 budget", async t => {
+  const root = await makeRoot(t);
+  await writeFile(join(root, "big.bin"), Buffer.alloc(10000, 1));
+  const payload = await runReadChild(root, "big.bin",
+    "return original(fd, buffer, offset, length, position);");
+  assert.equal(payload.ok, false);
+  assert.match(payload.message, /exceeds 9 bytes/);
+  assert.ok(payload.calls.length > 0);
+  assert.ok(payload.calls.every((length: number) => length <= 10), JSON.stringify(payload.calls));
+});
+
+test("reads bytes appended between read calls inside one read sequence", async t => {
+  const root = await makeRoot(t);
+  await writeFile(join(root, "growing.bin"), "AAAA");
+  const payload = await runReadChild(root, "growing.bin", `
+    const read = original(fd, buffer, offset, length, position);
+    if (calls.length === 1) mutableFs.appendFileSync(target, "BBBB");
+    return read;
+  `);
+  assert.equal(payload.ok, true, payload.message);
+  assert.equal(payload.content, "AAAABBBB");
+  assert.deepEqual(payload.calls.length, 3);
+});
+
+test("readProjectFile rejects a FIFO promptly instead of blocking in open", { timeout: 20000 }, async t => {
+  const root = await makeRoot(t);
+  await execute("mkfifo", [join(root, "config")]);
+  const moduleUrl = new URL("../src/project.js", import.meta.url).href;
+  const result = await execute(process.execPath, ["--input-type=module", "--eval", `
+    import { readProjectFile } from ${JSON.stringify(moduleUrl)};
+    try {
+      await readProjectFile(${JSON.stringify(root)}, "config", 65536);
+      console.log(JSON.stringify({ ok: true }));
+    } catch (error) {
+      console.log(JSON.stringify({ ok: false, message: error.message }));
+    }
+  `], { timeout: 5000 });
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, false);
+  assert.match(payload.message, /regular file/);
 });

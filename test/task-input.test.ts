@@ -103,3 +103,10 @@ test("already-aborted input rejects and destroys stdin", async () => {
   await assert.rejects(readTask(undefined, stdin, ac.signal));
   assert.ok(stdin.destroyed);
 });
+
+test("already-aborted signal rejects before the TTY fast path", async () => {
+  const stdin = new PassThrough() as PassThrough & { isTTY?: boolean };
+  stdin.isTTY = true;
+  await assert.rejects(readTask("Fix the parser", stdin, AbortSignal.abort()));
+  assert.ok(stdin.destroyed);
+});

@@ -54,6 +54,24 @@ test("rejects every legacy root field as unknown configuration", () => {
   }
 });
 
+test("requires required fields to be own properties at every level", () => {
+  const c = editable();
+  assert.throws(() => parseProjectConfig(Object.create(c)));
+  const laya = editable();
+  laya.backends.laya = Object.create(laya.backends.laya);
+  assert.throws(() => parseProjectConfig(laya));
+  const jev = editable();
+  jev.backends.jev = Object.create(jev.backends.jev);
+  assert.throws(() => parseProjectConfig(jev));
+  const profile = editable();
+  profile.profiles.fast = Object.create(profile.profiles.fast);
+  assert.throws(() => parseProjectConfig(profile));
+  const inherited = Object.assign(Object.create({ version: 1 }), {
+    routingTimeoutMs: c.routingTimeoutMs, backends: c.backends, profiles: c.profiles
+  });
+  assert.throws(() => parseProjectConfig(inherited));
+});
+
 test("requires version 1 and a bounded integer timeout", () => {
   const c = editable();
   assert.throws(() => parseProjectConfig({ ...c, version: 2 }));
