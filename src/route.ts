@@ -106,8 +106,11 @@ export async function routeTask(
       return { status: "selected", decision };
     } catch {
       attempt.durationMs = Math.round(performance.now() - attemptStarted);
-      attempt.outcome = caller?.aborted ? "cancelled" : signal.aborted ? "timeout" : "failed";
-      if (caller?.aborted) return cancelled();
+      if (caller?.aborted) {
+        attempt.outcome = "cancelled";
+        return cancelled();
+      }
+      attempt.outcome = signal.aborted || performance.now() - attemptStarted > budget ? "timeout" : "failed";
     }
   }
   return caller?.aborted ? cancelled() : deepFreeze({ status: "failed", attempts, routingMs: elapsed() });
