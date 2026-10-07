@@ -559,7 +559,7 @@ test("routing exhaustion launches zero workers and emits one receipt without a s
     [{ backend: "laya", outcome: "failed" }]);
   assert.deepEqual(routing.requestCounts, { laya: 1, jev: 0 });
   assert.equal("selection" in receipt, false);
-  assert.deepEqual(receipt.worker, { status: "not-started", usage: "unreported" });
+  assert.deepEqual(receipt.worker, { status: "not-started", durationMs: 0, usage: "unreported" });
   assert.equal(receipt.classifierUsage, "unreported");
   assert.equal(receipt.wholeRunUsageScope, "unverified");
   assert.equal(await workerRecords(f).then(records => records.runs), 0);
@@ -641,7 +641,7 @@ test("SIGINT during routing keeps one cancelled attempt and launches no worker",
   assert.equal((receipt.routing as { status: string }).status, "cancelled");
   assert.equal((receipt.routing as { attempts: { outcome: string }[] }).attempts[0].outcome, "cancelled");
   assert.equal("selection" in receipt, false);
-  assert.deepEqual(receipt.worker, { status: "not-started", usage: "unreported" });
+  assert.deepEqual(receipt.worker, { status: "not-started", durationMs: 0, usage: "unreported" });
   assert.equal(await workerRecords(f).then(records => records.runs), 0);
 });
 
