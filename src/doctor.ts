@@ -170,9 +170,9 @@ export async function doctorProject(root: string, options: DoctorOptions): Promi
   // later, at its stable position in the check order)
   let instructions: DoctorCheck;
   try {
-    const templates = readTemplates();
-    const inspection = await inspectInstallation(root, templates);
-    const classified = classifyInspection(inspection.planned, undefined);
+    const templates = await readTemplates();
+    const changes = await inspectInstallation(root, templates);
+    const classified = classifyInspection(changes.map(change => change.path), undefined);
     const assets = classified.assets;
     instructions = classified.instructions;
     checks.push(assets);

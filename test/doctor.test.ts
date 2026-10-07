@@ -51,7 +51,7 @@ async function fakeBin(t: TestContext): Promise<string> {
 
 async function preparedProject(t: TestContext): Promise<string> {
   const root = await tempDir(t, "turnhelm-doctor-project-");
-  assert.equal((await initProject(root)).code, 0);
+  assert.equal((await initProject(root, { dryRun: false })).code, 0);
   return root;
 }
 

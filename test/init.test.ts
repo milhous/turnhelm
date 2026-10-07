@@ -42,6 +42,7 @@ async function runChild(t: TestContext, root: string, scenario: string): Promise
   const moduleUrl = new URL("../src/init.js", import.meta.url).href;
   const result = await execute(process.execPath, ["--input-type=module", "--eval", `
     import * as init from ${JSON.stringify(moduleUrl)};
+    import * as assets from ${JSON.stringify(new URL("../src/assets.js", import.meta.url).href)};
     const { createRequire } = await import("node:module");
     const mutableFs = createRequire(import.meta.url)("node:fs");
     const { syncBuiltinESMExports } = createRequire(import.meta.url)("node:module");
@@ -51,22 +52,11 @@ async function runChild(t: TestContext, root: string, scenario: string): Promise
     const originalRename = mutableFs.promises.rename;
     const originalUnlink = mutableFs.promises.unlink;
     let writes = 0;
-    mutableFs.promises.writeFile = function (...args) {
-      writes += 1;
-      return originalWrite.apply(this, args);
-    };
-    mutableFs.promises.rename = function (...args) {
-      writes += 1;
-      return originalRename.apply(this, args);
-    };
-    syncBuiltinESMExports();
-    const templates = await init.readTemplates();
+    const templates = await assets.readTemplates();
     const changes = await init.inspectInstallation(root, templates);
     const skillPath = join(root, ".agents", "skills", "turnhelm-routing", "SKILL.md");
     const configPath = join(root, ".turnhelm", "config.json");
     const agentsPath = join(root, "AGENTS.md");
-    mutableFs.promises.writeFile = originalWrite;
-    mutableFs.promises.rename = originalRename;
     const scenario = ${JSON.stringify(scenario)};
     if (scenario === "d3") {
       mutableFs.promises.writeFile = async function (p, data, opts) {
@@ -85,7 +75,17 @@ async function runChild(t: TestContext, root: string, scenario: string): Promise
         return originalUnlink.call(this, p);
       };
     }
-    if (scenario === "d5") await originalWrite(agentsPath, "# Team rules edited\\n\\n");
+    if (scenario === "d5") {
+      mutableFs.promises.writeFile = function (...args) {
+        writes += 1;
+        return originalWrite.apply(this, args);
+      };
+      mutableFs.promises.rename = function (...args) {
+        writes += 1;
+        return originalRename.apply(this, args);
+      };
+      await originalWrite(agentsPath, "# Team rules edited\\n\\n");
+    }
     syncBuiltinESMExports();
     const result = await init.applyInstallation(root, changes);
     const fsp = await import("node:fs/promises");

@@ -1,12 +1,27 @@
 import { constants, closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-export type Templates = Readonly<{ config: Buffer; skillMd: Buffer; skillYaml: Buffer }>;
+export type Templates = Readonly<{ config: Buffer; skill: Buffer; metadata: Buffer; agentsBlock: string }>;
 
 export class TemplateError extends Error {}
 
 const MAX_TEMPLATE_BYTES = 65536;
 const READ_CHUNK_BYTES = 4096;
+
+export const MANAGED_BLOCK = [
+  "<!-- turnhelm:begin v1 -->",
+  "# Turnhelm routing (managed)",
+  "",
+  "For tasks that need a model/effort-routed Codex child, run `turnhelm run",
+  '"<task>"` with one self-contained prompt stating the full task',
+  "requirement. Ordinary automatic selection picks the profile, including",
+  "`frontier_max` when the task genuinely needs maximum effort; there is no",
+  "max-specific flag or extra stage. Workspace writes and hosted backends need",
+  "separate, explicit authorization immediately before use. Never invoke",
+  "`turnhelm run` from inside a Turnhelm-managed Codex child. Details:",
+  "`.agents/skills/turnhelm-routing/SKILL.md`.",
+  "<!-- turnhelm:end -->",
+].join("\n");
 
 function readTemplate(url: URL, what: string): Buffer {
   const path = fileURLToPath(url);
@@ -40,10 +55,11 @@ function readTemplate(url: URL, what: string): Buffer {
   }
 }
 
-export function readTemplates(): Templates {
+export async function readTemplates(): Promise<Templates> {
   return {
     config: readTemplate(new URL("../../assets/config.json", import.meta.url), "config"),
-    skillMd: readTemplate(new URL("../../.agents/skills/turnhelm-routing/SKILL.md", import.meta.url), "SKILL.md"),
-    skillYaml: readTemplate(new URL("../../.agents/skills/turnhelm-routing/agents/openai.yaml", import.meta.url), "agents/openai.yaml"),
+    skill: readTemplate(new URL("../../.agents/skills/turnhelm-routing/SKILL.md", import.meta.url), "SKILL.md"),
+    metadata: readTemplate(new URL("../../.agents/skills/turnhelm-routing/agents/openai.yaml", import.meta.url), "agents/openai.yaml"),
+    agentsBlock: MANAGED_BLOCK,
   };
 }
