@@ -44,11 +44,11 @@ const finish = body => {
 
 const stubbornChild = `process.on('SIGTERM', function () {}); setInterval(function () {}, 500);`;
 
-type Gate = "abort-ready" | "abort-received" | "epipe-received";
+type Gate = "abort-ready" | "abort-received" | "epipe-received" | "abort-diag-late";
 
-type OutputMode = "stdout" | "blocker" | "abort-in-write";
+type OutputMode = "stdout" | "blocker" | "abort-in-write" | "accepted-delay" | "accepted-error";
 
-type DiagMode = "stall" | "error";
+type DiagMode = "stall" | "error" | "delay" | "delay-error" | "slow";
 
 type WorkerScenario = {
   script?: string;
@@ -60,6 +60,8 @@ type WorkerScenario = {
   output?: OutputMode;
   drainDelayMs?: number;
   diag?: DiagMode;
+  tailDelayMs?: number;
+  lingerMs?: number;
 };
 
 type Recorded = {
@@ -72,6 +74,8 @@ type Recorded = {
   received?: number;
   maxPending?: number;
   emitted?: string;
+  outputAcked?: boolean;
+  diagAcked?: boolean;
   diagWrites?: number;
   diagMaxLength?: number;
   diagFinalLength?: number;
@@ -101,14 +105,16 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
     let pending = 0;
     let maxPending = 0;
     let captured = "";
+    let outputAcked = false;
     let diagWrites = 0;
     let diagMaxLength = 0;
     let diagFinalLength = 0;
+    let diagAcked = false;
     let diagSink;
     let output;
     ${blocker ? `
     output = new Writable({
-      highWaterMark: 0,
+      highWaterMark: ${scenario.output === "accepted-delay" || scenario.output === "accepted-error" ? 65536 : 0},
       write(chunk, _encoding, callback) {
         captured += chunk.toString();
         received += 1;
@@ -116,7 +122,11 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
         maxPending = Math.max(maxPending, pending);
         ${scenario.output === "abort-in-write"
           ? "controller.abort(); // Deliberately never calls callback and never drains."
-          : `setTimeout(() => { pending -= 1; callback(); }, ${scenario.drainDelayMs ?? 30});`}
+          : scenario.output === "accepted-delay"
+            ? `setTimeout(() => { pending -= 1; outputAcked = true; callback(); }, ${scenario.tailDelayMs ?? 500});`
+            : scenario.output === "accepted-error"
+              ? `setTimeout(() => { pending -= 1; callback(new Error("PRIVATE_LATE_EPIPE")); }, ${scenario.tailDelayMs ?? 500});`
+              : `setTimeout(() => { pending -= 1; callback(); }, ${scenario.drainDelayMs ?? 30});`}
       }
     });` : "output = process.stdout;"}
     ${scenario.diag === "stall" ? `
@@ -132,6 +142,32 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
     diagSink = new Writable({
       write(_chunk, _encoding, callback) {
         callback(new Error("PRIVATE_DIAGNOSTIC_EPIPE"));
+      }
+    });` : ""}
+    ${scenario.diag === "delay" ? `
+    diagSink = new Writable({
+      highWaterMark: 65536,
+      write(_chunk, _encoding, callback) {
+        diagWrites += 1;
+        diagMaxLength = Math.max(diagMaxLength, diagSink.writableLength);
+        setTimeout(() => { diagAcked = true; callback(); }, ${scenario.tailDelayMs ?? 500});
+      }
+    });` : ""}
+    ${scenario.diag === "delay-error" ? `
+    diagSink = new Writable({
+      highWaterMark: 65536,
+      write(_chunk, _encoding, callback) {
+        diagWrites += 1;
+        setTimeout(() => { callback(new Error("PRIVATE_LATE_EPIPE")); }, ${scenario.tailDelayMs ?? 500});
+      }
+    });` : ""}
+    ${scenario.diag === "slow" ? `
+    diagSink = new Writable({
+      highWaterMark: 0,
+      write(_chunk, _encoding, callback) {
+        diagWrites += 1;
+        diagMaxLength = Math.max(diagMaxLength, diagSink.writableLength);
+        setTimeout(() => { callback(); }, ${scenario.tailDelayMs ?? 500});
       }
     });` : ""}
     // The harness must never hang: exit 89 if the worker promise does not settle.
@@ -156,11 +192,17 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
       });
       ${scenario.gate === "abort-ready" ? "await waitReady(); controller.abort();" : ""}
       ${scenario.gate === "abort-received" ? "while (received < 1) await new Promise(resolve => setTimeout(resolve, 10)); controller.abort();" : ""}
+      ${scenario.gate === "abort-diag-late" ? `
+      while (diagWrites < 1) await new Promise(resolve => setTimeout(resolve, 10));
+      // The child closes first; no drain ever arrives; cancellation must still resolve.
+      await new Promise(resolve => setTimeout(resolve, 400));
+      controller.abort();` : ""}
       ${scenario.gate === "epipe-received" ? "while (received < 1) await new Promise(resolve => setTimeout(resolve, 10)); output.destroy(new Error(\"EPIPE\"));" : ""}
       const result = await running;
       clearTimeout(guard);
       diagFinalLength = diagSink ? diagSink.writableLength : 0;
-      await writeFile(resultFile, JSON.stringify({ ...result, received, maxPending, emitted: captured, diagWrites, diagMaxLength, diagFinalLength }));
+      await writeFile(resultFile, JSON.stringify({ ...result, received, maxPending, emitted: captured, outputAcked, diagAcked, diagWrites, diagMaxLength, diagFinalLength }));
+      ${scenario.lingerMs ? `setTimeout(() => {}, ${scenario.lingerMs});` : ""}
     } catch (error) {
       clearTimeout(guard);
       await writeFile(resultFile, JSON.stringify({ harnessError: error instanceof Error ? error.message : String(error) }));
@@ -261,6 +303,8 @@ finish(() => {
     received: 0,
     maxPending: 0,
     emitted: "",
+    outputAcked: false,
+    diagAcked: false,
     diagWrites: 0,
     diagMaxLength: 0,
     diagFinalLength: 0
@@ -371,9 +415,10 @@ finish(() => {
   await waitForExit(Number(await fakeFile(directory, "descendant.pid")));
 });
 
-test("a stalled diagnostics sink retains a bounded queue and keeps completion effective", { timeout: 30_000 }, async t => {
+test("an abort resolves a stalled diagnostics sink with a bounded queue", { timeout: 30_000 }, async t => {
   const { recorded, stderr } = await runWorker(t, {
     diag: "stall",
+    gate: "abort-diag-late",
     script: `
 finish(() => {
   for (let i = 0; i < 10000; i++) emit({ type: "error", message: "TEST_PRIVATE_ERROR_SENTINEL_" + i });
@@ -381,10 +426,113 @@ finish(() => {
 });
 `
   });
-  assert.equal(recorded.status, "completed");
+  assert.equal(recorded.status, "cancelled");
   assert.ok((recorded.diagWrites ?? 0) <= 8, "diagnostic writes must be bounded, saw " + recorded.diagWrites);
   assert.ok((recorded.diagFinalLength ?? 0) <= 256, "retained diagnostic bytes must be bounded, saw " + recorded.diagFinalLength);
   forbid(JSON.stringify(recorded) + stderr, "TEST_PRIVATE_ERROR_SENTINEL");
+});
+
+test("one diagnostic event is written exactly once under a slow drain", { timeout: 30_000 }, async t => {
+  const { recorded, stderr } = await runWorker(t, {
+    diag: "slow",
+    tailDelayMs: 5,
+    script: `
+finish(() => {
+  emit({ type: "error", message: "TEST_PRIVATE_ERROR_SENTINEL" });
+  setTimeout(() => { emit({ type: "turn.completed" }); }, 350);
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(recorded.diagWrites, 1, "one fixed-category event must surface exactly once, saw " + recorded.diagWrites);
+  assert.equal(stderr, "turnhelm: worker-event-error\n");
+  forbid(JSON.stringify(recorded) + stderr, "TEST_PRIVATE_ERROR_SENTINEL");
+});
+
+test("settlement waits for an accepted message write to complete", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    output: "accepted-delay",
+    tailDelayMs: 500,
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "tail" } });
+  emit({ type: "turn.completed", usage: { input_tokens: 1 } });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(recorded.outputAcked, true, "the result must not settle before the accepted write completes");
+  assert.ok((recorded.durationMs ?? 0) >= 400);
+});
+
+test("a late message-write error is a sanitized output failure, not a crash", { timeout: 30_000 }, async t => {
+  const outcome = await runWorker(t, {
+    output: "accepted-error",
+    tailDelayMs: 500,
+    lingerMs: 900,
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "tail" } });
+  emit({ type: "turn.completed", usage: { input_tokens: 1 } });
+});
+`
+  }).then(
+    value => ({ kind: "settled" as const, value }),
+    error => ({ kind: "crashed" as const, error })
+  );
+  if (outcome.kind === "crashed") {
+    const error = outcome.error as NodeJS.ErrnoException & { code?: number | null; stderr?: string };
+    assert.fail("late message-write error crashed the harness: exit " + error.code
+      + ", raw error text on stderr: " + String(error.stderr ?? "").includes("PRIVATE_LATE_EPIPE"));
+  }
+  const { recorded, stderr } = outcome.value;
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "output");
+  assert.equal(recorded.code, 0);
+  forbid(JSON.stringify(recorded) + stderr, "PRIVATE_LATE_EPIPE");
+});
+
+test("settlement waits for an accepted diagnostics write to complete", { timeout: 30_000 }, async t => {
+  const { recorded, stderr } = await runWorker(t, {
+    diag: "delay",
+    tailDelayMs: 500,
+    script: `
+finish(() => {
+  emit({ type: "error", message: "TEST_PRIVATE_ERROR_SENTINEL" });
+  emit({ type: "turn.completed" });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(recorded.diagAcked, true, "the result must not settle before the accepted write completes");
+  assert.equal(stderr, "turnhelm: worker-event-error\n");
+});
+
+test("a late diagnostics-write error is a sanitized output failure, not a crash", { timeout: 30_000 }, async t => {
+  const outcome = await runWorker(t, {
+    diag: "delay-error",
+    tailDelayMs: 500,
+    lingerMs: 900,
+    script: `
+finish(() => {
+  emit({ type: "error", message: "TEST_PRIVATE_ERROR_SENTINEL" });
+  emit({ type: "turn.completed" });
+});
+`
+  }).then(
+    value => ({ kind: "settled" as const, value }),
+    error => ({ kind: "crashed" as const, error })
+  );
+  if (outcome.kind === "crashed") {
+    const error = outcome.error as NodeJS.ErrnoException & { code?: number | null; stderr?: string };
+    assert.fail("late diagnostics-write error crashed the harness: exit " + error.code
+      + ", raw error text on stderr: " + String(error.stderr ?? "").includes("PRIVATE_LATE_EPIPE"));
+  }
+  const { recorded, stderr } = outcome.value;
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "output");
+  assert.equal(recorded.code, 0);
+  forbid(JSON.stringify(recorded) + stderr, "PRIVATE_LATE_EPIPE");
 });
 
 test("repeated completions keep the latest usage snapshot, never a sum", { timeout: 30_000 }, async t => {
