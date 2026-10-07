@@ -127,11 +127,11 @@ export function executeWorker(
     let cancelDiagWait: (() => void) | undefined;
     let diagLine: string | undefined;
     let stdoutEnded = false;
-    let pendingOutputs = 0;
+    const pendingWrites = { message: 0, diag: 0 };
 
     // The diagnostics sink is owned output: an async sink error or close is a
     // parent-output failure with the same EPIPE discipline as the message sink.
-    const onDiagFailure = (): void => { recordFailure("output"); };
+    const onDiagFailure = (): void => failSink("diag");
     diagnostics.on("error", onDiagFailure);
     diagnostics.on("close", onDiagFailure);
 
@@ -165,7 +165,7 @@ export function executeWorker(
       options.signal?.removeEventListener("abort", onAbort);
       // With writes still in flight the listeners stay attached (they detach
       // from the last write callback); cancellation may settle despite them.
-      if (pendingOutputs === 0) detachSinkListeners();
+      if (pendingWrites.message === 0 && pendingWrites.diag === 0) detachSinkListeners();
       cancelDrainWait?.();
       cancelDiagWait?.();
       let status: WorkerResult["status"];
@@ -192,7 +192,7 @@ export function executeWorker(
     // flushed write — unless cancellation resolves the run.
     const settle = (): void => {
       if (!closed || finished || !shutdownDischarged || cancelDrainWait !== undefined) return;
-      if (pendingOutputs !== 0 && !cancelled) return;
+      if ((pendingWrites.message !== 0 || pendingWrites.diag !== 0) && !cancelled) return;
       finish();
     };
 
@@ -232,38 +232,51 @@ export function executeWorker(
     };
 
     const onAbort = (): void => { cancelled = true; beginShutdown(); };
-    const onOutputError = (): void => { recordFailure("output"); };
+    const onOutputError = (): void => failSink("message");
 
     // Listener lifetime must cover our accepted bytes: while any write this
     // invocation made is still in flight, the sinks keep their error listeners,
     // so a late sink error can never be an unhandled emission.
     const detachSinkListeners = (): void => {
       output.removeListener("error", onOutputError);
+      output.removeListener("close", onOutputError);
       diagnostics.removeListener("error", onDiagFailure);
       diagnostics.removeListener("close", onDiagFailure);
     };
 
-    // Completion or error of every accepted write, on both sinks.
-    const onWriteAck = (error?: Error | null): void => {
-      pendingOutputs -= 1;
+    // Once a sink has errored or closed, write callbacks still outstanding on
+    // it can never arrive (destroy() during a pending _write is never
+    // completed); its entries are discharged so settlement cannot wait forever
+    // on a dead sink. The other sink's healthy writes keep their own accounting.
+    const failSink = (kind: "message" | "diag"): void => {
+      pendingWrites[kind] = 0;
+      recordFailure("output");
+    };
+
+    // Completion or error of every accepted write, per sink.
+    const ackWrite = (kind: "message" | "diag", error?: Error | null): void => {
+      pendingWrites[kind] = Math.max(0, pendingWrites[kind] - 1);
       if (error !== null && error !== undefined) {
         recordFailure("output");
         // The failing sink emits its 'error' right after this callback
         // (nextTick); defer the detach past that emission so it stays owned,
         // then release the sinks — no late ack may leave a permanent listener.
-        if (pendingOutputs === 0) setImmediate(detachSinkListeners);
+        if (pendingWrites.message === 0 && pendingWrites.diag === 0) setImmediate(detachSinkListeners);
         return;
       }
       if (finished) {
-        if (pendingOutputs === 0) detachSinkListeners();
+        if (pendingWrites.message === 0 && pendingWrites.diag === 0) detachSinkListeners();
         return;
       }
       settle();
     };
+    const onMessageAck = (error?: Error | null): void => ackWrite("message", error);
+    const onDiagAck = (error?: Error | null): void => ackWrite("diag", error);
     options.signal?.addEventListener("abort", onAbort, { once: true });
     // Early spawn-error listener precedes any stdin use (same pattern as runCodex).
     child.once("error", () => { recordFailure("spawn"); });
     output.on("error", onOutputError);
+    output.on("close", onOutputError);
 
     const waitForDrain = (): (() => void) => {
       let settledWait = false;
@@ -287,12 +300,12 @@ export function executeWorker(
     };
 
     const emitMessage = (text: string): void => {
-      pendingOutputs += 1;
+      pendingWrites.message += 1;
       let accepted: boolean;
       try {
-        accepted = output.write(text + "\n", onWriteAck);
+        accepted = output.write(text + "\n", onMessageAck);
       } catch {
-        pendingOutputs -= 1;
+        pendingWrites.message = Math.max(0, pendingWrites.message - 1);
         recordFailure("output");
         return;
       }
@@ -328,12 +341,12 @@ export function executeWorker(
     };
 
     const writeDiagLine = (line: string): void => {
-      pendingOutputs += 1;
+      pendingWrites.diag += 1;
       let accepted: boolean;
       try {
-        accepted = diagnostics.write(line, onWriteAck);
+        accepted = diagnostics.write(line, onDiagAck);
       } catch {
-        pendingOutputs -= 1;
+        pendingWrites.diag = Math.max(0, pendingWrites.diag - 1);
         recordFailure("output");
         return;
       }
