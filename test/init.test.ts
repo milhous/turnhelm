@@ -1,12 +1,16 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile, unlink } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { lstat, chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { parseProjectConfig } from "../src/config.js";
 import { readTemplates } from "../src/assets.js";
 import { applyInstallation, initProject, inspectInstallation } from "../src/init.js";
+
+const execute = promisify(execFile);
 
 type TempOptions = { agents?: string; skill?: string; symlinkedAgents?: boolean };
 async function tempProject(t: TestContext, options: TempOptions = {}): Promise<string> {
@@ -31,6 +35,68 @@ async function snapshot(root: string): Promise<Record<string, string | undefined
   return result;
 }
 async function readAgents(root: string): Promise<string> { return readFile(join(root, "AGENTS.md"), "utf8"); }
+
+// Runs a scenario in an isolated child so patches to node:fs/promises (via the
+// mutable CJS builtin + syncBuiltinESMExports) never reach this suite.
+async function runChild(t: TestContext, root: string, scenario: string): Promise<any> {
+  const moduleUrl = new URL("../src/init.js", import.meta.url).href;
+  const result = await execute(process.execPath, ["--input-type=module", "--eval", `
+    import * as init from ${JSON.stringify(moduleUrl)};
+    const { createRequire } = await import("node:module");
+    const mutableFs = createRequire(import.meta.url)("node:fs");
+    const { syncBuiltinESMExports } = createRequire(import.meta.url)("node:module");
+    const { join } = await import("node:path");
+    const root = ${JSON.stringify(root)};
+    const originalWrite = mutableFs.promises.writeFile;
+    const originalRename = mutableFs.promises.rename;
+    const originalUnlink = mutableFs.promises.unlink;
+    let writes = 0;
+    mutableFs.promises.writeFile = function (...args) {
+      writes += 1;
+      return originalWrite.apply(this, args);
+    };
+    mutableFs.promises.rename = function (...args) {
+      writes += 1;
+      return originalRename.apply(this, args);
+    };
+    syncBuiltinESMExports();
+    const templates = await init.readTemplates();
+    const changes = await init.inspectInstallation(root, templates);
+    const skillPath = join(root, ".agents", "skills", "turnhelm-routing", "SKILL.md");
+    const configPath = join(root, ".turnhelm", "config.json");
+    const agentsPath = join(root, "AGENTS.md");
+    mutableFs.promises.writeFile = originalWrite;
+    mutableFs.promises.rename = originalRename;
+    const scenario = ${JSON.stringify(scenario)};
+    if (scenario === "d3") {
+      mutableFs.promises.writeFile = async function (p, data, opts) {
+        const r = await originalWrite.call(this, p, data, opts);
+        if (String(p).includes(".turnhelm-tmp-")) await originalWrite(agentsPath, "# Concurrent edit\\n");
+        return r;
+      };
+    }
+    if (scenario === "d6") {
+      mutableFs.promises.rename = async function (from, to) {
+        if (String(to) === skillPath) { const e = new Error("simulated EIO"); e.code = "EIO"; throw e; }
+        return originalRename.call(this, from, to);
+      };
+      mutableFs.promises.unlink = async function (p) {
+        if (String(p) === configPath) { const e = new Error("simulated EPERM"); e.code = "EPERM"; throw e; }
+        return originalUnlink.call(this, p);
+      };
+    }
+    if (scenario === "d5") await originalWrite(agentsPath, "# Team rules edited\\n\\n");
+    syncBuiltinESMExports();
+    const result = await init.applyInstallation(root, changes);
+    const fsp = await import("node:fs/promises");
+    const agents = await fsp.readFile(agentsPath, "utf8").catch(e => e.code);
+    const configExists = await fsp.readFile(configPath).then(() => true, e => e.code === "ENOENT" ? false : e.code);
+    const skillExists = await fsp.readFile(skillPath).then(() => true, e => e.code === "ENOENT" ? false : e.code);
+    console.log(JSON.stringify({ ...result, writes, agents, configExists, skillExists }));
+    process.exit(0);
+  `], { timeout: 15000 });
+  return JSON.parse(result.stdout);
+}
 
 test("dry-run plans but writes nothing", async (t) => {
   const root = await tempProject(t);
@@ -71,18 +137,35 @@ test("symlinked target is refused", async (t) => {
 
 test("shipped templates are the canonical bundled assets", async () => {
   const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
-  const templates = readTemplates();
+  const templates = await readTemplates();
   assert.ok(templates.config.equals(await readFile(join(repoRoot, "assets", "config.json"))));
-  assert.ok(templates.skillMd.equals(await readFile(join(repoRoot, ".agents", "skills", "turnhelm-routing", "SKILL.md"))));
-  assert.ok(templates.skillYaml.equals(await readFile(join(repoRoot, ".agents", "skills", "turnhelm-routing", "agents", "openai.yaml"))));
-  const skill = templates.skillMd.toString();
+  assert.ok(templates.skill.equals(await readFile(join(repoRoot, ".agents", "skills", "turnhelm-routing", "SKILL.md"))));
+  assert.ok(templates.metadata.equals(await readFile(join(repoRoot, ".agents", "skills", "turnhelm-routing", "agents", "openai.yaml"))));
+  const skill = templates.skill.toString();
   assert.ok(skill.includes("<!-- turnhelm-template v1 -->"));
-  assert.ok(templates.skillYaml.toString().includes("# turnhelm-template v1"));
+  assert.ok(templates.metadata.toString().includes("# turnhelm-template v1"));
+  assert.match(templates.agentsBlock, /^<!-- turnhelm:begin v1 -->/);
+  assert.match(templates.agentsBlock, /<!-- turnhelm:end -->$/);
   assert.match(skill, /turnhelm run/);
   assert.match(skill, /frontier_max/);
   assert.doesNotMatch(skill, /pnpm (run )?build|node dist\/src/);
   assert.doesNotMatch(skill, /turnhelm (route|codex)\b/);
   parseProjectConfig(JSON.parse(templates.config.toString("utf8")));
+});
+
+test("shipped skill text matches the installed v1 contract", async () => {
+  const skill = (await readTemplates()).skill.toString();
+  assert.doesNotMatch(skill, /direct decision|fallback profile|hostedJev|backend:\s*auto|2000/);
+  assert.match(skill, /backends\.jev\.enabled/);
+  assert.match(skill, /backends\.laya\.enabled/);
+  assert.match(skill, /\.turnhelm\/config\.json/);
+  assert.match(skill, /routingTimeoutMs/);
+  assert.match(skill, /TURNHELM_MANAGED_CHILD/);
+  assert.match(skill, /8192 UTF-8 bytes/);
+  assert.match(skill, /--write/);
+  assert.match(skill, /stdin/);
+  assert.match(skill, /turnhelm run/);
+  assert.doesNotMatch(skill, /turnhelm (route|codex)\b/);
 });
 
 test("managed block names the run entry and the safety rules", async (t) => {
@@ -100,17 +183,17 @@ test("managed block names the run entry and the safety rules", async (t) => {
 test("created files land with the exact template bytes", async (t) => {
   const root = await tempProject(t);
   assert.equal((await initProject(root, { dryRun: false })).code, 0);
-  const templates = readTemplates();
+  const templates = await readTemplates();
   assert.ok((await readFile(join(root, ".turnhelm", "config.json"))).equals(templates.config));
-  assert.ok((await readFile(join(root, ".agents", "skills", "turnhelm-routing", "SKILL.md"))).equals(templates.skillMd));
-  assert.ok((await readFile(join(root, ".agents", "skills", "turnhelm-routing", "agents", "openai.yaml"))).equals(templates.skillYaml));
+  assert.ok((await readFile(join(root, ".agents", "skills", "turnhelm-routing", "SKILL.md"))).equals(templates.skill));
+  assert.ok((await readFile(join(root, ".agents", "skills", "turnhelm-routing", "agents", "openai.yaml"))).equals(templates.metadata));
 });
 
 test("observable file race is detected before replacement", async (t) => {
   const root = await tempProject(t);
-  const templates = readTemplates();
-  const { changes, planned } = await inspectInstallation(root, templates);
-  assert.ok(planned.includes(".turnhelm/config.json"));
+  const templates = await readTemplates();
+  const changes = await inspectInstallation(root, templates);
+  assert.ok(changes.map(change => change.path).includes(".turnhelm/config.json"));
   await mkdir(join(root, ".turnhelm"), { recursive: true });
   await writeFile(join(root, ".turnhelm", "config.json"), "mutated concurrently");
   const result = await applyInstallation(root, changes);
@@ -120,28 +203,44 @@ test("observable file race is detected before replacement", async (t) => {
   assert.equal(await readFile(join(root, ".turnhelm", "config.json"), "utf8"), "mutated concurrently");
 });
 
-test("inode replacement with identical bytes still applies", async (t) => {
+test("same-byte inode replacement is refused as a race", async (t) => {
   const root = await tempProject(t, { agents: "hello\n" });
-  const templates = readTemplates();
-  const { changes } = await inspectInstallation(root, templates);
-  const before = await lstat(join(root, "AGENTS.md"));
+  const templates = await readTemplates();
+  const changes = await inspectInstallation(root, templates);
   await unlink(join(root, "AGENTS.md"));
   await writeFile(join(root, "AGENTS.md"), "hello\n");
-  assert.notEqual((await lstat(join(root, "AGENTS.md"))).ino, before.ino);
   const result = await applyInstallation(root, changes);
-  assert.equal(result.code, 0);
-  assert.ok(result.applied.includes("AGENTS.md"));
-  const agents = await readAgents(root);
-  assert.ok(agents.startsWith("hello\n"));
-  assert.ok(agents.includes("<!-- turnhelm:begin v1 -->"));
+  assert.equal(result.code, 1);
+  assert.equal(result.error, "race");
+  assert.deepEqual(result.applied, []);
+  assert.equal(await readAgents(root), "hello\n");
 });
 
-test("existing mode and CRLF style are preserved", async (t) => {
+test("existing parent identity change is refused as a race", async (t) => {
+  const root = await tempProject(t, { agents: "# Team rules\n\n" });
+  await mkdir(join(root, ".agents", "skills", "turnhelm-routing", "agents"), { recursive: true });
+  const templates = await readTemplates();
+  const changes = await inspectInstallation(root, templates);
+  await rm(join(root, ".agents"), { recursive: true, force: true });
+  await mkdir(join(root, ".agents", "skills", "turnhelm-routing", "agents"), { recursive: true });
+  const result = await applyInstallation(root, changes);
+  assert.equal(result.code, 1);
+  assert.equal(result.error, "race");
+  assert.deepEqual(result.applied, []);
+  assert.equal(await snapshotThenMissing(root), true);
+});
+
+test("existing mode and CRLF style are preserved despite umask", async (t) => {
   const root = await tempProject(t, { agents: "# Team rules\r\n\r\nBody line\r\n" });
-  await chmodAgents(root, 0o640);
-  assert.equal((await initProject(root, { dryRun: false })).code, 0);
+  await chmod(join(root, "AGENTS.md"), 0o766);
+  const previousUmask = process.umask(0o022);
+  try {
+    assert.equal((await initProject(root, { dryRun: false })).code, 0);
+  } finally {
+    process.umask(previousUmask);
+  }
   const info = await lstat(join(root, "AGENTS.md"));
-  assert.equal(info.mode & 0o777, 0o640);
+  assert.equal(info.mode & 0o777, 0o766);
   const agents = await readAgents(root);
   assert.ok(agents.startsWith("# Team rules\r\n\r\nBody line\r\n"));
   assert.ok(agents.includes("<!-- turnhelm:begin v1 -->\r\n"));
@@ -149,9 +248,16 @@ test("existing mode and CRLF style are preserved", async (t) => {
   assert.doesNotMatch(agents.slice(agents.indexOf("Body line")), /(?<!\r)\n/g);
 });
 
-async function chmodAgents(root: string, mode: number): Promise<void> {
-  await chmod(join(root, "AGENTS.md"), mode);
-}
+test("mode edit between inspection and apply is refused as a race", async (t) => {
+  const root = await tempProject(t, { agents: "# Team rules\n\n" });
+  const templates = await readTemplates();
+  const changes = await inspectInstallation(root, templates);
+  await chmod(join(root, "AGENTS.md"), 0o600);
+  const result = await applyInstallation(root, changes);
+  assert.equal(result.code, 1);
+  assert.equal(result.error, "race");
+  assert.deepEqual(result.applied, []);
+});
 
 test("invalid existing config is a conflict", async (t) => {
   const root = await tempProject(t);
@@ -225,9 +331,9 @@ test("symlinked skill metadata is refused", async (t) => {
 test("observable parent race is refused during apply", async (t) => {
   const root = await tempProject(t);
   await mkdir(join(root, ".turnhelm"), { recursive: true });
-  const templates = readTemplates();
+  const templates = await readTemplates();
   await writeFile(join(root, ".turnhelm", "config.json"), templates.config);
-  const { changes } = await inspectInstallation(root, templates);
+  const changes = await inspectInstallation(root, templates);
   const outside = join(tmpdir(), "turnhelm-init-outside-skills");
   await mkdir(outside, { recursive: true });
   await rm(join(root, ".agents"), { recursive: true, force: true });
@@ -240,11 +346,40 @@ test("observable parent race is refused during apply", async (t) => {
   assert.ok((await readFile(join(root, ".turnhelm", "config.json"))).equals(templates.config));
 });
 
+test("preflight detects a race on the last planned target before any write", async (t) => {
+  const root = await tempProject(t, { agents: "# Team rules\n\n" });
+  const child = await runChild(t, root, "d5");
+  assert.equal(child.code, 1);
+  assert.equal(child.error, "race");
+  assert.equal(child.writes, 0);
+  assert.deepEqual(child.applied, []);
+  assert.equal(child.agents, "# Team rules edited\n\n");
+});
+
+test("concurrent edit after the temp write is detected before rename", async (t) => {
+  const root = await tempProject(t, { agents: "# Team rules\n\n" });
+  const child = await runChild(t, root, "d3");
+  assert.equal(child.code, 1);
+  assert.equal(child.error, "race");
+  assert.deepEqual(child.applied, []);
+  assert.equal(child.agents, "# Concurrent edit\n");
+});
+
+test("mid-apply write fault reports retained evidence truthfully", async (t) => {
+  const root = await tempProject(t);
+  const child = await runChild(t, root, "d6");
+  assert.equal(child.code, 1);
+  assert.equal(child.error, "write");
+  assert.deepEqual(child.applied, [".turnhelm/config.json"]);
+  assert.equal(child.configExists, true);
+  assert.equal(child.skillExists, false);
+});
+
 test("partial failure reports accurately and cleans only its own unchanged files", async (t) => {
   const root = await tempProject(t, { agents: "# Team rules\n\n" });
-  const templates = readTemplates();
-  const { changes } = await inspectInstallation(root, templates);
-  assert.equal(changes[changes.length - 1].relative, "AGENTS.md");
+  const templates = await readTemplates();
+  const changes = await inspectInstallation(root, templates);
+  assert.equal(changes[changes.length - 1].path, "AGENTS.md");
   await rm(join(root, "AGENTS.md"));
   await mkdir(join(root, "AGENTS.md"));
   const result = await applyInstallation(root, changes);
@@ -274,7 +409,7 @@ test("init refuses a missing project root without creating it", async (t) => {
   const missing = join(base, "does-not-exist");
   const result = await initProject(missing, { dryRun: false });
   assert.equal(result.code, 1);
-  assert.equal(result.error, "io");
+  assert.equal(result.error, "write");
   assert.equal(await lstat(missing).then(() => true, () => false), false);
 });
 
@@ -301,19 +436,4 @@ test("a large AGENTS.md still installs the managed block", async (t) => {
   assert.equal(result.code, 0);
   assert.ok((await readAgents(root)).includes("<!-- turnhelm:begin v1 -->"));
   assert.ok((await readAgents(root)).includes("<!-- turnhelm:end -->"));
-});
-
-test("shipped skill text matches the installed v1 contract", () => {
-  const skill = readTemplates().skillMd.toString();
-  assert.doesNotMatch(skill, /direct decision|fallback profile|hostedJev|backend:\s*auto|2000/);
-  assert.match(skill, /backends\.jev\.enabled/);
-  assert.match(skill, /backends\.laya\.enabled/);
-  assert.match(skill, /\.turnhelm\/config\.json/);
-  assert.match(skill, /routingTimeoutMs/);
-  assert.match(skill, /TURNHELM_MANAGED_CHILD/);
-  assert.match(skill, /8192 UTF-8 bytes/);
-  assert.match(skill, /--write/);
-  assert.match(skill, /stdin/);
-  assert.match(skill, /turnhelm run/);
-  assert.doesNotMatch(skill, /turnhelm (route|codex)\b/);
 });
