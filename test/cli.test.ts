@@ -518,7 +518,7 @@ test("SIGINT during routing keeps one cancelled attempt and launches no worker",
   const f = await fixture(t, { mode: "hang" });
   const child = f.spawn(["run", TASK]);
   const pending = capture(child);
-  child.stdin?.end(TASK);
+  child.stdin?.end("");
   await until(() => f.requests.length === 1, "the classifier request");
   child.kill("SIGINT");
   const result = await pending;
