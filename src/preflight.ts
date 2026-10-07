@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { accessSync, constants, statSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { subprocessEnvironment } from "./codex.js";
 
 export type Inspection = Readonly<{ ok: boolean; executable?: string; version?: string; controls?: readonly string[] }>;
@@ -28,7 +28,10 @@ function resolveExecutable(name: string, env: NodeJS.ProcessEnv): string | undef
     try {
       if (!statSync(candidate).isFile()) continue;
       accessSync(candidate, constants.X_OK);
-      return candidate;
+      // E9: the chosen entry is pinned as an absolute caller-frame path so a
+      // later cwd change (the inspection runs in the project) can never
+      // re-resolve a relative entry to a different project's binary.
+      return resolve(candidate);
     } catch {
       // Keep searching the remaining PATH entries.
     }
@@ -137,6 +140,12 @@ function runBounded(
     child.once("close", code => {
       if (failure === undefined && code === null) failure = "signalled";
       exitCode = code;
+      // E12: the leader's pipes closing does not discharge the owned group —
+      // a same-group descendant with stdio:ignore holds no pipes and would
+      // otherwise outlive the settled inspection. Owned non-inference
+      // children are killed outright; the bounded TERM-escalate path above
+      // still covers the inherited-pipe/ignore/overflow/cancel cases.
+      killGroup("SIGKILL");
       settle();
     });
   });

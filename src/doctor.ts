@@ -78,7 +78,7 @@ async function runProbe(
   const controller = new AbortController();
   const onCallerAbort = (): void => controller.abort();
   callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
-  const started = Date.now();
+  const started = performance.now(); // E11: wall-clock corrections must never swing the budget recheck.
   const budget = setTimeout(() => controller.abort(), config.routingTimeoutMs);
   // The race keeps the doctor bounded even when an injected request ignores
   // its signal and never settles.
@@ -94,7 +94,7 @@ async function runProbe(
       // Recheck the caller and a monotonic deadline before settling success:
       // the budget timer cannot run while a busy request blocks the loop (E7).
       if (callerSignal?.aborted) return "cancelled";
-      if (Date.now() - started > config.routingTimeoutMs) return "failed";
+      if (performance.now() - started > config.routingTimeoutMs) return "failed";
     }
     return outcome;
   } finally {
@@ -127,18 +127,21 @@ function countOccurrences(text: string, needle: string): number {
   return count;
 }
 
-// Mirrors the installer's managed-block conflict conditions (read-only) so a
-// degraded-path evaluation agrees with what `turnhelm init` would enforce.
-function agentsBlockConflict(text: string, block: string): boolean {
+// E10: absent, conflicted, and installed are distinct facts — the installer
+// treats "no markers" as "will append", but the doctor must never report the
+// managed block as installed when it is missing.
+type AgentsState = "installed" | "absent" | "conflict";
+
+function agentsBlockState(text: string, block: string): AgentsState {
   const beginCount = countOccurrences(text, MARKER_BEGIN);
   const endCount = countOccurrences(text, MARKER_END);
-  if (beginCount === 0 && endCount === 0) return false; // init appends the block
-  if (beginCount !== 1 || endCount !== 1) return true;
+  if (beginCount === 0 && endCount === 0) return "absent";
+  if (beginCount !== 1 || endCount !== 1) return "conflict";
   const begin = text.indexOf(MARKER_BEGIN);
   const end = text.indexOf(MARKER_END);
-  if (begin > end) return true;
+  if (begin > end) return "conflict";
   const current = text.slice(begin, end + MARKER_END.length);
-  return current !== block && current !== block.replaceAll("\n", "\r\n");
+  return current === block || current === block.replaceAll("\n", "\r\n") ? "installed" : "conflict";
 }
 
 type InstallFindings = Readonly<{ assets: DoctorCheck; instructions: DoctorCheck }>;
@@ -158,12 +161,17 @@ async function independentFindings(root: string, templates: Templates): Promise<
         ? check("assets", "fail", "routing skill files differ from the owned template", "restore the owned skill files or remove them, then run turnhelm init")
         : check("assets", "pass", "routing skill files match the owned template", "");
   const agents = await readTarget(root, AGENTS_RELATIVE, MAX_AGENTS_BYTES);
-  const instructions = agents === "unreadable"
-    ? check("instructions", "unverified", "AGENTS.md could not be read safely", "inspect AGENTS.md, then re-run turnhelm doctor")
-    : agents === undefined
-      ? check("instructions", "warn", "AGENTS.md managed routing block is not installed", "run turnhelm init")
-      : agentsBlockConflict(agents.toString("utf8"), templates.agentsBlock)
-        ? check("instructions", "fail", "AGENTS.md managed block conflicts with the installed template", "restore the managed block or remove the conflicting markers, then run turnhelm init")
+  const agentsState = agents === "unreadable" || agents === undefined
+    ? undefined
+    : agentsBlockState(agents.toString("utf8"), templates.agentsBlock);
+  const instructions = agentsState === undefined
+    ? agents === "unreadable"
+      ? check("instructions", "unverified", "AGENTS.md could not be read safely", "inspect AGENTS.md, then re-run turnhelm doctor")
+      : check("instructions", "warn", "AGENTS.md managed routing block is not installed", "run turnhelm init")
+    : agentsState === "conflict"
+      ? check("instructions", "fail", "AGENTS.md managed block conflicts with the installed template", "restore the managed block or remove the conflicting markers, then run turnhelm init")
+      : agentsState === "absent"
+        ? check("instructions", "warn", "AGENTS.md exists but the managed routing block is not installed", "run turnhelm init")
         : check("instructions", "pass", "AGENTS.md managed routing block is installed", "");
   return { assets, instructions };
 }
