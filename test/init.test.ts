@@ -302,3 +302,18 @@ test("a large AGENTS.md still installs the managed block", async (t) => {
   assert.ok((await readAgents(root)).includes("<!-- turnhelm:begin v1 -->"));
   assert.ok((await readAgents(root)).includes("<!-- turnhelm:end -->"));
 });
+
+test("shipped skill text matches the installed v1 contract", () => {
+  const skill = readTemplates().skillMd.toString();
+  assert.doesNotMatch(skill, /direct decision|fallback profile|hostedJev|backend:\s*auto|2000/);
+  assert.match(skill, /backends\.jev\.enabled/);
+  assert.match(skill, /backends\.laya\.enabled/);
+  assert.match(skill, /\.turnhelm\/config\.json/);
+  assert.match(skill, /routingTimeoutMs/);
+  assert.match(skill, /TURNHELM_MANAGED_CHILD/);
+  assert.match(skill, /8192 UTF-8 bytes/);
+  assert.match(skill, /--write/);
+  assert.match(skill, /stdin/);
+  assert.match(skill, /turnhelm run/);
+  assert.doesNotMatch(skill, /turnhelm (route|codex)\b/);
+});
