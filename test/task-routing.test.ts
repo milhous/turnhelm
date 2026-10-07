@@ -175,6 +175,26 @@ test("local task validation rejects before any request", async () => {
   }
 });
 
+// A stalled fake owns a finite REFERENCED guard while it waits on the supplied
+// signal: the routing deadline is an unref'd AbortSignal.timeout, so Node
+// 22.8's test runner drains the event loop and cancels a test whose pending
+// promise holds no loop reference. The guard is cleared and the listener
+// removed when the signal settles the request; if the routing deadline never
+// settles, the guard rejects and the test fails on its real timing/outcome
+// assertions. It never synthesizes a reply or an abort.
+const STALLED_GUARD_MS = 5000;
+const stalledRequest = (spec: RequestSpec): Promise<void> =>
+  new Promise((_, reject) => {
+    const onAbort = (): void => reject(new Error("stalled request observed its supplied signal"));
+    const guard = setTimeout(() => {
+      spec.signal.removeEventListener("abort", onAbort);
+      reject(new Error("TEST_GUARD: stalled request outlived its guard; the routing deadline never settled"));
+    }, STALLED_GUARD_MS);
+    const settle = (): void => { clearTimeout(guard); onAbort(); };
+    if (spec.signal.aborted) { clearTimeout(guard); onAbort(); return; }
+    spec.signal.addEventListener("abort", settle, { once: true });
+  });
+
 test("a Laya timeout leaves Jev only the remaining total budget", async () => {
   const base = fixtureConfig();
   const c = parseProjectConfig({ ...base, routingTimeoutMs: 400, backends: { ...base.backends, jev: { enabled: true } } });
@@ -182,11 +202,7 @@ test("a Laya timeout leaves Jev only the remaining total budget", async () => {
   const stalled = async (spec: RequestSpec) => {
     const began = performance.now();
     try {
-      await new Promise<void>((resolve, reject) => {
-        const onAbort = () => reject(new Error("stalled request observed its supplied signal"));
-        if (spec.signal.aborted) { onAbort(); return; }
-        spec.signal.addEventListener("abort", onAbort, { once: true });
-      });
+      await stalledRequest(spec);
     } finally {
       delays.push(performance.now() - began);
     }
@@ -203,10 +219,7 @@ test("a final failure retains both attempts with their outcomes", async () => {
   const base = fixtureConfig();
   const c = parseProjectConfig({ ...base, routingTimeoutMs: 400, backends: { ...base.backends, jev: { enabled: true } } });
   const stalled = async (spec: RequestSpec) => {
-    await new Promise<void>((resolve, reject) => {
-      if (spec.signal.aborted) { reject(new Error("stalled request observed its supplied signal")); return; }
-      spec.signal.addEventListener("abort", () => reject(new Error("stalled request observed its supplied signal")), { once: true });
-    });
+    await stalledRequest(spec);
     throw new Error("unreachable after abort");
   };
   const r = await routeTask("Prove the invariants", c, {
