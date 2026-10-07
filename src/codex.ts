@@ -246,7 +246,14 @@ export function executeWorker(
     // Completion or error of every accepted write, on both sinks.
     const onWriteAck = (error?: Error | null): void => {
       pendingOutputs -= 1;
-      if (error !== null && error !== undefined) { recordFailure("output"); return; }
+      if (error !== null && error !== undefined) {
+        recordFailure("output");
+        // The failing sink emits its 'error' right after this callback
+        // (nextTick); defer the detach past that emission so it stays owned,
+        // then release the sinks — no late ack may leave a permanent listener.
+        if (pendingOutputs === 0) setImmediate(detachSinkListeners);
+        return;
+      }
       if (finished) {
         if (pendingOutputs === 0) detachSinkListeners();
         return;
