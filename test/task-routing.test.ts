@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 import { parseProjectConfig, PROFILE_IDS } from "../src/config.js";
 import { eligibleBackends, requestTaskChoice, type RequestSpec, type TaskBackend } from "../src/systemone.js";
 import { routeTask } from "../src/route.js";
@@ -183,13 +184,13 @@ test("local task validation rejects before any request", async () => {
 // settles, the guard rejects and the test fails on its real timing/outcome
 // assertions. It never synthesizes a reply or an abort.
 const STALLED_GUARD_MS = 5000;
-const stalledRequest = (spec: RequestSpec): Promise<void> =>
+const stalledRequest = (spec: RequestSpec, guardMs: number = STALLED_GUARD_MS): Promise<void> =>
   new Promise((_, reject) => {
     const onAbort = (): void => reject(new Error("stalled request observed its supplied signal"));
     const guard = setTimeout(() => {
       spec.signal.removeEventListener("abort", onAbort);
       reject(new Error("TEST_GUARD: stalled request outlived its guard; the routing deadline never settled"));
-    }, STALLED_GUARD_MS);
+    }, guardMs);
     const settle = (): void => { clearTimeout(guard); onAbort(); };
     if (spec.signal.aborted) { clearTimeout(guard); onAbort(); return; }
     spec.signal.addEventListener("abort", settle, { once: true });
@@ -231,6 +232,33 @@ test("a final failure retains both attempts with their outcomes", async () => {
   assert.ok(Object.isFrozen(r.attempts[0]));
   assert.ok(r.attempts.every(a => Number.isFinite(a.durationMs) && a.durationMs >= 0));
   assert.ok(!("decision" in r));
+});
+
+test("stalledRequest leaves zero abort listeners on every settlement path", async () => {
+  const spec = (signal: AbortSignal): RequestSpec => ({
+    backend: "laya",
+    url: new URL("http://127.0.0.1:8765/v1/systemone"),
+    body: "{}",
+    headers: {},
+    signal
+  });
+  // Guard-fired settlement, forced through a 10 ms guard instead of the real 5 s.
+  const guarded = new AbortController();
+  await assert.rejects(
+    () => stalledRequest(spec(guarded.signal), 10),
+    /TEST_GUARD: stalled request outlived its guard/
+  );
+  assert.equal(getEventListeners(guarded.signal, "abort").length, 0, "guard path must detach its abort listener");
+  // Supplied-signal settlement; the 10 s guard never fires, so this test
+  // completing also demonstrates the guard timer was cleared.
+  const aborted = new AbortController();
+  const settled = assert.rejects(
+    () => stalledRequest(spec(aborted.signal), 10_000),
+    /stalled request observed its supplied signal/
+  );
+  aborted.abort();
+  await settled;
+  assert.equal(getEventListeners(aborted.signal, "abort").length, 0, "abort path must leave no abort listener");
 });
 
 test("a reply landing after caller cancellation is cancelled, never selected", async () => {
