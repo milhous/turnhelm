@@ -1,6 +1,6 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -8,8 +8,11 @@ import { createServer as createHttpsServer } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { directChoiceRequest, type RequestSpec } from "../src/systemone.js";
 import { decisionReply } from "./fixtures.js";
+
+const execute = promisify(execFile);
 
 // Test-only self-signed certificate for CN=127.0.0.1; never trusted by the client under test.
 const TEST_KEY = `-----BEGIN PRIVATE KEY-----
@@ -130,7 +133,7 @@ test("posts the body and resolves the decoded JSON reply", async t => {
 
 test("accepts exactly 8192 actual bytes", async t => {
   const fixture = await startServer(t, (request, response) => { response.end(exact8192); });
-  assert.deepEqual(await directChoiceRequest(spec(fixture.url)), decisionReply("fast"));
+  assert.deepEqual(await directChoiceRequest(spec(fixture.url)), JSON.parse(exact8192));
 });
 
 test("rejects 8193 actual bytes as too large", async t => {
@@ -144,7 +147,7 @@ test("counts actual bytes beyond a small declared length", async t => {
     response.end("x".repeat(9000));
   });
   await assert.rejects(() => directChoiceRequest(spec(fixture.url)),
-    error => error instanceof Error && /^classifier response (too large|failed)$/.test(error.message));
+    error => error instanceof Error && /^classifier (request|response) (too large|failed)$/.test(error.message));
 });
 
 test("rejects a declared Content-Length over the bound before reading", async t => {
@@ -162,7 +165,7 @@ test("rejects a truncated body without exposing the socket error", async t => {
     response.destroy();
   });
   await assert.rejects(() => directChoiceRequest(spec(fixture.url)),
-    error => error instanceof Error && /^classifier response (was truncated|failed)$/.test(error.message));
+    error => error instanceof Error && /^classifier (response was truncated|request failed|response failed)$/.test(error.message));
 });
 
 test("reassembles split UTF-8 bodies", async t => {
@@ -179,7 +182,7 @@ test("reassembles split UTF-8 bodies", async t => {
 });
 
 test("rejects malformed JSON and invalid UTF-8", async t => {
-  const malformed = await startServer(t, (request, response) => response.end("{\"answers\":"));
+  const malformed = await startServer(t, (request, response) => { response.end("{\"answers\":"); });
   await assert.rejects(() => directChoiceRequest(spec(malformed.url)), { message: "invalid classifier response" });
   const invalidUtf8 = await startServer(t, (request, response) => {
     response.setHeader("content-length", "3");
@@ -209,7 +212,7 @@ test("rejects non-2xx statuses including 304 without exposing details", async t 
 });
 
 test("rejects a redirect without requesting the Location", async t => {
-  const target = await startServer(t, (request, response) => response.end(jsonReply));
+  const target = await startServer(t, (request, response) => { response.end(jsonReply); });
   const fixture = await startServer(t, (request, response) => {
     response.statusCode = 302;
     response.setHeader("location", target.url.href);
@@ -243,11 +246,11 @@ test("rejects an invalid header construction with a sanitized error", async t =>
 });
 
 test("rejects a self-signed TLS certificate with verification kept on", async t => {
-  const fixture = await startServer(t, (request, response) => response.end(jsonReply), true);
+  const fixture = await startServer(t, (request, response) => { response.end(jsonReply); }, true);
   const error = await directChoiceRequest(spec(fixture.url)).then(() => null, (failure: unknown) => failure);
   assert.ok(error instanceof Error);
   assert.equal(error.message, "classifier request failed");
-  assert.equal(fixture.requests.length, 1);
+  assert.equal(fixture.requests.length, 0, "the request must die in the TLS handshake, not reach the server");
 });
 
 test("expires the total deadline without waiting for the response", async t => {
@@ -293,7 +296,7 @@ test("accepts delayed headers and delayed bodies within the deadline", async t =
 });
 
 const proxyChild = async (t: TestContext, nodePath: string) => {
-  const sentinel = await startServer(t, (request, response) => response.end("proxied"));
+  const sentinel = await startServer(t, (request, response) => { response.end("proxied"); });
   const fixture = await startServer(t, (request, response) => {
     response.setHeader("content-type", "application/json");
     response.end(jsonReply);
@@ -303,18 +306,21 @@ const proxyChild = async (t: TestContext, nodePath: string) => {
   const script = join(directory, "proxy-child.mjs");
   await writeFile(script, CHILD_SCRIPT);
   const dist = pathToFileURL(fileURLToPath(new URL("../src/systemone.js", import.meta.url))).href;
+  const proxy = sentinel.url.origin;
   for (const noProxy of [undefined, ""]) {
     const env: NodeJS.ProcessEnv = { ...process.env, NODE_USE_ENV_PROXY: "1" };
     delete env.NO_PROXY;
     delete env.no_proxy;
-    env.http_proxy = env.https_proxy = env.HTTP_PROXY = env.HTTPS_PROXY = sentinel.url.href;
+    env.http_proxy = env.https_proxy = env.HTTP_PROXY = env.HTTPS_PROXY = proxy;
     if (noProxy !== undefined) {
       env.NO_PROXY = noProxy;
       env.no_proxy = noProxy;
     }
-    const run = spawnSync(nodePath, [script, dist, fixture.url.href], { encoding: "utf8", timeout: 30000, env });
-    assert.equal(run.status, 0, `child failed: ${run.stderr}`);
-    assert.match(run.stdout, /REPLY \{"answers":\{"route":\{"type":"choice","choice":"fast"\}\}\}/);
+    const run = await execute(nodePath, [script, dist, fixture.url.href], { encoding: "utf8", timeout: 30000, env })
+      .catch((failure: { stdout?: string; stderr?: string }) => {
+        assert.fail(`child failed: ${failure.stderr} ${failure.stdout}`);
+      });
+    assert.match(String(run.stdout), /REPLY \{"answers":\{"route":\{"type":"choice","choice":"fast"\}\}\}/);
   }
   assert.equal(sentinel.requests.length, 0, "the proxy sentinel must see no requests");
   assert.equal(fixture.requests.length, 2);

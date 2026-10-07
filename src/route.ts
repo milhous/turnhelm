@@ -1,6 +1,7 @@
-import type { Config, Profile } from "./config.js";
-import { chooseProfile } from "./systemone.js";
-import { localRoutingReason } from "./task.js";
+import type { Config, Profile, ProfileId, ProjectConfig, TaskProfile } from "./config.js";
+import { chooseProfile, directChoiceRequest, eligibleBackends, requestTaskChoice,
+  type ChoiceRequest, type TaskAttempt, type TaskBackend } from "./systemone.js";
+import { localRoutingReason, validateTask } from "./task.js";
 
 export type ClassifierDecision =
   | { kind: "direct" }
@@ -37,4 +38,80 @@ export async function resolvePhaseARoute(prompt: string, config: Config): Promis
     if (!config.fallbackProfile) throw new Error("routing unavailable and no fallbackProfile is configured");
     return profile(config.fallbackProfile, config, "fallback");
   }
+}
+
+export type TaskDecision = Readonly<{
+  backend: TaskBackend;
+  profileId: ProfileId;
+  profile: TaskProfile;
+  attempts: readonly TaskAttempt[];
+  routingMs: number;
+}>;
+
+export type RoutingResult =
+  | Readonly<{ status: "selected"; decision: TaskDecision }>
+  | Readonly<{ status: "failed" | "cancelled"; attempts: readonly TaskAttempt[]; routingMs: number }>;
+
+const deepFreeze = <T>(value: T): T => {
+  if (value !== null && typeof value === "object") {
+    for (const item of Object.values(value as Record<string, unknown>)) deepFreeze(item);
+    Object.freeze(value);
+  }
+  return value;
+};
+
+const composeSignal = (caller: AbortSignal | undefined, deadline: AbortSignal): AbortSignal => {
+  if (!caller) return deadline;
+  if (typeof AbortSignal.any === "function") return AbortSignal.any([caller, deadline]);
+  const composed = new AbortController();
+  if (caller.aborted || deadline.aborted) {
+    composed.abort();
+  } else {
+    const relay = () => composed.abort();
+    caller.addEventListener("abort", relay, { once: true });
+    deadline.addEventListener("abort", relay, { once: true });
+  }
+  return composed.signal;
+};
+
+type MutableAttempt = { backend: TaskBackend; outcome: TaskAttempt["outcome"]; durationMs: number };
+
+export async function routeTask(
+  task: string,
+  config: ProjectConfig,
+  options: { env: NodeJS.ProcessEnv; signal?: AbortSignal; request?: ChoiceRequest }
+): Promise<RoutingResult> {
+  validateTask(task);
+  const started = performance.now();
+  const caller = options.signal;
+  const request = options.request ?? directChoiceRequest;
+  const attempts: MutableAttempt[] = [];
+  const elapsed = () => Math.round(performance.now() - started);
+  const cancelled = (): RoutingResult => deepFreeze({ status: "cancelled", attempts, routingMs: elapsed() });
+  if (caller?.aborted) return cancelled();
+  const backends = eligibleBackends(config, options.env);
+  const layaShare = Math.min(1000, Math.floor(config.routingTimeoutMs / 4));
+  for (const backend of backends) {
+    if (caller?.aborted) return cancelled();
+    const remaining = config.routingTimeoutMs - elapsed();
+    if (remaining <= 0) break;
+    const budget = backends.length > 1 && backend === "laya" ? Math.min(layaShare, remaining) : remaining;
+    const signal = composeSignal(caller, AbortSignal.timeout(budget));
+    const attempt: MutableAttempt = { backend, outcome: "success", durationMs: 0 };
+    attempts.push(attempt);
+    const attemptStarted = performance.now();
+    try {
+      const profileId = await requestTaskChoice(config, task, backend, options.env, signal, request);
+      attempt.durationMs = Math.round(performance.now() - attemptStarted);
+      const decision = deepFreeze({
+        backend, profileId, profile: config.profiles[profileId], attempts, routingMs: elapsed()
+      });
+      return { status: "selected", decision };
+    } catch {
+      attempt.durationMs = Math.round(performance.now() - attemptStarted);
+      attempt.outcome = caller?.aborted ? "cancelled" : signal.aborted ? "timeout" : "failed";
+      if (caller?.aborted) return cancelled();
+    }
+  }
+  return caller?.aborted ? cancelled() : deepFreeze({ status: "failed", attempts, routingMs: elapsed() });
 }

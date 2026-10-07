@@ -181,12 +181,15 @@ test("a Laya timeout leaves Jev only the remaining total budget", async () => {
   const delays: number[] = [];
   const stalled = async (spec: RequestSpec) => {
     const began = performance.now();
-    await new Promise<void>((resolve, reject) => {
-      const onAbort = () => reject(new Error("stalled request observed its supplied signal"));
-      if (spec.signal.aborted) { onAbort(); return; }
-      spec.signal.addEventListener("abort", onAbort, { once: true });
-    });
-    delays.push(performance.now() - began);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = () => reject(new Error("stalled request observed its supplied signal"));
+        if (spec.signal.aborted) { onAbort(); return; }
+        spec.signal.addEventListener("abort", onAbort, { once: true });
+      });
+    } finally {
+      delays.push(performance.now() - began);
+    }
     throw new Error("unreachable after abort");
   };
   const r = await routeTask("Prove the invariants", c, { env: fakeEnv, request: stalled });
