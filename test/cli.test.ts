@@ -36,6 +36,12 @@ const CODEX_SCRIPT = `#!${process.execPath}
 const fs = require("node:fs");
 const path = require("node:path");
 const argv = process.argv.slice(2);
+if (process.env.TEST_CODEX_INSPECTION_HANG === "1" && argv[0] === "--version") {
+  // A live bounded inspection: record the PID, then idle until killed.
+  fs.writeFileSync(path.join(__dirname, "inspection-pid"), String(process.pid));
+  setInterval(() => {}, 500);
+  return;
+}
 if (argv[0] === "--version") { console.log("codex-cli 0.160.2"); process.exit(0); }
 if (argv[0] === "exec" && argv[1] === "--help") {
   console.log("Usage: codex exec [OPTIONS] [TASK]");
@@ -321,6 +327,55 @@ test("doctor --probe sends exactly one synthetic request to the eligible backend
   assert.equal(byId.get("backend.jev"), "skipped", "disabled Jev is not probed");
   assert.equal(await workerRecords(f).then(records => records.runs), 0, "doctor never starts a worker");
 });
+
+// The owned inspection is gone within its bounded TERM-grace + close window;
+// the fixture pid is only killed in finally, after the assertion had its
+// chance to fail.
+const assertInspectionStopped = async (bin: string): Promise<void> => {
+  const pid = Number(await readFile(join(bin, "inspection-pid"), "utf8"));
+  try {
+    const deadline = Date.now() + 2500;
+    let alive = true;
+    while (Date.now() < deadline) {
+      try { process.kill(pid, 0); alive = true; } catch { alive = false; break; }
+      await sleep(50);
+    }
+    assert.equal(alive, false, "the owned inspection must not survive the parent signal");
+  } finally {
+    try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+  }
+};
+
+for (const [name, expectedCode] of [["SIGINT", 130], ["SIGTERM", 143]] as const) {
+  test(`doctor stops the live bounded inspection on ${name}`, async t => {
+    const f = await fixture(t);
+    const child = f.spawn(["doctor", "--json"], { env: { TEST_CODEX_INSPECTION_HANG: "1" } });
+    const pending = capture(child);
+    await until(() => existsSync(join(f.bin, "inspection-pid")), "the live inspection");
+    child.kill(name);
+    const result = await pending;
+    await assertInspectionStopped(f.bin);
+    assert.equal(result.code, expectedCode);
+    assert.equal(await workerRecords(f).then(records => records.runs), 0);
+  });
+}
+
+for (const [name, expectedCode] of [["SIGINT", 130], ["SIGTERM", 143]] as const) {
+  test(`doctor --probe aborts a hanging probe on ${name}`, async t => {
+    const f = await fixture(t, { mode: "hang" });
+    const child = f.spawn(["doctor", "--probe", "--json"]);
+    const pending = capture(child);
+    await until(() => f.requests.length === 1, "the probe request");
+    const started = Date.now();
+    child.kill(name);
+    const result = await pending;
+    assert.equal(result.code, expectedCode);
+    assert.ok(Date.now() - started < 3500, "the probe aborts instead of running out its budget");
+    const report = JSON.parse(result.stdout) as { checks: { id: string; status: string }[] };
+    const byId = new Map(report.checks.map(check => [check.id, check.status]));
+    assert.equal(byId.get("backend.laya"), "unverified", "the cancelled probe is reported unverified");
+  });
+}
 
 test("run routes once, executes one read-only worker, and emits one accurate receipt", async t => {
   const f = await fixture(t, { choice: "balanced" });
