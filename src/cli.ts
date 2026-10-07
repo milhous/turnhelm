@@ -6,7 +6,7 @@ import { initProject } from "./init.js";
 import { inspectCodex, inspectGit } from "./preflight.js";
 import { resolveProject } from "./project.js";
 import { routeTask } from "./route.js";
-import { eligibleBackends } from "./systemone.js";
+import { directChoiceRequest, eligibleBackends } from "./systemone.js";
 import { readTask } from "./task.js";
 
 class UsageError extends Error {}
@@ -74,13 +74,15 @@ const signalExit = (signal: "SIGINT" | "SIGTERM" | undefined): number => {
   return 1;
 };
 
-// Controlled transport/protocol/spawn failures exit 1 even when the child
-// happened to exit zero; otherwise the worker's own exit status stands.
+// The caller's signal owns the exit code when received; without one, a
+// controlled transport/protocol/spawn failure exits 1 even when the child
+// happened to exit zero, and a natural worker exit status stands.
 const workerExit = (worker: WorkerResult, signal: "SIGINT" | "SIGTERM" | undefined): number => {
+  if (signal !== undefined) return signalExit(signal);
   if (worker.status === "completed") return 0;
   if (worker.error !== undefined && worker.error !== "worker") return 1;
   if (worker.code > 0) return worker.code;
-  return signalExit(signal);
+  return 1;
 };
 
 const initCommand = async (root: string, dryRun: boolean): Promise<number> => {
@@ -98,7 +100,9 @@ const initCommand = async (root: string, dryRun: boolean): Promise<number> => {
 };
 
 const doctorCommand = async (root: string, json: boolean, probe: boolean): Promise<number> => {
-  const result = await doctorProject(root, { probe, env: process.env });
+  // The direct transport is only dialed when probe mode asks for it; a plain
+  // doctor never sends a request.
+  const result = await doctorProject(root, { probe, env: process.env, request: directChoiceRequest });
   if (json) {
     console.log(JSON.stringify(result));
     return result.code;
@@ -116,6 +120,10 @@ const runCommand = async (root: string, write: boolean, positionalTask: string |
     diagnostic("this process is a Turnhelm-managed child; run must not recurse. Execute the task directly.");
     return 1;
   }
+  // One snapshot for the whole run: preflight, eligibility, routing, and the
+  // worker all see the environment as it was before classification, following
+  // the config/executable snapshot pattern.
+  const env: NodeJS.ProcessEnv = { ...process.env };
   const controller = new AbortController();
   let signal: "SIGINT" | "SIGTERM" | undefined;
   const onSignal = (received: NodeJS.Signals): void => {
@@ -148,8 +156,8 @@ const runCommand = async (root: string, write: boolean, positionalTask: string |
       return 1;
     }
     const [codex, git] = await Promise.all([
-      inspectCodex(root, process.env, controller.signal),
-      inspectGit(root, process.env, controller.signal)
+      inspectCodex(root, env, controller.signal),
+      inspectGit(root, env, controller.signal)
     ]);
     if (controller.signal.aborted) {
       diagnostic("cancelled before classification.");
@@ -163,12 +171,12 @@ const runCommand = async (root: string, write: boolean, positionalTask: string |
       diagnostic("the project root is not inside a Git work tree (or git is unavailable); a Git work tree is required for run.");
       return 1;
     }
-    if (eligibleBackends(config, process.env).length === 0) {
+    if (eligibleBackends(config, env).length === 0) {
       diagnostic("no eligible classification backend; enable one in .turnhelm/config.json and provide its credentials.");
       return 1;
     }
     // Classification starts here; exactly one receipt is emitted below.
-    const routing = await routeTask(task, config, { env: process.env, signal: controller.signal });
+    const routing = await routeTask(task, config, { env, signal: controller.signal });
     const attempts = routing.status === "selected" ? routing.decision.attempts : routing.attempts;
     const routingMs = routing.status === "selected" ? routing.decision.routingMs : routing.routingMs;
     const counts: Record<string, number> = { laya: 0, jev: 0 };
@@ -182,7 +190,7 @@ const runCommand = async (root: string, write: boolean, positionalTask: string |
         attempts,
         requestCounts: counts
       },
-      worker: { status: "not-started" },
+      worker: { status: "not-started", usage: "unreported" },
       classifierUsage: "unreported",
       wholeRunUsageScope: "unverified"
     };
@@ -199,18 +207,18 @@ const runCommand = async (root: string, write: boolean, positionalTask: string |
         executable: codex.executable,
         root,
         write,
-        env: process.env,
+        env,
         signal: controller.signal,
         output: process.stdout,
         diagnostics: process.stderr
       });
-      const workerReceipt: Record<string, unknown> = {
+      // Missing usage is explicitly unreported, never zero or omitted.
+      receipt.worker = {
         status: worker.status,
         code: worker.code,
-        durationMs: worker.durationMs
+        durationMs: worker.durationMs,
+        usage: worker.usage ?? "unreported"
       };
-      if (worker.usage !== undefined) workerReceipt.usage = worker.usage;
-      receipt.worker = workerReceipt;
       exitCode = workerExit(worker, signal);
     } else {
       exitCode = routing.status === "cancelled" ? signalExit(signal) : 1;
