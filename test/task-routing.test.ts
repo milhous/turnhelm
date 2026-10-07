@@ -188,7 +188,7 @@ const stalledRequest = (spec: RequestSpec, guardMs: number = STALLED_GUARD_MS): 
   new Promise((_, reject) => {
     const onAbort = (): void => reject(new Error("stalled request observed its supplied signal"));
     const guard = setTimeout(() => {
-      spec.signal.removeEventListener("abort", onAbort);
+      spec.signal.removeEventListener("abort", settle);
       reject(new Error("TEST_GUARD: stalled request outlived its guard; the routing deadline never settled"));
     }, guardMs);
     const settle = (): void => { clearTimeout(guard); onAbort(); };
