@@ -190,7 +190,7 @@ const runCommand = async (root: string, write: boolean, positionalTask: string |
         attempts,
         requestCounts: counts
       },
-      worker: { status: "not-started", usage: "unreported" },
+      worker: { status: "not-started", durationMs: 0, usage: "unreported" },
       classifierUsage: "unreported",
       wholeRunUsageScope: "unverified"
     };
