@@ -1,0 +1,1043 @@
+import test, { type TestContext } from "node:test";
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import { PROFILE_IDS, type ProfileId, type ProjectConfig } from "../src/config.js";
+import type { TaskDecision } from "../src/route.js";
+import { buildWorkerArgs, subprocessEnvironment, workerEnvironment } from "../src/codex.js";
+import { fixtureConfig } from "./fixtures.js";
+
+const execute = promisify(execFile);
+const config: ProjectConfig = fixtureConfig();
+
+const decision = (profileId: ProfileId): TaskDecision => ({
+  backend: "laya",
+  profileId,
+  profile: config.profiles[profileId],
+  attempts: [],
+  routingMs: 1
+});
+
+// The only executable on PATH is our temporary Node fixture; no real Codex can run.
+// Scenarios that never call finish() leave stdin unread, which is what the
+// failed-stdin-delivery regressions need.
+const FAKE_PREAMBLE = `
+const fs = require("node:fs");
+const path = require("node:path");
+const here = __dirname;
+fs.writeFileSync(path.join(here, "runs"), (fs.existsSync(path.join(here, "runs")) ? fs.readFileSync(path.join(here, "runs"), "utf8") : "") + "1");
+fs.writeFileSync(path.join(here, "argv.json"), JSON.stringify(process.argv.slice(2)));
+fs.writeFileSync(path.join(here, "cwd.txt"), process.cwd());
+fs.writeFileSync(path.join(here, "env.json"), JSON.stringify(process.env));
+const ready = () => fs.writeFileSync(path.join(here, "ready"), "1");
+const emit = event => process.stdout.write(JSON.stringify(event) + "\\n");
+const finish = body => {
+  let taskText = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", chunk => { taskText += chunk; });
+  process.stdin.on("end", () => { fs.writeFileSync(path.join(here, "task.txt"), taskText); body(); });
+};
+`;
+
+const stubbornChild = `process.on('SIGTERM', function () {}); setInterval(function () {}, 500);`;
+
+type Gate = "abort-ready" | "abort-received" | "epipe-received" | "abort-diag-late";
+
+type OutputMode = "stdout" | "blocker" | "abort-in-write" | "abort-late-error" | "accepted-delay" | "accepted-error";
+
+type DiagMode = "stall" | "error" | "delay" | "delay-error" | "slow";
+
+type TailSpec = { target: "output" | "diag"; hwm: 0 | 65536; action: "destroy-error" | "destroy-quiet"; delayMs?: number };
+
+type WorkerScenario = {
+  script?: string;
+  task?: string;
+  taskRepeat?: number;
+  profileId?: ProfileId;
+  write?: boolean;
+  abortBeforeCall?: boolean;
+  gate?: Gate;
+  output?: OutputMode;
+  drainDelayMs?: number;
+  diag?: DiagMode;
+  tailDelayMs?: number;
+  lingerMs?: number;
+  tail?: TailSpec;
+  lateDestroy?: "error" | "quiet";
+};
+
+type Recorded = {
+  code?: number;
+  status?: string;
+  durationMs?: number;
+  usageScope?: string;
+  usage?: Record<string, number>;
+  error?: string;
+  received?: number;
+  maxPending?: number;
+  emitted?: string;
+  outputAcked?: boolean;
+  diagAcked?: boolean;
+  diagWrites?: number;
+  diagMaxLength?: number;
+  diagFinalLength?: number;
+  tailWrites?: number;
+  lateErrBefore?: number;
+  lateErrAfter?: number;
+  harnessError?: string;
+  outputErrBefore?: number;
+  outputErrAfter?: number;
+};
+
+async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ recorded: Recorded; stdout: string; stderr: string; directory: string }> {
+  const directory = await mkdtemp(join(tmpdir(), "turnhelm-worker-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  if (scenario.script !== undefined) {
+    await writeFile(join(directory, "codex"), "#!" + process.execPath + "\n" + FAKE_PREAMBLE + scenario.script, { mode: 0o700 });
+  }
+  const root = join(directory, "root");
+  await mkdir(root, { recursive: true });
+  const moduleUrl = new URL("../src/codex.js", import.meta.url).href;
+  const resultFile = join(directory, "result.json");
+  const blocker = scenario.output !== undefined && scenario.output !== "stdout";
+  const inner = `
+    import { access, writeFile } from "node:fs/promises";
+    import { Writable } from "node:stream";
+    import { executeWorker } from ${JSON.stringify(moduleUrl)};
+    const decision = ${JSON.stringify(decision(scenario.profileId ?? "balanced"))};
+    const resultFile = ${JSON.stringify(resultFile)};
+    const controller = new AbortController();
+    ${scenario.abortBeforeCall ? "controller.abort();" : ""}
+    let received = 0;
+    let pending = 0;
+    let maxPending = 0;
+    let captured = "";
+    let outputAcked = false;
+    let diagWrites = 0;
+    let diagMaxLength = 0;
+    let diagFinalLength = 0;
+    let diagAcked = false;
+    let diagSink;
+    let output;
+    let storedCb = null;
+    let outputErrBefore;
+    let outputErrAfter;
+    let tailWrites = 0;
+    let lateErrBefore;
+    let lateErrAfter;
+    ${scenario.tail ? `
+    let tailSink;
+    tailSink = new Writable({
+      highWaterMark: ${scenario.tail.hwm},
+      write(_chunk, _encoding, callback) {
+        tailWrites += 1;
+        // Deliberately never calls callback nor drains; the sink then destroys
+        // itself, so this write's callback can never arrive.
+        setTimeout(() => { tailSink.destroy(${scenario.tail.action === "destroy-error" ? 'new Error("PRIVATE_EPIPE")' : ""}); }, ${scenario.tail.delayMs ?? 20});
+      }
+    });` : ""}
+    ${scenario.tail?.target === "output" ? "output = tailSink;" : blocker ? `
+    output = new Writable({
+      highWaterMark: ${scenario.output === "accepted-delay" || scenario.output === "accepted-error" ? 65536 : 0},
+      write(chunk, _encoding, callback) {
+        captured += chunk.toString();
+        received += 1;
+        pending += 1;
+        maxPending = Math.max(maxPending, pending);
+        ${scenario.output === "abort-in-write"
+          ? "controller.abort(); // Deliberately never calls callback and never drains."
+          : scenario.output === "abort-late-error"
+            ? "storedCb = callback; controller.abort(); // Deliberately never acks this write."
+            : scenario.output === "accepted-delay"
+            ? `setTimeout(() => { pending -= 1; outputAcked = true; callback(); }, ${scenario.tailDelayMs ?? 500});`
+            : scenario.output === "accepted-error"
+              ? `setTimeout(() => { pending -= 1; callback(new Error("PRIVATE_LATE_EPIPE")); }, ${scenario.tailDelayMs ?? 500});`
+              : `setTimeout(() => { pending -= 1; callback(); }, ${scenario.drainDelayMs ?? 30});`}
+      }
+    });` : "output = process.stdout;"}
+    ${scenario.tail?.target === "diag" ? "diagSink = tailSink;" : ""}
+    ${scenario.diag === "stall" ? `
+    diagSink = new Writable({
+      highWaterMark: 0,
+      write(_chunk, _encoding, callback) {
+        diagWrites += 1;
+        diagMaxLength = Math.max(diagMaxLength, diagSink.writableLength);
+        // Deliberately never calls callback: the diagnostics sink stays stalled.
+      }
+    });` : ""}
+    ${scenario.diag === "error" ? `
+    diagSink = new Writable({
+      write(_chunk, _encoding, callback) {
+        callback(new Error("PRIVATE_DIAGNOSTIC_EPIPE"));
+      }
+    });` : ""}
+    ${scenario.diag === "delay" ? `
+    diagSink = new Writable({
+      highWaterMark: 65536,
+      write(_chunk, _encoding, callback) {
+        diagWrites += 1;
+        diagMaxLength = Math.max(diagMaxLength, diagSink.writableLength);
+        setTimeout(() => { diagAcked = true; callback(); }, ${scenario.tailDelayMs ?? 500});
+      }
+    });` : ""}
+    ${scenario.diag === "delay-error" ? `
+    diagSink = new Writable({
+      highWaterMark: 65536,
+      write(_chunk, _encoding, callback) {
+        diagWrites += 1;
+        setTimeout(() => { callback(new Error("PRIVATE_LATE_EPIPE")); }, ${scenario.tailDelayMs ?? 500});
+      }
+    });` : ""}
+    ${scenario.diag === "slow" ? `
+    diagSink = new Writable({
+      highWaterMark: 0,
+      write(_chunk, _encoding, callback) {
+        diagWrites += 1;
+        diagMaxLength = Math.max(diagMaxLength, diagSink.writableLength);
+        setTimeout(() => { callback(); }, ${scenario.tailDelayMs ?? 500});
+      }
+    });` : ""}
+    // The harness must never hang: exit 89 if the worker promise does not settle.
+    const guard = setTimeout(() => process.exit(89), 2500);
+    ${scenario.gate === "abort-ready" ? `
+    const waitReady = async () => {
+      for (let i = 0; i < 3000; i++) {
+        try { await access(${JSON.stringify(join(directory, "ready"))}); return; } catch { /* poll until the fake signals readiness. */ }
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      throw new Error("fake worker never became ready");
+    };` : ""}
+    try {
+      const running = executeWorker(decision, ${scenario.taskRepeat !== undefined ? `"x".repeat(${scenario.taskRepeat})` : JSON.stringify(scenario.task ?? "the original task")}, {
+        executable: "codex",
+        root: ${JSON.stringify(root)},
+        write: ${scenario.write ?? false},
+        env: process.env,
+        signal: controller.signal,
+        output,
+        ...(diagSink ? { diagnostics: diagSink } : {})
+      });
+      ${scenario.gate === "abort-ready" ? "await waitReady(); controller.abort();" : ""}
+      ${scenario.gate === "abort-received" ? "while (received < 1) await new Promise(resolve => setTimeout(resolve, 10)); controller.abort();" : ""}
+      ${scenario.gate === "abort-diag-late" ? `
+      while (diagWrites < 1) await new Promise(resolve => setTimeout(resolve, 10));
+      // The child closes first; no drain ever arrives; cancellation must still resolve.
+      await new Promise(resolve => setTimeout(resolve, 400));
+      controller.abort();` : ""}
+      ${scenario.gate === "epipe-received" ? "while (received < 1) await new Promise(resolve => setTimeout(resolve, 10)); output.destroy(new Error(\"EPIPE\"));" : ""}
+      const result = await running;
+      clearTimeout(guard);
+      if (storedCb) {
+        outputErrBefore = output.listenerCount("error");
+        storedCb(new Error("PRIVATE_LATE_ACK"));
+        await new Promise(resolve => setTimeout(resolve, 50));
+        outputErrAfter = output.listenerCount("error");
+      }
+      diagFinalLength = diagSink ? diagSink.writableLength : 0;
+      ${scenario.lateDestroy ? `
+      {
+        // The run has settled; a known sink failure arrives afterwards.
+        const lateSink = ${scenario.diag === "stall" ? "diagSink" : "output"};
+        lateErrBefore = lateSink.listenerCount("error");
+        lateSink.destroy(${scenario.lateDestroy === "error" ? 'new Error("PRIVATE_LATE_CLOSE")' : ""});
+        await new Promise(resolve => setTimeout(resolve, 50));
+        lateErrAfter = lateSink.listenerCount("error");
+      }` : ""}
+      await writeFile(resultFile, JSON.stringify({ ...result, received, maxPending, emitted: captured, outputAcked, diagAcked, diagWrites, diagMaxLength, diagFinalLength, outputErrBefore, outputErrAfter, tailWrites, lateErrBefore, lateErrAfter }));
+      ${scenario.lingerMs ? `setTimeout(() => {}, ${scenario.lingerMs});` : ""}
+    } catch (error) {
+      clearTimeout(guard);
+      await writeFile(resultFile, JSON.stringify({ harnessError: error instanceof Error ? error.message : String(error) }));
+    }
+  `;
+  const run = await execute(process.execPath, ["--input-type=module", "--eval", inner], {
+    env: { ...process.env, PATH: directory, CODEX_HOME: join(directory, "codex-home") },
+    timeout: 20_000
+  });
+  const recorded = JSON.parse(await readFile(resultFile, "utf8")) as Recorded;
+  assert.equal(recorded.harnessError, undefined);
+  return { recorded, stdout: run.stdout, stderr: run.stderr, directory };
+}
+
+const fakeFile = async (directory: string, name: string): Promise<string> => readFile(join(directory, name), "utf8");
+
+const forbid = (haystack: string, ...needles: string[]): void => {
+  for (const needle of needles) assert.ok(!haystack.includes(needle), "raw source leaked: " + needle);
+};
+
+const waitForExit = async (pid: number): Promise<void> => {
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    const alive = await new Promise<boolean>(resolve => {
+      try {
+        process.kill(pid, 0);
+        resolve(true);
+      } catch (error) {
+        resolve((error as NodeJS.ErrnoException).code !== "ESRCH");
+      }
+    });
+    if (!alive) return;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.fail("owned group member survived the TERM-then-KILL grace");
+};
+
+for (const profileId of PROFILE_IDS) {
+  test(`buildWorkerArgs pins ${profileId} model and effort exactly for both sandboxes`, () => {
+    const decisionValue = decision(profileId);
+    assert.deepEqual(buildWorkerArgs(decisionValue, false), [
+      "exec", "--ephemeral", "--json", "--sandbox", "read-only",
+      "--config", "agents.enabled=false", "--model", decisionValue.profile.model,
+      "--config", `model_reasoning_effort=${JSON.stringify(decisionValue.profile.effort)}`, "-"
+    ]);
+    assert.deepEqual(buildWorkerArgs(decisionValue, true), [
+      "exec", "--ephemeral", "--json", "--sandbox", "workspace-write",
+      "--config", "agents.enabled=false", "--model", decisionValue.profile.model,
+      "--config", `model_reasoning_effort=${JSON.stringify(decisionValue.profile.effort)}`, "-"
+    ]);
+  });
+}
+
+test("subprocess environment strips classifier credentials while preserving Codex auth", () => {
+  const env = subprocessEnvironment({
+    LAYA_API_KEY: "TEST_LAYA_SENTINEL",
+    TYPESAFE_API_KEY: "TEST_JEV_SENTINEL",
+    TURNHELM_ALLOW_HOSTED_JEV: "1",
+    TURNHELM_CONFIG: "/tmp/turnhelm.json",
+    CODEX_HOME: "/tmp/codex",
+    PATH: "/bin"
+  });
+  assert.equal(env.LAYA_API_KEY, undefined);
+  assert.equal(env.TYPESAFE_API_KEY, undefined);
+  assert.equal(env.TURNHELM_ALLOW_HOSTED_JEV, undefined);
+  assert.equal(env.TURNHELM_CONFIG, undefined);
+  assert.equal(env.CODEX_HOME, "/tmp/codex");
+  assert.equal(env.PATH, "/bin");
+});
+
+test("worker environment additionally marks the managed child", () => {
+  const env = workerEnvironment({ TYPESAFE_API_KEY: "TEST_JEV_SENTINEL", CODEX_HOME: "/tmp/codex" });
+  assert.equal(env.TURNHELM_MANAGED_CHILD, "1");
+  assert.equal(env.TYPESAFE_API_KEY, undefined);
+  assert.equal(env.CODEX_HOME, "/tmp/codex");
+});
+
+test("one worker run binds decision, root, stdin task, and sanitized environment", { timeout: 30_000 }, async t => {
+  const task = "Fix the pago row\n第二行 ✓";
+  const { recorded, stdout, stderr, directory } = await runWorker(t, {
+    profileId: "balanced",
+    task,
+    write: true,
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "worker result" } });
+  emit({ type: "turn.completed", usage: { input_tokens: 12, output_tokens: 5 } });
+});
+`
+  });
+  assert.equal(typeof recorded.durationMs, "number");
+  assert.deepEqual({ ...recorded, durationMs: 0 }, {
+    code: 0,
+    status: "completed",
+    durationMs: 0,
+    usage: { input_tokens: 12, output_tokens: 5 },
+    usageScope: "unverified",
+    received: 0,
+    maxPending: 0,
+    emitted: "",
+    outputAcked: false,
+    diagAcked: false,
+    diagWrites: 0,
+    diagMaxLength: 0,
+    diagFinalLength: 0,
+    tailWrites: 0
+  });
+  assert.equal(await fakeFile(directory, "argv.json"), JSON.stringify(buildWorkerArgs(decision("balanced"), true)));
+  assert.equal(await fakeFile(directory, "cwd.txt"), await realpath(join(directory, "root")));
+  assert.equal(await fakeFile(directory, "task.txt"), task);
+  assert.equal(await fakeFile(directory, "runs"), "1");
+  const env = JSON.parse(await fakeFile(directory, "env.json")) as Record<string, string>;
+  assert.equal(env.TURNHELM_MANAGED_CHILD, "1");
+  assert.equal(env.LAYA_API_KEY, undefined);
+  assert.equal(env.TYPESAFE_API_KEY, undefined);
+  assert.equal(env.TURNHELM_ALLOW_HOSTED_JEV, undefined);
+  assert.equal(env.TURNHELM_CONFIG, undefined);
+  assert.equal(env.CODEX_HOME, join(directory, "codex-home"));
+  assert.equal(env.PATH, directory);
+  assert.ok(stdout.includes("worker result\n"));
+  assert.equal(stderr, "");
+});
+
+test("exit zero without a completion is a worker failure", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, { script: "finish(() => {});\n" });
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "worker");
+  assert.equal(recorded.code, 0);
+});
+
+test("turn.failed stops the owned group even though the leader would exit zero", { timeout: 30_000 }, async t => {
+  const { recorded, directory } = await runWorker(t, {
+    script: `
+const { spawn } = require("node:child_process");
+const child = spawn(process.execPath, ["-e", ${JSON.stringify(stubbornChild)}], { stdio: "ignore" });
+fs.writeFileSync(path.join(here, "descendant.pid"), String(child.pid));
+finish(() => {
+  emit({ type: "turn.failed" });
+  emit({ type: "turn.completed", usage: { input_tokens: 99 } });
+  ready();
+  setTimeout(() => {}, 5000);
+});
+`
+  });
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "worker");
+  // The group TERM from the sticky failure lands before the leader's natural exit.
+  assert.equal(recorded.code, 143);
+  assert.equal(await fakeFile(directory, "runs"), "1");
+  await waitForExit(Number(await fakeFile(directory, "descendant.pid")));
+});
+
+test("an error event is a fixed diagnostic and cannot undo a later completion", { timeout: 30_000 }, async t => {
+  const { recorded, stdout, stderr } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "error", message: "TEST_PRIVATE_ERROR_SENTINEL", stack: "TEST_PRIVATE_STACK_SENTINEL" });
+  emit({ type: "item.completed", item: { type: "agent_message", text: "recovered" } });
+  emit({ type: "turn.completed", usage: { input_tokens: 4 } });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(recorded.error, undefined);
+  assert.deepEqual(recorded.usage, { input_tokens: 4 });
+  forbid(JSON.stringify(recorded) + stdout, "TEST_PRIVATE_ERROR_SENTINEL", "TEST_PRIVATE_STACK_SENTINEL");
+  assert.equal(stderr, "turnhelm: worker-event-error\n");
+});
+
+test("tool progress never relays commands or outputs", { timeout: 30_000 }, async t => {
+  const { recorded, stdout, stderr } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "command_execution", command: "cat TEST_PRIVATE_TOOL_SENTINEL", aggregated_output: "TEST_PRIVATE_OUTPUT_SENTINEL", exit_code: 0 } });
+  emit({ type: "turn.completed", usage: { output_tokens: 2 } });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.deepEqual(recorded.usage, { output_tokens: 2 });
+  forbid(JSON.stringify(recorded) + stdout + stderr, "TEST_PRIVATE_TOOL_SENTINEL", "TEST_PRIVATE_OUTPUT_SENTINEL");
+  assert.equal(stderr, "turnhelm: tool-progress\n");
+});
+
+test("an async diagnostics sink error is a sanitized output failure that stops the group", { timeout: 30_000 }, async t => {
+  const outcome = await runWorker(t, {
+    diag: "error",
+    script: `
+const { spawn } = require("node:child_process");
+const child = spawn(process.execPath, ["-e", ${JSON.stringify(stubbornChild)}], { stdio: "ignore" });
+fs.writeFileSync(path.join(here, "descendant.pid"), String(child.pid));
+finish(() => {
+  emit({ type: "error", message: "TEST_PRIVATE_ERROR_SENTINEL" });
+  emit({ type: "turn.completed", usage: { input_tokens: 1 } });
+  setInterval(() => {}, 500);
+});
+`
+  }).then(
+    value => ({ kind: "settled" as const, value }),
+    error => ({ kind: "crashed" as const, error })
+  );
+  if (outcome.kind === "crashed") {
+    const error = outcome.error as NodeJS.ErrnoException & { code?: number | null; stderr?: string };
+    assert.fail("diagnostics sink error crashed the harness: exit " + error.code
+      + ", raw error text on stderr: " + String(error.stderr ?? "").includes("PRIVATE_DIAGNOSTIC_EPIPE"));
+  }
+  const { recorded, stderr, directory } = outcome.value;
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "output");
+  forbid(JSON.stringify(recorded) + stderr, "PRIVATE_DIAGNOSTIC_EPIPE", "TEST_PRIVATE_ERROR_SENTINEL");
+  await waitForExit(Number(await fakeFile(directory, "descendant.pid")));
+});
+
+test("an abort resolves a stalled diagnostics sink with a bounded queue", { timeout: 30_000 }, async t => {
+  const { recorded, stderr } = await runWorker(t, {
+    diag: "stall",
+    gate: "abort-diag-late",
+    script: `
+finish(() => {
+  for (let i = 0; i < 10000; i++) emit({ type: "error", message: "TEST_PRIVATE_ERROR_SENTINEL_" + i });
+  emit({ type: "turn.completed" });
+});
+`
+  });
+  assert.equal(recorded.status, "cancelled");
+  assert.ok((recorded.diagWrites ?? 0) <= 8, "diagnostic writes must be bounded, saw " + recorded.diagWrites);
+  assert.ok((recorded.diagFinalLength ?? 0) <= 256, "retained diagnostic bytes must be bounded, saw " + recorded.diagFinalLength);
+  forbid(JSON.stringify(recorded) + stderr, "TEST_PRIVATE_ERROR_SENTINEL");
+});
+
+test("one diagnostic event is written exactly once under a slow drain", { timeout: 30_000 }, async t => {
+  const { recorded, stderr } = await runWorker(t, {
+    diag: "slow",
+    tailDelayMs: 5,
+    script: `
+finish(() => {
+  emit({ type: "error", message: "TEST_PRIVATE_ERROR_SENTINEL" });
+  setTimeout(() => { emit({ type: "turn.completed" }); }, 350);
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(recorded.diagWrites, 1, "one fixed-category event must surface exactly once, saw " + recorded.diagWrites);
+  assert.equal(stderr, "");
+  forbid(JSON.stringify(recorded) + stderr, "TEST_PRIVATE_ERROR_SENTINEL");
+});
+
+test("settlement waits for an accepted message write to complete", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    output: "accepted-delay",
+    tailDelayMs: 500,
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "tail" } });
+  emit({ type: "turn.completed", usage: { input_tokens: 1 } });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(recorded.outputAcked, true, "the result must not settle before the accepted write completes");
+  assert.ok((recorded.durationMs ?? 0) >= 400);
+});
+
+test("a late message-write error is a sanitized output failure, not a crash", { timeout: 30_000 }, async t => {
+  const outcome = await runWorker(t, {
+    output: "accepted-error",
+    tailDelayMs: 500,
+    lingerMs: 900,
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "tail" } });
+  emit({ type: "turn.completed", usage: { input_tokens: 1 } });
+});
+`
+  }).then(
+    value => ({ kind: "settled" as const, value }),
+    error => ({ kind: "crashed" as const, error })
+  );
+  if (outcome.kind === "crashed") {
+    const error = outcome.error as NodeJS.ErrnoException & { code?: number | null; stderr?: string };
+    assert.fail("late message-write error crashed the harness: exit " + error.code
+      + ", raw error text on stderr: " + String(error.stderr ?? "").includes("PRIVATE_LATE_EPIPE"));
+  }
+  const { recorded, stderr } = outcome.value;
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "output");
+  assert.equal(recorded.code, 0);
+  forbid(JSON.stringify(recorded) + stderr, "PRIVATE_LATE_EPIPE");
+});
+
+test("settlement waits for an accepted diagnostics write to complete", { timeout: 30_000 }, async t => {
+  const { recorded, stderr } = await runWorker(t, {
+    diag: "delay",
+    tailDelayMs: 500,
+    script: `
+finish(() => {
+  emit({ type: "error", message: "TEST_PRIVATE_ERROR_SENTINEL" });
+  emit({ type: "turn.completed" });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(recorded.diagAcked, true, "the result must not settle before the accepted write completes");
+  assert.equal(stderr, "");
+});
+
+test("a late diagnostics-write error is a sanitized output failure, not a crash", { timeout: 30_000 }, async t => {
+  const outcome = await runWorker(t, {
+    diag: "delay-error",
+    tailDelayMs: 500,
+    lingerMs: 900,
+    script: `
+finish(() => {
+  emit({ type: "error", message: "TEST_PRIVATE_ERROR_SENTINEL" });
+  emit({ type: "turn.completed" });
+});
+`
+  }).then(
+    value => ({ kind: "settled" as const, value }),
+    error => ({ kind: "crashed" as const, error })
+  );
+  if (outcome.kind === "crashed") {
+    const error = outcome.error as NodeJS.ErrnoException & { code?: number | null; stderr?: string };
+    assert.fail("late diagnostics-write error crashed the harness: exit " + error.code
+      + ", raw error text on stderr: " + String(error.stderr ?? "").includes("PRIVATE_LATE_EPIPE"));
+  }
+  const { recorded, stderr } = outcome.value;
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "output");
+  assert.equal(recorded.code, 0);
+  forbid(JSON.stringify(recorded) + stderr, "PRIVATE_LATE_EPIPE");
+});
+
+test("repeated completions keep the latest usage snapshot, never a sum", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 5 } });
+  emit({ type: "turn.completed", usage: { input_tokens: 20, output_tokens: 8 } });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.deepEqual(recorded.usage, { input_tokens: 20, output_tokens: 8 });
+});
+
+test("input-only and output-only snapshots are retained without mixing fields", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "turn.completed", usage: { input_tokens: 7 } });
+  emit({ type: "turn.completed", usage: { output_tokens: 9 } });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.deepEqual(recorded.usage, { output_tokens: 9 });
+});
+
+test("valid usage is retained when a later completion has only invalid counters", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: -1 } });
+  emit({ type: "turn.completed", usage: { input_tokens: -5 } });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.deepEqual(recorded.usage, { input_tokens: 10 });
+  assert.equal(recorded.usageScope, "unverified");
+});
+
+test("garbage accounting after a valid snapshot keeps the run and earlier usage", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "turn.completed", usage: { input_tokens: 6 } });
+  emit({ type: "turn.completed", usage: [] });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.deepEqual(recorded.usage, { input_tokens: 6 });
+  assert.equal(recorded.usageScope, "unverified");
+});
+
+test("worker stderr is drained and never relayed", { timeout: 30_000 }, async t => {
+  const { recorded, stdout, stderr } = await runWorker(t, {
+    script: `
+finish(() => {
+  process.stderr.write("TEST_PRIVATE_STDERR_SENTINEL\\n");
+  process.stderr.write("y".repeat(1024 * 1024));
+  emit({ type: "item.completed", item: { type: "agent_message", text: "drained" } });
+  emit({ type: "turn.completed" });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.ok(stdout.includes("drained\n"));
+  assert.equal(stderr, "");
+  forbid(JSON.stringify(recorded) + stdout + stderr, "TEST_PRIVATE_STDERR_SENTINEL");
+});
+
+test("frames split across LF and UTF-8 boundaries reassemble", { timeout: 30_000 }, async t => {
+  const { recorded, stdout } = await runWorker(t, {
+    script: `
+finish(() => {
+  const payload = Buffer.from(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "héllo wörld" } }));
+  const splitAt = payload.indexOf(0xc3) + 1;
+  process.stdout.write(payload.subarray(0, splitAt));
+  setTimeout(() => {
+    process.stdout.write(payload.subarray(splitAt));
+    process.stdout.write(Buffer.from([0x0a]));
+    setTimeout(() => {
+      emit({ type: "turn.completed", usage: { input_tokens: 1 } });
+    }, 20);
+  }, 20);
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.ok(stdout.includes("héllo wörld\n"));
+});
+
+test("an exact 1 MiB frame is ignored without failing the run", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    script: `
+finish(() => {
+  const prefix = JSON.stringify({ type: "future.event" });
+  process.stdout.write(prefix + " ".repeat(1048576 - Buffer.byteLength(prefix)) + "\\n");
+  emit({ type: "turn.completed" });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(recorded.error, undefined);
+});
+
+test("an oversized frame fails the run without a rerun", { timeout: 30_000 }, async t => {
+  const { recorded, directory } = await runWorker(t, {
+    script: `
+process.stdout.write("x".repeat(1048577));
+setTimeout(() => {}, 10000);
+`
+  });
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "protocol");
+  assert.equal(await fakeFile(directory, "runs"), "1");
+});
+
+test("malformed JSON fails the run without a rerun", { timeout: 30_000 }, async t => {
+  const { recorded, directory } = await runWorker(t, {
+    script: `
+finish(() => {
+  process.stdout.write("{not json}\\n");
+  setTimeout(() => {}, 10000);
+});
+`
+  });
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "protocol");
+  assert.equal(await fakeFile(directory, "runs"), "1");
+});
+
+test("a nonempty truncated final frame fails the run without a rerun", { timeout: 30_000 }, async t => {
+  const { recorded, directory } = await runWorker(t, {
+    script: `
+finish(() => {
+  process.stdout.write("partial frame without newline");
+  process.stdout.end();
+  setTimeout(() => {}, 10000);
+});
+`
+  });
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "protocol");
+  assert.equal(await fakeFile(directory, "runs"), "1");
+});
+
+test("nonzero exit is a worker failure even with a completion", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "turn.completed", usage: { input_tokens: 1 } });
+  process.exitCode = 3;
+});
+`
+  });
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "worker");
+  assert.equal(recorded.code, 3);
+});
+
+test("the result settles at close, not when stdio ends", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "early output" } });
+  emit({ type: "turn.completed", usage: { input_tokens: 2 } });
+  process.stdout.end();
+  setTimeout(() => { process.exitCode = 0; }, 400);
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.ok((recorded.durationMs ?? 0) >= 300);
+});
+
+for (const exitCode of [7, 0]) {
+  test(`early exit ${exitCode} without reading stdin is a failed stdin delivery`, { timeout: 30_000 }, async t => {
+    // 4 MiB is an empirically verified stress size for the supported probe
+    // matrix, not a portable limit: Node warns child stdio pipes are not
+    // necessarily Unix pipes and their capacity is platform-specific. On every
+    // tested runtime (macOS Node 26.5 and 22.8, Linux Node 24 CI + container)
+    // this write stayed pending until the non-reading child exited, then
+    // failed EPIPE. It is built inside the harness child because shipping it
+    // through runWorker would place 4 MiB into a single --eval argv element,
+    // exceeding the per-string execve limit (E2BIG).
+    const { recorded } = await runWorker(t, { script: `process.exitCode = ${exitCode};\n`, taskRepeat: 4 * 1024 * 1024 });
+    assert.equal(recorded.status, "failed");
+    assert.equal(recorded.error, "stdin");
+    assert.equal(recorded.code, exitCode);
+  });
+}
+
+test("stdout backpressure queues one message at the sink while stderr drains", { timeout: 30_000 }, async t => {
+  const { recorded, stderr } = await runWorker(t, {
+    output: "blocker",
+    drainDelayMs: 30,
+    script: `
+finish(() => {
+  process.stderr.write("TEST_PRIVATE_STDERR_SENTINEL\\n");
+  process.stderr.write("y".repeat(512 * 1024));
+  for (let i = 0; i < 20; i++) emit({ type: "item.completed", item: { type: "agent_message", text: "message-" + i } });
+  emit({ type: "turn.completed" });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(recorded.received, 20);
+  assert.equal(recorded.maxPending, 1);
+  for (let i = 0; i < 20; i++) assert.ok((recorded.emitted ?? "").includes("message-" + i + "\n"));
+  forbid(JSON.stringify(recorded) + stderr, "TEST_PRIVATE_STDERR_SENTINEL");
+});
+
+test("cancellation interrupts a stalled drain wait", { timeout: 30_000 }, async t => {
+  const { recorded, stderr } = await runWorker(t, {
+    output: "blocker",
+    gate: "abort-received",
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "held" } });
+  setInterval(() => {}, 1000);
+});
+`
+  });
+  assert.equal(recorded.status, "cancelled");
+  assert.equal(recorded.received, 1);
+  assert.equal(recorded.maxPending, 1);
+  assert.equal(stderr, "");
+});
+
+test("an output EPIPE interrupts the drain wait as an output failure", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    output: "blocker",
+    gate: "epipe-received",
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "held" } });
+  setInterval(() => {}, 1000);
+});
+`
+  });
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "output");
+});
+
+test("an abort raised inside a sink write still resolves the run", { timeout: 30_000 }, async t => {
+  const { recorded, directory } = await runWorker(t, {
+    output: "abort-in-write",
+    script: `
+const { spawn } = require("node:child_process");
+const child = spawn(process.execPath, ["-e", ${JSON.stringify(stubbornChild)}], { stdio: "ignore" });
+fs.writeFileSync(path.join(here, "descendant.pid"), String(child.pid));
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "racing" } });
+  emit({ type: "turn.completed", usage: { input_tokens: 5 } });
+  setInterval(() => {}, 500);
+});
+`
+  });
+  assert.equal(recorded.status, "cancelled");
+  assert.equal(recorded.received, 1);
+  await waitForExit(Number(await fakeFile(directory, "descendant.pid")));
+});
+
+test("a late error ack after a settled cancelled run detaches owned sink listeners", { timeout: 30_000 }, async t => {
+  const { recorded, stderr } = await runWorker(t, {
+    output: "abort-late-error",
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "racing" } });
+  emit({ type: "turn.completed", usage: { input_tokens: 5 } });
+  setInterval(() => {}, 500);
+});
+`
+  });
+  assert.equal(recorded.status, "cancelled");
+  assert.equal(recorded.outputErrBefore, 1, "the sink must own its error listener while the write is unacked");
+  assert.equal(recorded.outputErrAfter, 0, "the late error ack must detach owned listeners from the sink");
+  assert.equal(recorded.harnessError, undefined);
+  forbid(stderr, "PRIVATE_LATE_ACK");
+});
+
+test("a TERM-ignoring worker is killed within the grace window", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    gate: "abort-ready",
+    script: `
+process.on("SIGTERM", () => {});
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "stubborn" } });
+  ready();
+  setInterval(() => {}, 250);
+});
+`
+  });
+  assert.equal(recorded.status, "cancelled");
+  assert.equal(recorded.code, 137);
+  assert.ok((recorded.durationMs ?? 0) >= 900);
+});
+
+test("a leader exiting before a TERM-ignoring descendant cannot cancel the escalation", { timeout: 30_000 }, async t => {
+  const { recorded, directory } = await runWorker(t, {
+    gate: "abort-ready",
+    script: `
+const { spawn } = require("node:child_process");
+const child = spawn(process.execPath, ["-e", ${JSON.stringify(stubbornChild)}], { stdio: "ignore" });
+fs.writeFileSync(path.join(here, "descendant.pid"), String(child.pid));
+ready();
+finish(() => {
+  setTimeout(() => {}, 5000);
+});
+`
+  });
+  assert.equal(recorded.status, "cancelled");
+  await waitForExit(Number(await fakeFile(directory, "descendant.pid")));
+});
+
+for (const [target, hwm, action] of [
+  ["output", 0, "destroy-error"],
+  ["output", 65536, "destroy-error"],
+  ["output", 0, "destroy-quiet"],
+  ["output", 65536, "destroy-quiet"],
+  ["diag", 0, "destroy-error"],
+  ["diag", 65536, "destroy-error"],
+  ["diag", 0, "destroy-quiet"],
+  ["diag", 65536, "destroy-quiet"]
+] as const) {
+  test(`a destroyed ${target} sink (hwm ${hwm}, ${action}) settles bounded as an output failure`, { timeout: 30_000 }, async t => {
+    const { recorded, stderr } = await runWorker(t, {
+      tail: { target, hwm, action },
+      script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "done" } });
+  emit({ type: "error", message: "TEST_PRIVATE_ERROR_SENTINEL" });
+  emit({ type: "turn.completed" });
+  setTimeout(() => {}, 10000);
+});
+`
+    });
+    assert.equal(recorded.status, "failed");
+    assert.equal(recorded.error, "output");
+    assert.equal(recorded.tailWrites, 1);
+    assert.ok((recorded.durationMs ?? 0) < 5000, "settlement must be bounded, took " + recorded.durationMs + "ms");
+    forbid(JSON.stringify(recorded) + stderr, "PRIVATE_EPIPE", "TEST_PRIVATE_ERROR_SENTINEL");
+  });
+}
+
+for (const [target, action] of [
+  ["output", "destroy-error"],
+  ["output", "destroy-quiet"],
+  ["diag", "destroy-error"],
+  ["diag", "destroy-quiet"]
+] as const) {
+  test(`a late failed ${target} sink (${action}) settles a prior protocol failure`, { timeout: 30_000 }, async t => {
+    const { recorded, stderr } = await runWorker(t, {
+      tail: { target, hwm: 65536, action, delayMs: 250 },
+      script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "done" } });
+  emit({ type: "error", message: "TEST_PRIVATE_ERROR_SENTINEL" });
+  process.stdout.write("{bad-json}\\n");
+  setTimeout(() => {}, 10000);
+});
+`
+    });
+    assert.equal(recorded.status, "failed");
+    assert.equal(recorded.error, "protocol", "the first cause must be preserved, saw " + recorded.error);
+    assert.equal(recorded.tailWrites, 1);
+    assert.ok((recorded.durationMs ?? 0) < 5000, "settlement must be bounded, took " + recorded.durationMs + "ms");
+    forbid(JSON.stringify(recorded) + stderr, "PRIVATE_EPIPE", "TEST_PRIVATE_ERROR_SENTINEL");
+  });
+}
+
+for (const [target, mode] of [
+  ["output", "error"],
+  ["output", "quiet"],
+  ["diag", "error"],
+  ["diag", "quiet"]
+] as const) {
+  test(`a settled cancelled run releases listeners on a late known ${target} sink ${mode} close`, { timeout: 30_000 }, async t => {
+    const outcome = await runWorker(t, {
+      ...(target === "output" ? { output: "abort-in-write" as const } : { diag: "stall" as const, gate: "abort-diag-late" as const }),
+      lateDestroy: mode,
+      script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "held" } });
+  emit({ type: "error", message: "TEST_PRIVATE_ERROR_SENTINEL" });
+  setTimeout(() => {}, 10000);
+});
+`
+    }).then(
+      value => ({ kind: "settled" as const, value }),
+      error => ({ kind: "crashed" as const, error })
+    );
+    if (outcome.kind === "crashed") {
+      const error = outcome.error as NodeJS.ErrnoException & { code?: number | null; stderr?: string };
+      assert.fail("late known sink failure crashed the harness: exit " + error.code
+        + ", raw error text on stderr: " + String(error.stderr ?? "").includes("PRIVATE_LATE_CLOSE"));
+    }
+    const { recorded, stderr } = outcome.value;
+    assert.equal(recorded.status, "cancelled");
+    assert.equal(recorded.lateErrBefore, 1, "the in-flight sink must still own its error listener at settlement");
+    assert.equal(recorded.lateErrAfter, 0, "the late known failure must release the listener");
+    forbid(JSON.stringify(recorded) + stderr, "PRIVATE_LATE_CLOSE", "TEST_PRIVATE_ERROR_SENTINEL");
+  });
+}
+
+test("a missing executable is a sanitized spawn failure", { timeout: 30_000 }, async t => {
+  const { recorded, stderr } = await runWorker(t, {});
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "spawn");
+  assert.equal(stderr, "");
+});
+
+test("descriptor-exhausted spawn fails without an unhandled process error", { timeout: 30_000 }, async t => {
+  const directory = await mkdtemp(join(tmpdir(), "turnhelm-worker-fd-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const moduleUrl = new URL("../src/codex.js", import.meta.url).href;
+  const resultFile = join(directory, "result.json");
+  const result = await execute("/bin/sh", ["-c", 'ulimit -n 64 && exec "$@"', "turnhelm-worker-fd",
+    process.execPath, "--input-type=module", "--eval", `
+      import { openSync, closeSync } from "node:fs";
+      import { writeFile } from "node:fs/promises";
+      import { executeWorker } from ${JSON.stringify(moduleUrl)};
+      // Initialize lazy stdio handles before exhausting the local FD table.
+      process.stdout.write("");
+      process.stderr.write("");
+      const descriptors = [];
+      let recorded;
+      try {
+        try {
+          while (true) descriptors.push(openSync("/dev/null", "r"));
+        } catch (error) {
+          if (error.code !== "EMFILE") throw error;
+        }
+        try {
+          recorded = await executeWorker(${JSON.stringify(decision("fast"))}, "test task", {
+            executable: "codex", root: ${JSON.stringify(directory)}, write: false,
+            env: process.env, output: process.stdout
+          });
+        } catch (error) {
+          recorded = { harnessError: error instanceof Error ? error.message : String(error) };
+        }
+      } finally {
+        for (const descriptor of descriptors) closeSync(descriptor);
+      }
+      await writeFile(${JSON.stringify(resultFile)}, JSON.stringify(recorded));
+    `], { env: { ...process.env, PATH: directory }, timeout: 20_000 });
+  assert.equal(result.stderr, "");
+  const recorded = JSON.parse(await readFile(resultFile, "utf8")) as Recorded;
+  assert.equal(recorded.harnessError, undefined);
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "spawn");
+});
+
+test("an already-aborted signal cancels before spawning", { timeout: 30_000 }, async t => {
+  const { recorded, directory } = await runWorker(t, { abortBeforeCall: true });
+  assert.equal(recorded.status, "cancelled");
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(await readFile(join(directory, "runs"), "utf8").then(() => "spawned", () => "absent"), "absent");
+});

@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "routingTimeoutMs": 4000,
+  "backends": {
+    "laya": { "enabled": true, "url": "http://127.0.0.1:8765" },
+    "jev": { "enabled": false }
+  },
+  "profiles": {
+    "fast": { "model": "gpt-6-luna", "effort": "low" },
+    "balanced": { "model": "gpt-6.1-sol", "effort": "medium" },
+    "deep": { "model": "gpt-6.1-sol", "effort": "high" },
+    "frontier": { "model": "gpt-6-astra", "effort": "high" },
+    "frontier_xhigh": { "model": "gpt-6-astra", "effort": "xhigh" },
+    "frontier_max": { "model": "gpt-6-astra", "effort": "max" }
+  }
+}
