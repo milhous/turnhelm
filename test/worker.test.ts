@@ -759,13 +759,14 @@ finish(() => {
 
 for (const exitCode of [7, 0]) {
   test(`early exit ${exitCode} without reading stdin is a failed stdin delivery`, { timeout: 30_000 }, async t => {
-    // The payload must exceed any pipe capacity (Linux max 1 MiB, macOS 64 KiB)
-    // so delivery stays pending until the non-reading child exits (EPIPE) and
-    // never merely fits the buffer.
-    // The payload must exceed any pipe capacity (Linux max 1 MiB, macOS 64 KiB)
-    // so delivery stays pending until the non-reading child exits (EPIPE) and
-    // never merely fits the buffer. Built inside the harness child: shipping it
-    // through runWorker would put 4 MiB into an --eval argv element (E2BIG).
+    // 4 MiB is an empirically verified stress size for the supported probe
+    // matrix, not a portable limit: Node warns child stdio pipes are not
+    // necessarily Unix pipes and their capacity is platform-specific. On every
+    // tested runtime (macOS Node 26.5 and 22.8, Linux Node 24 CI + container)
+    // this write stayed pending until the non-reading child exited, then
+    // failed EPIPE. It is built inside the harness child because shipping it
+    // through runWorker would place 4 MiB into a single --eval argv element,
+    // exceeding the per-string execve limit (E2BIG).
     const { recorded } = await runWorker(t, { script: `process.exitCode = ${exitCode};\n`, taskRepeat: 4 * 1024 * 1024 });
     assert.equal(recorded.status, "failed");
     assert.equal(recorded.error, "stdin");

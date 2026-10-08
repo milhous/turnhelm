@@ -30,7 +30,7 @@ if [ -n "$FAKE_DELAY" ]; then /bin/sleep "$FAKE_DELAY" >/dev/null; fi
 printf '%s\\n' "$*" >> "$FAKE_ARG_LOG"
 if [ -n "$FAKE_ENV_DUMP" ]; then env > "$FAKE_ENV_DUMP"; fi
 if [ "$1" = "--version" ]; then
-  if [ -n "$FAKE_VERSION_FILE" ]; then cat "$FAKE_VERSION_FILE";
+  if [ -n "$FAKE_VERSION_FILE" ]; then /bin/cat "$FAKE_VERSION_FILE";
   elif [ -n "$FAKE_VERSION_TEXT" ]; then printf '%s\\n' "$FAKE_VERSION_TEXT";
   else printf 'codex-cli %s\\n' "\${FAKE_VERSION:-0.160.1}"; fi
   exit 0
