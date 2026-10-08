@@ -30,7 +30,8 @@ if [ -n "$FAKE_DELAY" ]; then /bin/sleep "$FAKE_DELAY" >/dev/null; fi
 printf '%s\\n' "$*" >> "$FAKE_ARG_LOG"
 if [ -n "$FAKE_ENV_DUMP" ]; then env > "$FAKE_ENV_DUMP"; fi
 if [ "$1" = "--version" ]; then
-  if [ -n "$FAKE_VERSION_TEXT" ]; then printf '%s\\n' "$FAKE_VERSION_TEXT";
+  if [ -n "$FAKE_VERSION_FILE" ]; then cat "$FAKE_VERSION_FILE";
+  elif [ -n "$FAKE_VERSION_TEXT" ]; then printf '%s\\n' "$FAKE_VERSION_TEXT";
   else printf 'codex-cli %s\\n' "\${FAKE_VERSION:-0.160.1}"; fi
   exit 0
 fi
@@ -251,7 +252,11 @@ test("inspectCodex rejects output beyond the 64 KiB cap even with valid version 
   const bin = await fakeBin(t, "codex", CODEX_SCRIPT);
   const log = join(await tempDir(t, "turnhelm-preflight-log-"), "args");
   const padded = "codex-cli 0.160.1" + " ".repeat(200 * 1024);
-  const result = await inspectCodex("/tmp", fakeEnv(bin, { FAKE_ARG_LOG: log, FAKE_VERSION_TEXT: padded, FAKE_HELP: GOOD_HELP }));
+  // Linux MAX_ARG_STRLEN (128 KiB) makes a 200 KiB env value fail execve with
+  // E2BIG; pass the payload via file, mirroring the FAKE_HELP_FILE pattern.
+  const versionFile = join(await tempDir(t, "turnhelm-preflight-version-"), "version");
+  await writeFile(versionFile, padded + "\n");
+  const result = await inspectCodex("/tmp", fakeEnv(bin, { FAKE_ARG_LOG: log, FAKE_VERSION_FILE: versionFile, FAKE_HELP: GOOD_HELP }));
   assert.equal(result.ok, false);
   assert.deepEqual(await argLog(log), ["--version"], "overflow must stop the inspection at the version step");
 });
