@@ -1,84 +1,87 @@
 ---
 name: turnhelm-routing
-description: Use when a Codex CLI or Claude Code agent needs to inspect or execute a task through Turnhelm's model/effort routing, Laya/hosted Jev policy, or Codex read-only/workspace-write boundary.
+description: Use when a Codex CLI or Claude Code agent needs Turnhelm project setup, readiness checks, or a separate model/effort-routed Codex child.
 ---
 
 <!-- turnhelm-template v1 -->
 
 # Turnhelm Routing
 
-Turnhelm is an explicit parent-agent boundary. The `turnhelm run` entry selects
-one validated model/effort pair and launches a separate Codex child; it does
-not change the model, effort, permissions, or native subagents of the current
-Codex or Claude Code session.
+Turnhelm selects a model/effort pair and launches a separate Codex child. It
+does not switch the current Codex/Claude Code session or its native subagents.
+Use native tools when no separate Codex child is needed.
 
-## Safe execution flow
+## Prepare and inspect a project
 
-1. Send the whole task in one self-contained prompt:
+Commands use the current directory, or the exact directory passed with
+`--project <dir>`; they never discover a parent config, even inside a Git
+work tree. Requirements: Node >=22.8.0, Codex CLI >=0.160.0; `run` needs Git.
 
-   ```bash
-   turnhelm run "<task>"
-   ```
+| Command | Effect |
+| --- | --- |
+| `turnhelm init --dry-run [--project <dir>]` | Inspect installation; write nothing. |
+| `turnhelm init [--project <dir>]` | Install config, shared skill/metadata, and managed AGENTS block. |
+| `turnhelm doctor [--json] [--project <dir>]` | Offline checks; no classification or worker. |
+| `turnhelm doctor --probe [--project <dir>]` | One synthetic request per eligible backend; no worker. |
 
-   State the full task requirement in the prompt itself; the router and the
-   Codex child do not see your session context. Pass the task as a single
-   quoted positional or pipe it on stdin. Automatic selection picks an
-   ordinary profile for normal work and `frontier_max` when the task genuinely
-   needs maximum effort. No max-specific flag, disable setting, or extra
-   classification stage exists; never work around that.
+The sole config is `.turnhelm/config.json` (v1): `routingTimeoutMs`,
+`backends.laya`, `backends.jev`, and six `profiles`; unknown keys are rejected.
+`init` preserves valid config and unrelated AGENTS text; repeated identical
+installation is a no-op. Conflicting or changed skill files are refused,
+not overwritten. Stop for owner reconciliation, not automatic deletion.
+Restart existing Codex sessions after installation. Missing config is a
+doctor failure; offline eligibility is not reachability or model access.
+Obtain request/data authorization before `--probe`; it is not an offline check.
 
-2. Treat routing as selection only. Runs are read-only by default; workspace
-   writes require explicit `--write` given immediately before the run, and
-   hosted backends require separate, explicit authorization given immediately
-   before the consequential operation. Never put `--write`, hosted-Jev opt-ins,
-   credentials, or config edits into a reusable default command. After a write
-   run, inspect the diff and run focused tests; preserve unrelated user
-   changes.
+## Execute an authorized task
 
-3. Respect the managed-child rule: Turnhelm marks the Codex children it
-   launches with `TURNHELM_MANAGED_CHILD=1`; never invoke `turnhelm run`
-   recursively from inside such a session. From Claude Code, this launches a
-   separate Codex process; use Claude's native tools when no separate Codex
-   child is needed.
+```bash
+turnhelm run --project "/path/to/project" -- "<full self-contained task>"
+```
 
-## Profiles and routing contract
+Pass one quoted task or pipe stdin; `--` protects an option-like task. The
+classifier and child cannot see session context. Input is limited to
+8192 UTF-8 bytes; invalid/oversized input is rejected, never shortened.
 
-- The six fixed profiles are `fast`, `balanced`, `deep`, `frontier`,
-  `frontier_xhigh`, and `frontier_max`. Ordinary automatic selection picks one
-  of them for every run, including `frontier_max` when the task genuinely
-  needs maximum effort; there is no max gate, override flag, or extra
-  classification stage.
-- A task is bounded at 8192 UTF-8 bytes. Longer input is refused with an
-  error, never truncated or silently shortened; keep the full self-contained
-  requirement within that bound.
-- The project config lives at `.turnhelm/config.json` (version 1) with
-  `routingTimeoutMs`, `backends.laya`, `backends.jev`, and the six profiles.
-  Edit only to that shape; unknown keys are rejected.
-- A classifier or model-access failure does not trigger an unapproved model
-  retry. Stop rather than guessing.
+- Default sandbox is `read-only`. Add `--write` only after explicit approval
+  immediately before that run. Routing is not write authorization. Review
+  the resulting diff/tests and preserve unrelated changes.
+- Every run selects among `fast`, `balanced`, `deep`, `frontier`,
+  `frontier_xhigh`, `frontier_max`. Maximum effort is an ordinary automatic
+  selection; no bypass, max flag, or extra stage exists. Failure means stop,
+  not an unapproved model retry.
+- Never run recursively when `TURNHELM_MANAGED_CHILD=1`.
 
 ## Backend and data boundaries
 
-- Local Laya is tried first (`backends.laya.enabled`); hosted Jev is attempted
-  only when both `backends.jev.enabled: true` is set in `.turnhelm/config.json`
-  and `TURNHELM_ALLOW_HOSTED_JEV=1` is present in the environment. Never
-  enable either setting automatically.
-- Hosted Jev requires `TYPESAFE_API_KEY`; local Laya may require
-  `LAYA_API_KEY`. Keep keys out of tasks, logs, diffs, and committed config.
-  Turnhelm strips these keys and `TURNHELM_CONFIG` from the Codex child
-  environment.
-- The full task text is sent to the configured classifier before a profile is
-  selected. Remove secrets or sensitive data before routing and consider data
-  residency, cost, and consent before enabling a hosted backend.
+Laya is tried first when `backends.laya.enabled` is true. Hosted Jev requires **all three**:
+`backends.jev.enabled: true`, `TURNHELM_ALLOW_HOSTED_JEV=1`, and a nonblank
+`TYPESAFE_API_KEY`. Obtain explicit hosted authorization immediately before
+use. Do not enable gates or edit config without approval; keep write/hosted
+opt-ins out of reusable defaults. Laya may require `LAYA_API_KEY`.
+
+The full task goes to the classifier: remove secrets and consider residency,
+cost, and consent first. Keep keys out of prompts/logs/diffs/config. The child
+does not inherit `LAYA_API_KEY`, `TYPESAFE_API_KEY`,
+`TURNHELM_ALLOW_HOSTED_JEV`, or legacy `TURNHELM_CONFIG`.
+
+## Interpret results
+
+Worker output is on stdout; fixed diagnostics and one `turnhelm.receipt` JSON
+are on stderr **once classification starts**. Input/config/preflight rejection
+has no receipt. Read the exit code and routing/worker statuses, not stderr
+presence or a selected profile alone.
+
+Missing worker usage is `"unreported"`; `classifierUsage` is `"unreported"`
+and `wholeRunUsageScope` is `"unverified"`. Snapshots are not whole-task costs
+or savings. Offline doctor/help evidence does not prove runtime config-key
+semantics, model entitlement, or paid benefit.
 
 ## Common mistakes
 
-| Mistake | Correct behavior |
+| Mistake | Instead |
 | --- | --- |
-| Treating routing output as permission to edit | Authorization is separate and explicit. |
-| Assuming routing is fully offline | The classifier may use configured backends. |
-| Looking for a max-effort flag | Automatic selection already includes `frontier_max`. |
-| Expecting a Claude/Codex session model switch | The selected model applies only to the spawned Codex run. |
-| Retrying with a different model after failure | Stop; do not guess or hand-pick a model. |
-| Invoking `turnhelm run` from a managed child | Parent sessions only. |
-| Sending a partial task description | One self-contained prompt carries the full requirement. |
+| Using a parent project's config | Select the intended root explicitly. |
+| Treating a read-only run/probe as offline | Authorize classifier requests separately. |
+| Guessing a model after failure | Stop and report the failure. |
+| Counting a receipt as success or total cost | Check statuses; keep usage scope unverified. |
