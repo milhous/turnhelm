@@ -9,6 +9,7 @@ import { PROFILE_IDS, type ProfileId, type ProjectConfig } from "../src/config.j
 import type { TaskDecision } from "../src/route.js";
 import { buildWorkerArgs, subprocessEnvironment, workerEnvironment } from "../src/codex.js";
 import { MAX_EVENT_BYTES } from "../src/codex-events.js";
+import { executableFixture } from "./executable-fixture.js";
 import { fixtureConfig } from "./fixtures.js";
 
 const execute = promisify(execFile);
@@ -29,6 +30,7 @@ const FAKE_PREAMBLE = `
 const fs = require("node:fs");
 const path = require("node:path");
 const here = __dirname;
+fs.writeFileSync(path.join(here, "boot"), String(Date.now()));
 fs.writeFileSync(path.join(here, "runs"), (fs.existsSync(path.join(here, "runs")) ? fs.readFileSync(path.join(here, "runs"), "utf8") : "") + "1");
 fs.writeFileSync(path.join(here, "argv.json"), JSON.stringify(process.argv.slice(2)));
 fs.writeFileSync(path.join(here, "cwd.txt"), process.cwd());
@@ -55,6 +57,7 @@ type TailSpec = { target: "output" | "diag"; hwm: 0 | 65536; action: "destroy-er
 
 type WorkerScenario = {
   script?: string;
+  bootstrap?: string;
   task?: string;
   taskRepeat?: number;
   profileId?: ProfileId;
@@ -100,7 +103,7 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
   const directory = await mkdtemp(join(tmpdir(), "turnhelm-worker-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   if (scenario.script !== undefined) {
-    await writeFile(join(directory, "codex"), "#!" + process.execPath + "\n" + FAKE_PREAMBLE + scenario.script, { mode: 0o700 });
+    await executableFixture(join(directory, "codex"), (scenario.bootstrap ?? "") + FAKE_PREAMBLE + scenario.script, "node");
   }
   const root = join(directory, "root");
   await mkdir(root, { recursive: true });
@@ -109,7 +112,9 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
   const blocker = scenario.output !== undefined && scenario.output !== "stdout";
   const inner = `
     import { access, writeFile } from "node:fs/promises";
+    import { writeFileSync } from "node:fs";
     import { Writable } from "node:stream";
+    import { setTimeout as sleep } from "node:timers/promises";
     import childProcesses from "node:child_process";
     import { syncBuiltinESMExports } from "node:module";
     import { executeWorker } from ${JSON.stringify(moduleUrl)};
@@ -136,23 +141,28 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
     let lateErrAfter;
     let maxFrameConcatBytes = 0;
     let abortAfterShutdownReached = false;
-    ${scenario.gate === "abort-after-shutdown" ? `
     const originalSpawn = childProcesses.spawn;
     const originalKill = process.kill;
-    let ownedPid, childClosed = false, groupGone = false, abortQueued = false;
+    let ownedPid;
+    ${scenario.gate === "abort-after-shutdown" ? `
+    let childClosed = false, groupGone = false, abortQueued = false;
     const maybeAbort = () => {
       if (!childClosed || !groupGone || abortQueued) return;
       abortQueued = true;
       // Run after executeWorker's close/discharge handlers, not on a timer guess.
       setImmediate(() => { abortAfterShutdownReached = true; controller.abort(); });
-    };
+    };` : ""}
     childProcesses.spawn = (...args) => {
       const child = originalSpawn(...args);
-      ownedPid = child.pid;
-      child.once("close", () => { childClosed = true; maybeAbort(); });
+      if (args[2]?.detached && child.pid !== undefined) {
+        ownedPid = child.pid;
+        writeFileSync(${JSON.stringify(join(directory, "owned.pid"))}, String(ownedPid));
+        ${scenario.gate === "abort-after-shutdown" ? 'child.once("close", () => { childClosed = true; maybeAbort(); });' : ""}
+      }
       return child;
     };
     syncBuiltinESMExports();
+    ${scenario.gate === "abort-after-shutdown" ? `
     process.kill = (pid, sig) => {
       try { return originalKill.call(process, pid, sig); }
       catch (error) {
@@ -241,15 +251,54 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
         setTimeout(() => { callback(); }, ${scenario.tailDelayMs ?? 500});
       }
     });` : ""}
-    // The harness must never hang: exit 89 if the worker promise does not settle.
-    const guard = setTimeout(() => process.exit(89), 2500);
+    let bootPoll;
+    const gateController = new AbortController();
+    const gateSleep = milliseconds => sleep(milliseconds, undefined, { signal: gateController.signal }).catch(error => {
+      if (error.name !== "AbortError") throw error;
+    });
+    const stopObservation = () => {
+      clearTimeout(guard);
+      clearInterval(bootPoll);
+      bootPoll = undefined;
+      gateController.abort();
+    };
+    const restore = () => {
+      childProcesses.spawn = originalSpawn;
+      syncBuiltinESMExports();
+      process.kill = originalKill;
+      ${scenario.trackFrameConcat ? "Buffer.concat = originalConcat;" : ""}
+    };
+    const killOwned = () => {
+      if (ownedPid === undefined) return;
+      try { originalKill.call(process, -ownedPid, "SIGKILL"); }
+      catch (error) { if (error.code !== "ESRCH") throw error; }
+    };
+    const watchdog = phase => {
+      stopObservation();
+      restore();
+      killOwned();
+      process.stderr.write("worker " + phase + " watchdog\\n");
+      process.exit(89);
+    };
+    // 6s admits the deterministic 3s bootstrap plus startup scheduling, under the 20s outer guard.
+    let guard = setTimeout(() => watchdog("startup"), 6000);
+    bootPoll = setInterval(async () => {
+      try { await access(${JSON.stringify(join(directory, "boot"))}); }
+      catch { return; }
+      // An in-flight poll must not rearm a guard after genuine early settlement.
+      if (bootPoll === undefined) return;
+      clearInterval(bootPoll);
+      bootPoll = undefined;
+      clearTimeout(guard);
+      guard = setTimeout(() => watchdog("settlement"), 2500);
+    }, 10);
     ${scenario.gate === "abort-ready" ? `
     const waitReady = async () => {
-      for (let i = 0; i < 3000; i++) {
+      for (let i = 0; i < 3000 && !gateController.signal.aborted; i++) {
         try { await access(${JSON.stringify(join(directory, "ready"))}); return; } catch { /* poll until the fake signals readiness. */ }
-        await new Promise(resolve => setTimeout(resolve, 10));
+        await gateSleep(10);
       }
-      throw new Error("fake worker never became ready");
+      if (!gateController.signal.aborted) throw new Error("fake worker never became ready");
     };` : ""}
     try {
       const running = executeWorker(decision, ${scenario.taskRepeat !== undefined ? `"x".repeat(${scenario.taskRepeat})` : JSON.stringify(scenario.task ?? "the original task")}, {
@@ -260,19 +309,20 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
         signal: controller.signal,
         output,
         ...(diagSink ? { diagnostics: diagSink } : {})
-      });
-      ${scenario.gate === "abort-ready" ? "await waitReady(); controller.abort();" : ""}
-      ${scenario.gate === "abort-received" ? "while (received < 1) await new Promise(resolve => setTimeout(resolve, 10)); controller.abort();" : ""}
+      }).finally(stopObservation);
+      ${scenario.gate && scenario.gate !== "abort-after-shutdown" ? "await Promise.race([running, (async () => {" : ""}
+      ${scenario.gate === "abort-ready" ? "await waitReady(); if (!gateController.signal.aborted) controller.abort();" : ""}
+      ${scenario.gate === "abort-received" ? "while (received < 1 && !gateController.signal.aborted) await gateSleep(10); if (!gateController.signal.aborted) controller.abort();" : ""}
       ${scenario.gate === "abort-diag-late" ? `
-      while (diagWrites < 1) await new Promise(resolve => setTimeout(resolve, 10));
+      while (diagWrites < 1 && !gateController.signal.aborted) await gateSleep(10);
       // The child closes first; no drain ever arrives; cancellation must still resolve.
-      await new Promise(resolve => setTimeout(resolve, 400));
-      controller.abort();` : ""}
-      ${scenario.gate === "epipe-received" ? "while (received < 1) await new Promise(resolve => setTimeout(resolve, 10)); output.destroy(new Error(\"EPIPE\"));" : ""}
+      await gateSleep(400);
+      if (!gateController.signal.aborted) controller.abort();` : ""}
+      ${scenario.gate === "epipe-received" ? "while (received < 1 && !gateController.signal.aborted) await gateSleep(10); if (!gateController.signal.aborted) output.destroy(new Error(\"EPIPE\"));" : ""}
+      ${scenario.gate && scenario.gate !== "abort-after-shutdown" ? "})()]);" : ""}
       const result = await running;
-      ${scenario.gate === "abort-after-shutdown" ? "childProcesses.spawn = originalSpawn; syncBuiltinESMExports(); process.kill = originalKill;" : ""}
-      ${scenario.trackFrameConcat ? "Buffer.concat = originalConcat;" : ""}
-      clearTimeout(guard);
+      stopObservation();
+      restore();
       if (storedCb) {
         outputErrBefore = output.listenerCount("error");
         storedCb(new Error("PRIVATE_LATE_ACK"));
@@ -292,13 +342,25 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
       await writeFile(resultFile, JSON.stringify({ ...result, received, maxPending, emitted: captured, outputAcked, diagAcked, diagWrites, diagMaxLength, diagFinalLength, outputErrBefore, outputErrAfter, tailWrites, lateErrBefore, lateErrAfter, ...(${scenario.trackFrameConcat ?? false} ? { maxFrameConcatBytes } : {}), ...(${scenario.gate === "abort-after-shutdown"} ? { abortAfterShutdownReached } : {}) }));
       ${scenario.lingerMs ? `setTimeout(() => {}, ${scenario.lingerMs});` : ""}
     } catch (error) {
-      clearTimeout(guard);
+      stopObservation();
+      killOwned();
       await writeFile(resultFile, JSON.stringify({ harnessError: error instanceof Error ? error.message : String(error) }));
+    } finally {
+      stopObservation();
+      restore();
     }
   `;
   const run = await execute(process.execPath, ["--input-type=module", "--eval", inner], {
     env: { ...process.env, PATH: directory, CODEX_HOME: join(directory, "codex-home") },
     timeout: 20_000
+  }).catch(async error => {
+    // The outer exec timeout may kill the harness before its watchdog runs.
+    const pid = Number(await readFile(join(directory, "owned.pid"), "utf8").catch(() => ""));
+    if (Number.isInteger(pid) && pid > 0) {
+      try { process.kill(-pid, "SIGKILL"); }
+      catch (cleanupError) { if ((cleanupError as NodeJS.ErrnoException).code !== "ESRCH") throw cleanupError; }
+    }
+    throw error;
   });
   const recorded = JSON.parse(await readFile(resultFile, "utf8")) as Recorded;
   assert.equal(recorded.harnessError, undefined);
@@ -1125,4 +1187,94 @@ test("an already-aborted signal cancels before spawning", { timeout: 30_000 }, a
   assert.equal(recorded.status, "cancelled");
   await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal(await readFile(join(directory, "runs"), "utf8").then(() => "spawned", () => "absent"), "absent");
+});
+
+// A pre-boot pause must not consume the scenario's unchanged settlement budget.
+test("worker harness separates slow bootstrap from settlement", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    bootstrap: "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000);\n",
+    script: "finish(() => emit({ type: 'turn.completed' }));"
+  });
+  assert.equal(recorded.status, "completed");
+});
+
+for (const phase of ["startup", "settlement"] as const) {
+  // Killing just the harness would orphan both the detached worker and descendant.
+  test(`worker harness ${phase} watchdog rejects and removes the owned group`, { timeout: 30_000 }, async t => {
+    const dir = await mkdtemp(join(tmpdir(), "turnhelm-watchdog-"));
+    t.after(async () => {
+      for (const name of ["leader", "descendant"]) {
+        const pid = Number(await readFile(join(dir, name), "utf8").catch(() => ""));
+        if (pid > 0) { try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ } }
+      }
+      await rm(dir, { recursive: true, force: true });
+    });
+    const stalled = `
+const fixtureFs = require('node:fs');
+const descendant = require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(stubbornChild)}], { stdio: 'ignore' });
+fixtureFs.writeFileSync(${JSON.stringify(join(dir, "leader"))}, String(process.pid));
+fixtureFs.writeFileSync(${JSON.stringify(join(dir, "descendant"))}, String(descendant.pid));
+fixtureFs.writeFileSync(${JSON.stringify(join(dir, "started"))}, String(Date.now()));
+process.on('SIGTERM', () => {});
+setInterval(() => {}, 1000);
+`;
+    const outcome = await runWorker(t, {
+      ...(phase === "startup" ? { bootstrap: stalled + "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);\n" } : {}),
+      script: phase === "startup" ? "" : stalled
+    }).then(() => ({ code: 0, stderr: "" }), error => error as { code: number; stderr: string });
+    assert.equal(outcome.code, 89, 'watchdog must remain a visible harness failure');
+    assert.ok(outcome.stderr.includes(`worker ${phase} watchdog`), 'wrong observation budget fired');
+    const elapsed = Date.now() - Number(await readFile(join(dir, "started"), "utf8"));
+    assert.ok(elapsed >= (phase === "startup" ? 5000 : 2400));
+    assert.ok(elapsed < (phase === "startup" ? 8000 : 4500), 'must fail at stage budget, not outer timeout');
+    await waitForExit(Number(await readFile(join(dir, "leader"), "utf8")));
+    await waitForExit(Number(await readFile(join(dir, "descendant"), "utf8")));
+  });
+}
+
+// execFile can fail before either stage watchdog (its stdout capture is bounded).
+test("outer harness exec error removes the detached worker group", { timeout: 30_000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), "turnhelm-outer-error-"));
+  t.after(async () => {
+    for (const name of ["leader", "descendant"]) {
+      const pid = Number(await readFile(join(dir, name), "utf8").catch(() => ""));
+      if (pid > 0) { try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ } }
+    }
+    await rm(dir, { recursive: true, force: true });
+  });
+  const outcome = await runWorker(t, {
+    script: `
+const child = require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(stubbornChild)}], { stdio: 'ignore' });
+fs.writeFileSync(${JSON.stringify(join(dir, "leader"))}, String(process.pid));
+fs.writeFileSync(${JSON.stringify(join(dir, "descendant"))}, String(child.pid));
+finish(() => {
+  for (let i = 0; i < 40; i++) emit({ type: 'item.completed', item: { type: 'agent_message', text: 'x'.repeat(65536) } });
+  setInterval(() => {}, 1000);
+});`
+  }).then(() => ({ code: "success" }), error => error as { code: string });
+  assert.equal(outcome.code, "ERR_CHILD_PROCESS_STDIO_MAXBUFFER");
+  await waitForExit(Number(await readFile(join(dir, "leader"), "utf8")));
+  await waitForExit(Number(await readFile(join(dir, "descendant"), "utf8")));
+});
+
+// A pending ready gate must not hide executeWorker's pre-spawn cancellation.
+test("pending gate accepts preaborted worker settlement without spawning", { timeout: 30_000 }, async t => {
+  const { recorded, stderr, directory } = await runWorker(t, { abortBeforeCall: true, gate: "abort-ready" });
+  assert.equal(recorded.status, "cancelled");
+  assert.equal(stderr, "");
+  for (const name of ["runs", "owned.pid", "boot", "ready"]) {
+    await assert.rejects(readFile(join(directory, name)), { code: "ENOENT" });
+  }
+});
+
+// A booted child that exits before output must retain its actual failed result.
+test("pending gate accepts booted worker settlement before output", { timeout: 30_000 }, async t => {
+  const { recorded, stderr, directory } = await runWorker(t, { gate: "abort-received", script: "process.exitCode = 7;" });
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "worker");
+  assert.equal(recorded.code, 7);
+  assert.equal(stderr, "");
+  assert.equal(await fakeFile(directory, "runs"), "1");
+  await readFile(join(directory, "boot"));
+  await waitForExit(Number(await fakeFile(directory, "owned.pid")));
 });

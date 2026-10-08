@@ -4,6 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
+import { executableFixture } from "./executable-fixture.js";
 import { inspectCodex, inspectGit } from "../src/preflight.js";
 
 const SENTINELS: NodeJS.ProcessEnv = {
@@ -66,8 +67,7 @@ async function tempDir(t: TestContext, prefix: string): Promise<string> {
 async function fakeBin(t: TestContext, name: string, body: string): Promise<string> {
   const dir = await tempDir(t, "turnhelm-preflight-bin-");
   const script = join(dir, name);
-  await writeFile(script, body);
-  await chmod(script, 0o755);
+  await executableFixture(script, body, "shell");
   return dir;
 }
 
@@ -328,11 +328,9 @@ test("inspectCodex resolves a relative PATH entry against the caller before cwd 
   const caller = await tempDir(t, "turnhelm-preflight-caller-");
   const project = await tempDir(t, "turnhelm-preflight-project-");
   await mkdir(join(caller, "bin"));
-  await writeFile(join(caller, "bin", "codex"), CODEX_SCRIPT);
-  await chmod(join(caller, "bin", "codex"), 0o755);
+  await executableFixture(join(caller, "bin", "codex"), CODEX_SCRIPT, "shell");
   await mkdir(join(project, "bin"));
-  await writeFile(join(project, "bin", "codex"), WRONG_PROJECT_SCRIPT);
-  await chmod(join(project, "bin", "codex"), 0o755);
+  await executableFixture(join(project, "bin", "codex"), WRONG_PROJECT_SCRIPT, "shell");
   const sentinel = join(project, "WRONG_PROJECT_RAN");
   const originalCwd = process.cwd();
   t.after(() => process.chdir(originalCwd));
@@ -347,11 +345,9 @@ test("inspectGit resolves a relative PATH entry against the caller before cwd ch
   const caller = await tempDir(t, "turnhelm-preflight-caller-");
   const project = await tempDir(t, "turnhelm-preflight-project-");
   await mkdir(join(caller, "bin"));
-  await writeFile(join(caller, "bin", "git"), GIT_SCRIPT);
-  await chmod(join(caller, "bin", "git"), 0o755);
+  await executableFixture(join(caller, "bin", "git"), GIT_SCRIPT, "shell");
   await mkdir(join(project, "bin"));
-  await writeFile(join(project, "bin", "git"), WRONG_PROJECT_GIT_SCRIPT);
-  await chmod(join(project, "bin", "git"), 0o755);
+  await executableFixture(join(project, "bin", "git"), WRONG_PROJECT_GIT_SCRIPT, "shell");
   const sentinel = join(project, "WRONG_PROJECT_RAN");
   const originalCwd = process.cwd();
   t.after(() => process.chdir(originalCwd));

@@ -1,8 +1,9 @@
+import { executableFixture } from "./executable-fixture.js";
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -194,10 +195,9 @@ async function fixture(t: TestContext, classifier: Classifier = {}, options: Fix
       rm(codexHome, { recursive: true, force: true })
     ]);
   });
-  await writeFile(join(bin, "codex"), CODEX_SCRIPT, { mode: 0o755 });
+  await executableFixture(join(bin, "codex"), CODEX_SCRIPT, "node");
   if (options.git !== false) {
-    await writeFile(join(bin, "git"), GIT_SCRIPT, { mode: 0o755 });
-    await chmod(join(bin, "git"), 0o755);
+    await executableFixture(join(bin, "git"), GIT_SCRIPT, "shell");
   }
   if (options.config !== false) {
     const layaEnabled = typeof options.config === "object" ? options.config.layaEnabled !== false : true;

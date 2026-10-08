@@ -1,3 +1,4 @@
+import { executableFixture } from "./executable-fixture.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -142,7 +143,7 @@ test("the packed distribution installs offline and serves the project entry end 
     const fakeBin = join(scratch, "fake bin");
     await mkdir(fakeBin);
     const codexPath = join(fakeBin, "codex");
-    await writeFile(codexPath, CODEX_SCRIPT, { mode: 0o755 });
+    await executableFixture(codexPath, CODEX_SCRIPT, "node");
     const doctorEnv = { ...childEnv(), PATH: fakeBin + ":" + process.env.PATH };
     const doctor = await execute(bin, ["doctor", "--json", "--project", nested],
       { env: doctorEnv, timeout: 60_000 });
