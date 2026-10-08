@@ -55,6 +55,7 @@ type TailSpec = { target: "output" | "diag"; hwm: 0 | 65536; action: "destroy-er
 type WorkerScenario = {
   script?: string;
   task?: string;
+  taskRepeat?: number;
   profileId?: ProfileId;
   write?: boolean;
   abortBeforeCall?: boolean;
@@ -210,7 +211,7 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
       throw new Error("fake worker never became ready");
     };` : ""}
     try {
-      const running = executeWorker(decision, ${JSON.stringify(scenario.task ?? "the original task")}, {
+      const running = executeWorker(decision, ${scenario.taskRepeat !== undefined ? `"x".repeat(${scenario.taskRepeat})` : JSON.stringify(scenario.task ?? "the original task")}, {
         executable: "codex",
         root: ${JSON.stringify(root)},
         write: ${scenario.write ?? false},
@@ -758,7 +759,14 @@ finish(() => {
 
 for (const exitCode of [7, 0]) {
   test(`early exit ${exitCode} without reading stdin is a failed stdin delivery`, { timeout: 30_000 }, async t => {
-    const { recorded } = await runWorker(t, { script: `process.exitCode = ${exitCode};\n`, task: "x".repeat(100 * 1024) });
+    // The payload must exceed any pipe capacity (Linux max 1 MiB, macOS 64 KiB)
+    // so delivery stays pending until the non-reading child exits (EPIPE) and
+    // never merely fits the buffer.
+    // The payload must exceed any pipe capacity (Linux max 1 MiB, macOS 64 KiB)
+    // so delivery stays pending until the non-reading child exits (EPIPE) and
+    // never merely fits the buffer. Built inside the harness child: shipping it
+    // through runWorker would put 4 MiB into an --eval argv element (E2BIG).
+    const { recorded } = await runWorker(t, { script: `process.exitCode = ${exitCode};\n`, taskRepeat: 4 * 1024 * 1024 });
     assert.equal(recorded.status, "failed");
     assert.equal(recorded.error, "stdin");
     assert.equal(recorded.code, exitCode);
