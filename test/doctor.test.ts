@@ -1,9 +1,10 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
+import { executableFixture } from "./executable-fixture.js";
 import { initProject } from "../src/init.js";
 import { readTemplates } from "../src/assets.js";
 import { doctorProject } from "../src/doctor.js";
@@ -45,8 +46,7 @@ async function fakeBin(t: TestContext): Promise<string> {
   const dir = await tempDir(t, "turnhelm-doctor-bin-");
   for (const [name, body] of [["codex", CODEX_SCRIPT], ["git", GIT_SCRIPT]] as const) {
     const script = join(dir, name);
-    await writeFile(script, body);
-    await chmod(script, 0o755);
+    await executableFixture(script, body, "shell");
   }
   return dir;
 }
@@ -197,11 +197,9 @@ test("non-Git root warns but does not fail the doctor", async (t) => {
   const root = await preparedProject(t);
   const bin = await tempDir(t, "turnhelm-doctor-bin-");
   const script = join(bin, "git");
-  await writeFile(script, "#!/bin/sh\nprintf 'false\\n'\n");
-  await chmod(script, 0o755);
+  await executableFixture(script, "#!/bin/sh\nprintf 'false\\n'\n", "shell");
   const codexScript = join(bin, "codex");
-  await writeFile(codexScript, CODEX_SCRIPT);
-  await chmod(codexScript, 0o755);
+  await executableFixture(codexScript, CODEX_SCRIPT, "shell");
   const result = await doctorProject(root, { probe: false, env: await doctorEnv(t, bin) });
   const byId = new Map(result.checks.map(check => [check.id, check]));
   assert.equal(byId.get("git")?.status, "warn");

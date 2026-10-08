@@ -169,6 +169,7 @@ export function executeWorker(
     const beginShutdown = (): void => {
       if (shutdownStarted) return;
       shutdownStarted = true;
+      frame = Buffer.alloc(0);
       cancelDrainWait?.();
       cancelDiagWait?.();
       stopStdin();
@@ -193,7 +194,7 @@ export function executeWorker(
       beginShutdown();
     };
 
-    const onAbort = (): void => { cancelled = true; beginShutdown(); };
+    const onAbort = (): void => { cancelled = true; beginShutdown(); settle(); };
     const onOutputError = (): void => failSink("message");
 
     // Listener lifetime must cover our accepted bytes: while any write this
@@ -399,6 +400,7 @@ export function executeWorker(
       stderr.on("error", () => { /* Drained and discarded; never stalls stdout. */ });
       stderr.resume();
       stdout.on("data", (chunk: Buffer) => {
+        if (shutdownStarted || finished) return;
         frame = frame.length === 0 ? chunk : Buffer.concat([frame, chunk]);
         processFrames();
       });

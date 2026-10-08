@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
+import { setTimeout as delay } from "node:timers/promises";
 import { parseProjectConfig, PROFILE_IDS } from "../src/config.js";
 import { eligibleBackends, requestTaskChoice, type RequestSpec, type TaskBackend } from "../src/systemone.js";
 import { routeTask } from "../src/route.js";
@@ -117,6 +118,42 @@ test("a sole Laya backend is selected without Jev evidence", async () => {
   assert.ok(r.status === "selected");
   assert.deepEqual(calls, ["laya"]);
   assert.equal(r.decision.attempts.length, 1);
+});
+
+test("the shipped sole-Laya budget admits a 5.5s CPU inference response", async () => {
+  let calls = 0;
+  const r = await routeTask("Review the coupled documentation and routing constraints", fixtureConfig(), {
+    env: {}, request: async spec => {
+      calls++;
+      assert.equal(spec.backend, "laya");
+      await delay(5500, undefined, { signal: spec.signal });
+      return decisionReply("frontier");
+    }
+  });
+  assert.equal(calls, 1);
+  assert.ok(r.status === "selected");
+  assert.equal(r.decision.profileId, "frontier");
+  assert.equal(r.decision.attempts[0].outcome, "success");
+});
+
+test("reported Laya truncation fails closed instead of selecting a profile", async () => {
+  for (const usage of [
+    { input_tokens: 1024, output_tokens: 0, state_tokens: 1543, state_tokens_dropped: 668, truncated: true, truncated_questions: ["route"] },
+    { input_tokens: 1692, output_tokens: 0, state_tokens: 1543, state_tokens_dropped: 0, truncated: true, truncated_questions: ["route"] },
+    { input_tokens: 1024, output_tokens: 0, state_tokens: 1543, state_tokens_dropped: 668, truncated: false, truncated_questions: ["route"] }
+  ]) {
+    let calls = 0;
+    const r = await routeTask("Review the full documentation requirement", fixtureConfig(), {
+      env: {}, request: async () => {
+        calls++;
+        return { answers: { route: { type: "choice", choice: "frontier" } }, usage };
+      }
+    });
+    assert.equal(calls, 1);
+    assert.ok(r.status === "failed");
+    assert.equal(r.attempts[0].outcome, "failed");
+    assert.ok(!("decision" in r));
+  }
 });
 
 test("a sole hosted Jev backend routes without contacting Laya", async () => {
@@ -405,6 +442,24 @@ test("accepts only own-property choice replies", async () => {
   }
 });
 
+test("declared Laya truncation metadata must contain its own valid flags", async () => {
+  for (const usage of [
+    null, [], {}, { truncated: false }, { state_tokens_dropped: 0 },
+    { truncated: "false", state_tokens_dropped: 0 },
+    { truncated: false, state_tokens_dropped: "0" },
+    Object.create({ truncated: false, state_tokens_dropped: 0 })
+  ]) {
+    await assert.rejects(() => call({ answers: { route: { type: "choice", choice: "frontier" } }, usage }));
+  }
+});
+
+test("a complete Laya usage report allows the full-task choice", async () => {
+  assert.equal(await call({
+    answers: { route: { type: "choice", choice: "frontier" } },
+    usage: { input_tokens: 1692, output_tokens: 0, state_tokens: 1543, state_tokens_dropped: 0, truncated: false, truncated_questions: [] }
+  }), "frontier");
+});
+
 test("the Laya request carries the task, model, six criteria and credentials", async () => {
   let seen: RequestSpec | undefined;
   await requestTaskChoice(fixtureConfig(), "Prove the coupled invariants", "laya", fakeEnv, boundedSignal,
@@ -417,6 +472,7 @@ test("the Laya request carries the task, model, six criteria and credentials", a
   const body = JSON.parse(String(seen.body));
   assert.equal(body.state, "Prove the coupled invariants");
   assert.equal(body.model, "typed-decisions");
+  assert.equal(body.max_len, 8192);
   assert.equal(body.questions.route.type, "choice");
   assert.equal(body.questions.route.instructions, EXPECTED_INSTRUCTIONS);
   assert.deepEqual(Object.keys(body.questions.route.criteria), [...PROFILE_IDS]);
@@ -431,7 +487,9 @@ test("the Jev request targets the fixed hosted origin with its own model", async
   assert.equal(seen.backend, "jev");
   assert.equal(seen.url.href, "https://api.typesafe.ai/v1/systemone");
   assert.equal(seen.headers.authorization, "Bearer TEST_JEV_SENTINEL");
-  assert.equal(JSON.parse(String(seen.body)).model, "jev-latest");
+  const body = JSON.parse(String(seen.body));
+  assert.equal(body.model, "jev-latest");
+  assert.deepEqual(Object.keys(body), ["state", "model", "questions"]);
 });
 
 test("an optional Laya credential is omitted when absent", async () => {

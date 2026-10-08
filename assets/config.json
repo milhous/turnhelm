@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "routingTimeoutMs": 4000,
+  "routingTimeoutMs": 10000,
   "backends": {
     "laya": { "enabled": true, "url": "http://127.0.0.1:8765" },
     "jev": { "enabled": false }

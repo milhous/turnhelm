@@ -153,7 +153,7 @@ const ownObject = (value: unknown): Record<string, unknown> | undefined =>
     ? value as Record<string, unknown>
     : undefined;
 
-function validateChoice(reply: unknown): ProfileId {
+function validateChoice(reply: unknown, backend: TaskBackend): ProfileId {
   const envelope = ownObject(reply);
   if (!envelope || !Object.hasOwn(envelope, "answers")) throw new Error("classifier returned no route");
   const answers = ownObject(envelope.answers);
@@ -164,6 +164,13 @@ function validateChoice(reply: unknown): ProfileId {
     || !Object.hasOwn(route, "choice") || typeof route.choice !== "string"
     || !(PROFILE_IDS as readonly string[]).includes(route.choice)) {
     throw new Error("classifier returned an invalid choice");
+  }
+  if (backend === "laya" && Object.hasOwn(envelope, "usage")) {
+    const usage = ownObject(envelope.usage);
+    if (!usage || !Object.hasOwn(usage, "truncated") || usage.truncated !== false
+      || !Object.hasOwn(usage, "state_tokens_dropped") || usage.state_tokens_dropped !== 0) {
+      throw new Error("classifier returned truncated or invalid Laya usage");
+    }
   }
   return route.choice as ProfileId;
 }
@@ -190,7 +197,9 @@ export async function requestTaskChoice(
   const body = JSON.stringify({
     state: task,
     model: backend === "jev" ? "jev-latest" : "typed-decisions",
+    // Do not inherit Laya's 1024-token checkpoint window for a complete task.
+    ...(backend === "laya" ? { max_len: 8192 } : {}),
     questions: { route: { type: "choice", instructions: CHOICE_INSTRUCTIONS, criteria } }
   });
-  return validateChoice(await request({ backend, url, body, headers, signal }));
+  return validateChoice(await request({ backend, url, body, headers, signal }), backend);
 }
