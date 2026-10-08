@@ -33,6 +33,26 @@ Restart existing Codex sessions after installation. Missing config is a
 doctor failure; offline eligibility is not reachability or model access.
 Obtain request/data authorization before `--probe`; it is not an offline check.
 
+## Existing local Laya
+
+If Laya 0.3.22 serve dependencies and `typed-decisions` weights are already
+installed/cached, use its venv Python, not a possibly stale console shebang:
+
+```bash
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+LAYA_HOST=127.0.0.1 LAYA_PORT=8765 \
+LAYA_MODELS=typed-decisions LAYA_PRELOAD=1 \
+LAYA_DEVICE=cpu LAYA_THREADS=4 \
+"/absolute/path/to/laya-venv/bin/python" -I -B -u -m laya.serve
+```
+
+Keep the thread cap within physical cores. Reuse a healthy existing service;
+otherwise check `http://127.0.0.1:8765/health` from another terminal for
+`status: "ok"`, loaded `typed-decisions`, and actual device. This health check
+does not classify. Missing dependencies/cache require separate install/download
+approval. Offline flags constrain model loading, not all network activity;
+foreground startup does not enable autostart or change privacy permissions.
+
 ## Execute an authorized task
 
 ```bash
@@ -71,6 +91,15 @@ Worker output is on stdout; fixed diagnostics and one `turnhelm.receipt` JSON
 are on stderr **once classification starts**. Input/config/preflight rejection
 has no receipt. Read the exit code and routing/worker statuses, not stderr
 presence or a selected profile alone.
+
+To validate routing, submit the complete current requirement once, with
+`--write` only for an explicitly approved edit; then review the actual receipt,
+worker exit, scoped diff and checks. No forced profile or preliminary worker
+is needed. Routing is sequential: Laya success means no Jev run request.
+An authorized `doctor --probe` checks each eligible classifier separately,
+not the worker. Health/probe success does not guarantee a real task meets the
+deadline; a timeout with `worker.status: "not-started"` is a failure, not
+successful delegation. Report it rather than silently changing gates/budget.
 
 Missing worker usage is `"unreported"`; `classifierUsage` is `"unreported"`
 and `wholeRunUsageScope` is `"unverified"`. Snapshots are not whole-task costs

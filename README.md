@@ -78,6 +78,38 @@ it sends one synthetic classification request per eligible backend, up to two;
 plain `doctor` never contacts either classifier. Backend eligibility is not
 evidence of successful routing or access to the selected Codex model.
 
+## Start an existing local Laya
+
+Reuse an already healthy service; do not start a duplicate. If none is running,
+the following foreground reference is for an **already installed** Laya 0.3.22
+serve-capable virtual environment with cached `typed-decisions` weights:
+
+```bash
+LAYA_PYTHON=/absolute/path/to/laya-venv/bin/python
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+LAYA_HOST=127.0.0.1 LAYA_PORT=8765 \
+LAYA_MODELS=typed-decisions LAYA_PRELOAD=1 \
+LAYA_DEVICE=cpu LAYA_THREADS=4 \
+"$LAYA_PYTHON" -I -B -u -m laya.serve
+```
+
+`4` is an example thread cap; keep it within the machine's physical cores.
+The module entry avoids stale console-script shebangs after venv relocation.
+Missing serve dependencies or cached weights mean stop and obtain approval
+before installation/download. The offline flags constrain Hugging Face model
+loading, not every possible network action.
+
+Check from another terminal (no classification or Codex worker):
+
+```bash
+curl --fail --silent --show-error --max-time 5 http://127.0.0.1:8765/health
+```
+
+Expect `status: "ok"` and `typed-decisions` in `loaded`; inspect the reported
+checkpoint device. This foreground example does not install a supervisor or enable
+login/reboot autostart. Health alone does not prove a real task can be
+classified within the routing deadline.
+
 ## Project configuration
 
 `.turnhelm/config.json` (version 1) is the only configuration surface. There
@@ -86,7 +118,7 @@ is no global or home-directory config. Unknown keys are rejected.
 ```json
 {
   "version": 1,
-  "routingTimeoutMs": 4000,
+  "routingTimeoutMs": 10000,
   "backends": {
     "laya": { "enabled": true, "url": "http://127.0.0.1:8765" },
     "jev": { "enabled": false }
@@ -103,7 +135,8 @@ is no global or home-directory config. Unknown keys are rejected.
 ```
 
 - `routingTimeoutMs` is the total classification budget, an integer from 100
-  to 30000.
+  to 30000; the current template uses 10000ms, not a latency guarantee.
+  Existing project configs are not automatically updated.
 - `backends.laya.url` must be an HTTP loopback origin without credentials,
   path, query, or fragment.
 - All six profiles are required; each names a model and reasoning effort.
@@ -115,18 +148,9 @@ no max-effort flag, and no extra classification stage. `frontier_max` is an
 ordinary selection outcome reached when the task genuinely needs maximum
 effort.
 
-| Profile | Default model | Default effort |
-| --- | --- | --- |
-| `fast` | `gpt-6-luna` | `low` |
-| `balanced` | `gpt-6.1-sol` | `medium` |
-| `deep` | `gpt-6.1-sol` | `high` |
-| `frontier` | `gpt-6-astra` | `high` |
-| `frontier_xhigh` | `gpt-6-astra` | `xhigh` |
-| `frontier_max` | `gpt-6-astra` | `max` |
-
 Selection is judged by uncertainty, coupled constraints, required
 verification, and the consequences of an incorrect result — never by prompt
-length or keywords. These are the template defaults, not a model-access
+length or keywords. The config above gives the template defaults, not a model-access
 guarantee; project config supplies the actual model/effort pairs.
 
 ## Classification request and response
@@ -137,6 +161,7 @@ The task text is sent to the configured backend at `POST /v1/systemone`:
 {
   "state": "<task>",
   "model": "typed-decisions",
+  "max_len": 8192,
   "questions": {
     "route": {
       "type": "choice",
@@ -147,19 +172,24 @@ The task text is sent to the configured backend at `POST /v1/systemone`:
 }
 ```
 
-Hosted Jev uses the same envelope with `model: "jev-latest"`. The only
-accepted response shape is the nested choice answer:
+Laya's `max_len` is a token window, distinct from the 8192-byte task limit.
+Hosted Jev uses the same envelope with `model: "jev-latest"` and no `max_len`.
+The required response shape is the nested choice answer:
 
 ```json
 { "answers": { "route": { "type": "choice", "choice": "<profileId>" } } }
 ```
 
 `choice` must be one of the six own profile IDs; anything else fails the run.
+When Laya returns `usage`, it must report `truncated: false` and
+`state_tokens_dropped: 0`; otherwise that attempt fails. Absent usage does not
+prove the classifier consumed the full task.
 
 ## Backend failover
 
-Local Laya is tried first when `backends.laya.enabled` is true. When **both**
-backends are eligible, Laya receives `min(1000, floor(routingTimeoutMs / 4))`
+Routing is sequential, not parallel. Local Laya is tried first when
+`backends.laya.enabled` is true; a successful Laya choice means no Jev request.
+When **both** backends are eligible, Laya receives `min(1000, floor(routingTimeoutMs / 4))`
 of the routing budget so a hosted attempt can still run; a sole eligible
 backend receives the total remaining budget. Hosted Jev is attempted only
 when **all** of the following hold: `backends.jev.enabled` is true in the
@@ -205,6 +235,31 @@ an unapproved model retry. Local Laya may require `LAYA_API_KEY`.
   **unverified** from `--help` evidence alone; doctor reports this
   explicitly instead of claiming a pass.
 
+## Validate routing with the actual requirement
+
+On the intended branch, submit the complete real task once; do not force a
+profile or add a preliminary worker merely to test routing. Put the complete
+requirement and execution boundaries in a UTF-8 file, not an abbreviated smoke
+prompt (the same 8192-byte limit applies):
+
+```bash
+TASK_FILE=/absolute/path/to/complete-task.txt
+# Obtain explicit write authorization immediately before this invocation.
+turnhelm run --project "$PROJECT" --write < "$TASK_FILE"
+```
+
+Read the exit code and the receipt's `routing`, `selection`, and `worker`
+statuses, then review the scoped diff and tests. A selected model is not
+acceptance of its output. If classification times out, no worker starts;
+report the failure instead of silently increasing the budget or retrying a
+different model/backend.
+
+To exercise both eligible classifiers, obtain separate request/hosted consent
+before `turnhelm doctor --probe --json --project "$PROJECT"`. It sends one
+synthetic request per eligible backend but no worker. Both probe results plus
+one successful real task prove only those observed paths, not general quality,
+all six model/effort combinations, whole-task cost, or savings.
+
 ## Agent skills (Codex CLI + Claude Code)
 
 The canonical shared skill is
@@ -235,8 +290,6 @@ Compatibility evidence: Codex CLI 0.160.0 (official native binary:
 authorize a benefit trial; any comparison against a fixed baseline requires
 separate owner approval. Current task-entry verification is recorded in
 [`docs/validation/2026-10-08-turnhelm-task-entry.md`](docs/validation/2026-10-08-turnhelm-task-entry.md).
-Historical Phase A receipts (not current task-entry verification) are recorded in
-[`docs/validation/2026-10-03-jev-laya-phase-a.md`](docs/validation/2026-10-03-jev-laya-phase-a.md).
 The [2026-10-05 design](docs/superpowers/specs/2026-10-05-turnhelm-task-entry-design.md)
 and [implementation plan](docs/superpowers/plans/2026-10-05-turnhelm-task-entry.md)
 are historical design records, not current invocation instructions.

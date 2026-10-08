@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { PROFILE_IDS, type ProfileId, type ProjectConfig } from "../src/config.js";
 import type { TaskDecision } from "../src/route.js";
 import { buildWorkerArgs, subprocessEnvironment, workerEnvironment } from "../src/codex.js";
+import { MAX_EVENT_BYTES } from "../src/codex-events.js";
 import { fixtureConfig } from "./fixtures.js";
 
 const execute = promisify(execFile);
@@ -44,9 +45,9 @@ const finish = body => {
 
 const stubbornChild = `process.on('SIGTERM', function () {}); setInterval(function () {}, 500);`;
 
-type Gate = "abort-ready" | "abort-received" | "epipe-received" | "abort-diag-late";
+type Gate = "abort-ready" | "abort-received" | "epipe-received" | "abort-diag-late" | "abort-after-shutdown";
 
-type OutputMode = "stdout" | "blocker" | "abort-in-write" | "abort-late-error" | "accepted-delay" | "accepted-error";
+type OutputMode = "stdout" | "blocker" | "abort-in-write" | "abort-late-error" | "accepted-delay" | "accepted-error" | "accepted-stall";
 
 type DiagMode = "stall" | "error" | "delay" | "delay-error" | "slow";
 
@@ -67,6 +68,7 @@ type WorkerScenario = {
   lingerMs?: number;
   tail?: TailSpec;
   lateDestroy?: "error" | "quiet";
+  trackFrameConcat?: boolean;
 };
 
 type Recorded = {
@@ -88,6 +90,8 @@ type Recorded = {
   lateErrBefore?: number;
   lateErrAfter?: number;
   harnessError?: string;
+  maxFrameConcatBytes?: number;
+  abortAfterShutdownReached?: boolean;
   outputErrBefore?: number;
   outputErrAfter?: number;
 };
@@ -106,6 +110,8 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
   const inner = `
     import { access, writeFile } from "node:fs/promises";
     import { Writable } from "node:stream";
+    import childProcesses from "node:child_process";
+    import { syncBuiltinESMExports } from "node:module";
     import { executeWorker } from ${JSON.stringify(moduleUrl)};
     const decision = ${JSON.stringify(decision(scenario.profileId ?? "balanced"))};
     const resultFile = ${JSON.stringify(resultFile)};
@@ -128,6 +134,39 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
     let tailWrites = 0;
     let lateErrBefore;
     let lateErrAfter;
+    let maxFrameConcatBytes = 0;
+    let abortAfterShutdownReached = false;
+    ${scenario.gate === "abort-after-shutdown" ? `
+    const originalSpawn = childProcesses.spawn;
+    const originalKill = process.kill;
+    let ownedPid, childClosed = false, groupGone = false, abortQueued = false;
+    const maybeAbort = () => {
+      if (!childClosed || !groupGone || abortQueued) return;
+      abortQueued = true;
+      // Run after executeWorker's close/discharge handlers, not on a timer guess.
+      setImmediate(() => { abortAfterShutdownReached = true; controller.abort(); });
+    };
+    childProcesses.spawn = (...args) => {
+      const child = originalSpawn(...args);
+      ownedPid = child.pid;
+      child.once("close", () => { childClosed = true; maybeAbort(); });
+      return child;
+    };
+    syncBuiltinESMExports();
+    process.kill = (pid, sig) => {
+      try { return originalKill.call(process, pid, sig); }
+      catch (error) {
+        if (pid === -ownedPid && sig === 0 && error.code === "ESRCH") { groupGone = true; maybeAbort(); }
+        throw error;
+      }
+    };` : ""}
+    ${scenario.trackFrameConcat ? `
+    const originalConcat = Buffer.concat;
+    Buffer.concat = function (chunks, length) {
+      const combined = originalConcat(chunks, length);
+      maxFrameConcatBytes = Math.max(maxFrameConcatBytes, combined.length);
+      return combined;
+    };` : ""}
     ${scenario.tail ? `
     let tailSink;
     tailSink = new Writable({
@@ -141,7 +180,7 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
     });` : ""}
     ${scenario.tail?.target === "output" ? "output = tailSink;" : blocker ? `
     output = new Writable({
-      highWaterMark: ${scenario.output === "accepted-delay" || scenario.output === "accepted-error" ? 65536 : 0},
+      highWaterMark: ${scenario.output === "accepted-delay" || scenario.output === "accepted-error" || scenario.output === "accepted-stall" ? 65536 : 0},
       write(chunk, _encoding, callback) {
         captured += chunk.toString();
         received += 1;
@@ -155,6 +194,8 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
             ? `setTimeout(() => { pending -= 1; outputAcked = true; callback(); }, ${scenario.tailDelayMs ?? 500});`
             : scenario.output === "accepted-error"
               ? `setTimeout(() => { pending -= 1; callback(new Error("PRIVATE_LATE_EPIPE")); }, ${scenario.tailDelayMs ?? 500});`
+              : scenario.output === "accepted-stall"
+                ? "// Accepted write whose completion callback never arrives."
               : `setTimeout(() => { pending -= 1; callback(); }, ${scenario.drainDelayMs ?? 30});`}
       }
     });` : "output = process.stdout;"}
@@ -229,6 +270,8 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
       controller.abort();` : ""}
       ${scenario.gate === "epipe-received" ? "while (received < 1) await new Promise(resolve => setTimeout(resolve, 10)); output.destroy(new Error(\"EPIPE\"));" : ""}
       const result = await running;
+      ${scenario.gate === "abort-after-shutdown" ? "childProcesses.spawn = originalSpawn; syncBuiltinESMExports(); process.kill = originalKill;" : ""}
+      ${scenario.trackFrameConcat ? "Buffer.concat = originalConcat;" : ""}
       clearTimeout(guard);
       if (storedCb) {
         outputErrBefore = output.listenerCount("error");
@@ -246,7 +289,7 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
         await new Promise(resolve => setTimeout(resolve, 50));
         lateErrAfter = lateSink.listenerCount("error");
       }` : ""}
-      await writeFile(resultFile, JSON.stringify({ ...result, received, maxPending, emitted: captured, outputAcked, diagAcked, diagWrites, diagMaxLength, diagFinalLength, outputErrBefore, outputErrAfter, tailWrites, lateErrBefore, lateErrAfter }));
+      await writeFile(resultFile, JSON.stringify({ ...result, received, maxPending, emitted: captured, outputAcked, diagAcked, diagWrites, diagMaxLength, diagFinalLength, outputErrBefore, outputErrAfter, tailWrites, lateErrBefore, lateErrAfter, ...(${scenario.trackFrameConcat ?? false} ? { maxFrameConcatBytes } : {}), ...(${scenario.gate === "abort-after-shutdown"} ? { abortAfterShutdownReached } : {}) }));
       ${scenario.lingerMs ? `setTimeout(() => {}, ${scenario.lingerMs});` : ""}
     } catch (error) {
       clearTimeout(guard);
@@ -1033,6 +1076,48 @@ test("descriptor-exhausted spawn fails without an unhandled process error", { ti
   assert.equal(recorded.harnessError, undefined);
   assert.equal(recorded.status, "failed");
   assert.equal(recorded.error, "spawn");
+});
+
+for (const target of ["message", "diag"] as const) {
+  test(`late caller cancellation settles a prior protocol failure with pending ${target} output`, { timeout: 30_000 }, async t => {
+    const { recorded } = await runWorker(t, {
+      ...(target === "message"
+        ? { output: "accepted-stall" as const }
+        : { diag: "stall" as const }),
+      gate: "abort-after-shutdown",
+      script: `finish(() => {
+        emit(${target === "message" ? '{type:"item.completed",item:{type:"agent_message",text:"accepted"}}' : '{type:"error",message:"PRIVATE_PROTOCOL_CONTEXT"}'});
+        process.stdout.write("invalid-json\\n");
+      });`
+    });
+    assert.equal(recorded.status, "failed");
+    assert.equal(recorded.abortAfterShutdownReached, true, "child close and group discharge must precede cancellation");
+    assert.equal(recorded.error, "protocol", "late cancellation must retain the first failure cause");
+    assert.equal(target === "message" ? recorded.received : recorded.diagWrites, 1, "the sink must retain an unacknowledged write");
+  });
+}
+
+test("shutdown drains worker stdout without accumulating discarded frames", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    trackFrameConcat: true,
+    script: `process.on("SIGTERM", () => {});
+      finish(() => {
+        process.stdout.write("invalid-json\\n");
+        setTimeout(() => {
+          let chunks = 0;
+          const flood = () => {
+            if (chunks++ === 40) return;
+            process.stdout.write(Buffer.alloc(65536, 120), () => setImmediate(flood));
+          };
+          flood();
+        }, 50);
+        setInterval(() => {}, 500);
+      });`
+  });
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "protocol");
+  assert.ok(recorded.maxFrameConcatBytes! <= MAX_EVENT_BYTES,
+    "discarded shutdown bytes must not grow the retained protocol buffer: " + recorded.maxFrameConcatBytes);
 });
 
 test("an already-aborted signal cancels before spawning", { timeout: 30_000 }, async t => {
