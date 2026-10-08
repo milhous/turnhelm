@@ -1,7 +1,7 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { lstat, chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile, unlink } from "node:fs/promises";
+import { lstat, chmod, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -55,6 +55,8 @@ async function runChild(t: TestContext, root: string, scenario: string): Promise
     const originalLstat = mutableFs.promises.lstat;
     const originalReadSync = mutableFs.readSync;
     let writes = 0;
+    let replacementIdentityChanged = false;
+    let rootIdentityChanged = false;
     let cleanupArmed = false;
     let configWritten = false;
     let cleanupReadBytes = 0;
@@ -103,8 +105,12 @@ async function runChild(t: TestContext, root: string, scenario: string): Promise
         writes += 1;
         return originalRename.apply(this, args);
       };
-      await fsp0.rm(root, { recursive: true, force: true });
+      // Linux reuses the just-freed inode on rm+recreate; renaming the root
+      // aside (it still exists) then recreating guarantees a distinct inode.
+      const beforeRootIno = (await originalLstat(root)).ino;
+      await fsp0.rename(root, root + "-user-moved");
       await fsp0.mkdir(root);
+      rootIdentityChanged = (await originalLstat(root)).ino !== beforeRootIno;
     }
     if (scenario === "d8a" || scenario === "d8b" || scenario === "d10a" || scenario === "d10b") {
       mutableFs.promises.rename = async function (from, to) {
@@ -117,8 +123,13 @@ async function runChild(t: TestContext, root: string, scenario: string): Promise
           configWritten = true;
           if (scenario === "d8a") {
             const bytes = await originalReadFile(to);
-            await originalUnlink(to);
-            await originalWrite(to, bytes);
+            // Linux reuses the just-freed inode on unlink+recreate; rename
+            // over the live file guarantees a distinct identity everywhere.
+            const beforeIno = (await originalLstat(to)).ino;
+            const sibling = to + ".user-replacement";
+            await originalWrite(sibling, bytes);
+            await originalRename(sibling, to);
+            replacementIdentityChanged = (await originalLstat(to)).ino !== beforeIno;
           }
           if (scenario === "d10a") {
             await originalUnlink(to);
@@ -161,7 +172,8 @@ async function runChild(t: TestContext, root: string, scenario: string): Promise
     const agents = await fsp.readFile(agentsPath, "utf8").catch(e => e.code);
     const configExists = await fsp.readFile(configPath).then(() => true, e => e.code === "ENOENT" ? false : e.code);
     const skillExists = await fsp.readFile(skillPath).then(() => true, e => e.code === "ENOENT" ? false : e.code);
-    console.log(JSON.stringify({ ...result, writes, agents, configExists, skillExists, cleanupReads, cleanupReadBytes }));
+    if (scenario === "d9") await fsp0.rm(root + "-user-moved", { recursive: true, force: true }).catch(() => {});
+    console.log(JSON.stringify({ ...result, writes, replacementIdentityChanged, rootIdentityChanged, agents, configExists, skillExists, cleanupReads, cleanupReadBytes }));
     process.exit(0);
   `], { timeout: 15000 });
   return JSON.parse(result.stdout);
@@ -276,8 +288,14 @@ test("same-byte inode replacement is refused as a race", async (t) => {
   const root = await tempProject(t, { agents: "hello\n" });
   const templates = await readTemplates();
   const changes = await inspectInstallation(root, templates);
-  await unlink(join(root, "AGENTS.md"));
-  await writeFile(join(root, "AGENTS.md"), "hello\n");
+  // Linux reuses the just-freed inode on unlink+recreate; creating the
+  // replacement while the original still exists and renaming over it
+  // guarantees a distinct {dev,ino} identity on every POSIX filesystem.
+  const beforeIno = (await lstat(join(root, "AGENTS.md"))).ino;
+  const sibling = join(root, "AGENTS.md.user-replacement");
+  await writeFile(sibling, "hello\n");
+  await rename(sibling, join(root, "AGENTS.md"));
+  assert.notEqual((await lstat(join(root, "AGENTS.md"))).ino, beforeIno);
   const result = await applyInstallation(root, changes);
   assert.equal(result.code, 1);
   assert.equal(result.error, "race");
@@ -290,8 +308,13 @@ test("existing parent identity change is refused as a race", async (t) => {
   await mkdir(join(root, ".agents", "skills", "turnhelm-routing", "agents"), { recursive: true });
   const templates = await readTemplates();
   const changes = await inspectInstallation(root, templates);
-  await rm(join(root, ".agents"), { recursive: true, force: true });
+  // Linux reuses the just-freed inode on rm+recreate; renaming the original
+  // aside (it still exists, so its inode cannot be reused) then recreating
+  // guarantees a distinct {dev,ino} identity on every POSIX filesystem.
+  const beforeIno = (await lstat(join(root, ".agents"))).ino;
+  await rename(join(root, ".agents"), join(root, ".agents-user-moved"));
   await mkdir(join(root, ".agents", "skills", "turnhelm-routing", "agents"), { recursive: true });
+  assert.notEqual((await lstat(join(root, ".agents"))).ino, beforeIno);
   const result = await applyInstallation(root, changes);
   assert.equal(result.code, 1);
   assert.equal(result.error, "race");
@@ -475,6 +498,7 @@ async function snapshotThenMissing(root: string): Promise<boolean> {
 test("cleanup keeps a same-byte user replacement of a created file", async (t) => {
   const root = await tempProject(t);
   const child = await runChild(t, root, "d8a");
+  assert.equal(child.replacementIdentityChanged, true, "fixture precondition: replacement identity changed");
   assert.equal(child.code, 1);
   assert.equal(child.error, "write");
   assert.deepEqual(child.applied, [".turnhelm/config.json"]);
@@ -494,6 +518,7 @@ test("post-rename identity bookkeeping failure keeps applied evidence", async (t
 test("a replaced root at the same path is refused before any write", async (t) => {
   const root = await tempProject(t);
   const child = await runChild(t, root, "d9");
+  assert.equal(child.rootIdentityChanged, true, "fixture precondition: root identity changed");
   assert.equal(child.code, 1);
   assert.equal(child.error, "race");
   assert.deepEqual(child.applied, []);
