@@ -43,12 +43,12 @@ export async function routeTask(
   const cancelled = (): RoutingResult => deepFreeze({ status: "cancelled", attempts, routingMs: elapsed() });
   if (caller?.aborted) return cancelled();
   const backends = eligibleBackends(config, options.env);
-  const layaShare = Math.min(1000, Math.floor(config.routingTimeoutMs / 4));
   for (const backend of backends) {
     if (caller?.aborted) return cancelled();
     const remaining = config.routingTimeoutMs - elapsed();
     if (remaining <= 0) break;
-    const budget = backends.length > 1 && backend === "laya" ? Math.min(layaShare, remaining) : remaining;
+    // CPU Laya can take seconds; reserve a quarter of the remaining deadline for Jev.
+    const budget = backends.length > 1 && backend === "laya" ? Math.floor(remaining * 3 / 4) : remaining;
     const signal = composeSignal(caller, AbortSignal.timeout(budget));
     const attempt: MutableAttempt = { backend, outcome: "success", durationMs: 0 };
     attempts.push(attempt);
