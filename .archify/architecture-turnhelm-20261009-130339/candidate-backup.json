@@ -1,0 +1,342 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Turnhelm Task-Entry Architecture",
+    "output": ".archify/architecture-turnhelm-20261009-130339/turnhelm-architecture.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "git@github.com:milhous/turnhelm.git",
+      "link_mode": "local-only",
+      "revision": "4551593e45e9edd071c3b00e02ddc096e9f3c94b"
+    },
+    "views": [
+      {
+        "id": "viewRouting",
+        "label": "Routing path",
+        "focus": ["turnhelmCli", "router", "layaClassifier", "codexWorker"],
+        "note": "Laya-first classification ends in one sandboxed Codex worker"
+      },
+      {
+        "id": "viewTrust",
+        "label": "Trust gates",
+        "focus": ["preflight", "hostedJev", "codexWorker"],
+        "note": "Version gate, hosted triple gate, sandboxed execution"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "parentSession",
+      "type": "external",
+      "label": "Parent Agent Session",
+      "sublabel": "Codex CLI · Claude Code",
+      "pos": [40, 340],
+      "size": [130, 64],
+      "sources": [
+        {
+          "path": ".agents/skills/turnhelm-routing/SKILL.md",
+          "line": 59,
+          "label": "invokes turnhelm run"
+        }
+      ]
+    },
+    {
+      "id": "routingSkill",
+      "type": "frontend",
+      "label": "Routing Skill + AGENTS",
+      "sublabel": "installed by turnhelm init",
+      "pos": [40, 160],
+      "size": [140, 60],
+      "sources": [
+        {
+          "path": ".agents/skills/turnhelm-routing/SKILL.md",
+          "line": 1,
+          "label": "canonical template"
+        },
+        {
+          "path": "src/cli.ts",
+          "line": 89,
+          "label": "init writes"
+        }
+      ]
+    },
+    {
+      "id": "projectConfig",
+      "type": "database",
+      "label": ".turnhelm/config.json",
+      "sublabel": "v1 · 6 profiles · 10000 ms",
+      "pos": [270, 160],
+      "size": [140, 60],
+      "sources": [
+        {
+          "path": "assets/config.json",
+          "line": 3,
+          "end_line": 8,
+          "label": "budget + profiles"
+        }
+      ]
+    },
+    {
+      "id": "layaClassifier",
+      "type": "backend",
+      "label": "Laya Classifier",
+      "sublabel": "typed-decisions · local service",
+      "pos": [510, 160],
+      "size": [150, 64],
+      "sources": [
+        {
+          "path": "src/systemone.ts",
+          "line": 194,
+          "end_line": 195,
+          "label": "POST /v1/systemone"
+        }
+      ]
+    },
+    {
+      "id": "hostedJev",
+      "type": "cloud",
+      "label": "Hosted Jev",
+      "sublabel": "api.typesafe.ai · triple-gated",
+      "pos": [760, 160],
+      "size": [150, 64],
+      "sources": [
+        {
+          "path": "src/systemone.ts",
+          "line": 130,
+          "end_line": 131,
+          "label": "triple gate"
+        },
+        {
+          "path": "src/systemone.ts",
+          "line": 194,
+          "end_line": 195,
+          "label": "hosted endpoint"
+        }
+      ]
+    },
+    {
+      "id": "turnhelmCli",
+      "type": "backend",
+      "label": "turnhelm CLI",
+      "sublabel": "init · doctor · run",
+      "pos": [270, 340],
+      "size": [150, 64],
+      "sources": [
+        {
+          "path": "src/cli.ts",
+          "line": 89,
+          "label": "init"
+        },
+        {
+          "path": "src/cli.ts",
+          "line": 134,
+          "label": "run"
+        }
+      ]
+    },
+    {
+      "id": "router",
+      "type": "backend",
+      "label": "Router",
+      "sublabel": "sequential · fail-closed",
+      "pos": [510, 340],
+      "size": [150, 64],
+      "sources": [
+        {
+          "path": "src/route.ts",
+          "line": 32,
+          "label": "routeTask"
+        },
+        {
+          "path": "src/route.ts",
+          "line": 46,
+          "end_line": 51,
+          "label": "budgeted sequence"
+        }
+      ]
+    },
+    {
+      "id": "codexWorker",
+      "type": "backend",
+      "label": "Codex Worker",
+      "sublabel": "≤1 · read-only / workspace-write",
+      "pos": [760, 340],
+      "size": [150, 64],
+      "sources": [
+        {
+          "path": "src/codex.ts",
+          "line": 15,
+          "end_line": 17,
+          "label": "exec --ephemeral --sandbox"
+        },
+        {
+          "path": "src/codex.ts",
+          "line": 30,
+          "label": "managed child env"
+        }
+      ]
+    },
+    {
+      "id": "preflight",
+      "type": "security",
+      "label": "Preflight",
+      "sublabel": "Node ≥22.8 · Codex ≥0.160 · Git",
+      "pos": [270, 520],
+      "size": [150, 60],
+      "sources": [
+        {
+          "path": "src/preflight.ts",
+          "line": 12,
+          "label": "Codex minimum version"
+        }
+      ]
+    },
+    {
+      "id": "routeJournal",
+      "type": "database",
+      "label": ".turnhelm/routes.jsonl",
+      "sublabel": "SHA-256 · never task text",
+      "pos": [510, 520],
+      "size": [150, 64],
+      "sources": [
+        {
+          "path": "src/journal.ts",
+          "line": 35,
+          "label": "journal path"
+        },
+        {
+          "path": "src/journal.ts",
+          "line": 49,
+          "label": "best-effort append"
+        }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "security-group",
+      "label": "Host loopback 127.0.0.1",
+      "wraps": ["layaClassifier"]
+    }
+  ],
+  "connections": [
+    {
+      "id": "conRun",
+      "from": "parentSession",
+      "to": "turnhelmCli",
+      "label": "run \"<task>\"",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "conReadConfig",
+      "from": "turnhelmCli",
+      "to": "projectConfig",
+      "label": "reads v1",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "conInstallSkill",
+      "from": "turnhelmCli",
+      "to": "routingSkill",
+      "label": "init installs",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "conRoute",
+      "from": "turnhelmCli",
+      "to": "router",
+      "label": "routeTask",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "conClassifyFirst",
+      "from": "router",
+      "to": "layaClassifier",
+      "label": "first attempt",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "conFailover",
+      "from": "router",
+      "to": "hostedJev",
+      "label": "failover · triple gate",
+      "variant": "security",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "conPreflight",
+      "from": "turnhelmCli",
+      "to": "preflight",
+      "label": "Node/Codex/Git",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "conJournal",
+      "from": "turnhelmCli",
+      "to": "routeJournal",
+      "label": "append decision",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "conSpawn",
+      "from": "turnhelmCli",
+      "to": "codexWorker",
+      "label": "spawn ≤1 Codex worker",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "bottom"
+    },
+    {
+      "id": "conOutput",
+      "from": "codexWorker",
+      "to": "parentSession",
+      "label": "stdout · one receipt",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "bottom"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Routing budget",
+      "items": [
+        "Default routing budget 10000 ms (routingTimeoutMs)",
+        "Dual-backend: Laya share capped at min(1000 ms, budget/4) — 1000 ms at defaults",
+        "Sole backend receives the full remaining budget",
+        "Attempts are sequential; the first valid typed choice ends routing"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Trust and isolation",
+      "items": [
+        "Hosted Jev requires all three gates: config enabled, TURNHELM_ALLOW_HOSTED_JEV=1, non-empty TYPESAFE_API_KEY",
+        "Worker child env strips routing credentials; TURNHELM_MANAGED_CHILD=1 blocks recursion",
+        "Sandbox read-only unless --write; at most one worker per run"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Task entry and evidence",
+      "items": [
+        "Task limited to 8192 UTF-8 bytes via argv or stdin; continuation-only prompts rejected",
+        "Exactly one turnhelm.receipt on stderr once classification starts",
+        "routes.jsonl journals the task SHA-256 and decision, never task text"
+      ]
+    }
+  ]
+}

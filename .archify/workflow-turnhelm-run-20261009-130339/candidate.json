@@ -1,0 +1,378 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Turnhelm run — Routing Workflow",
+    "output": ".archify/workflow-turnhelm-run-20261009-130339/turnhelm-run-workflow.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "git@github.com:milhous/turnhelm.git",
+      "link_mode": "local-only",
+      "revision": "d4d47f85247633585ff036abe1eee1209c2f70d8"
+    },
+    "viewBox": [
+      1014,
+      652
+    ]
+  },
+  "lanes": [
+    {
+      "id": "caller",
+      "label": "Parent Agent"
+    },
+    {
+      "id": "turnhelm",
+      "label": "Turnhelm CLI"
+    },
+    {
+      "id": "routing",
+      "label": "Classification"
+    },
+    {
+      "id": "failures",
+      "label": "Rejection & Failure",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "phIntake",
+      "label": "Intake",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "phClassify",
+      "label": "Classification",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "phExecute",
+      "label": "Execution & Evidence",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "groups": [
+    {
+      "id": "grFailover",
+      "label": "Failover",
+      "lane": "routing",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "grFailures",
+      "label": "No unauthorized retry",
+      "lane": "failures",
+      "fromCol": 0,
+      "toCol": 4,
+      "variant": "security"
+    }
+  ],
+  "mainPath": [
+    "submit",
+    "intake",
+    "laya",
+    "decision",
+    "worker",
+    "receipt"
+  ],
+  "semanticChecks": {
+    "allowedRoots": [
+      "submit"
+    ],
+    "allowedTerminals": [
+      "receipt",
+      "rejected"
+    ],
+    "requiredPaths": [
+      {
+        "from": "submit",
+        "to": "receipt"
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "id": "submit",
+      "lane": "caller",
+      "col": 0,
+      "type": "external",
+      "label": "Submit Task",
+      "sublabel": "argv or stdin · self-contained",
+      "icon": "person",
+      "sources": [
+        {
+          "path": "src/cli.ts",
+          "line": 134,
+          "label": "runCommand"
+        }
+      ],
+      "width": 150
+    },
+    {
+      "id": "intake",
+      "lane": "turnhelm",
+      "col": 0,
+      "type": "security",
+      "label": "Validate + Preflight",
+      "sublabel": "≤8192 B · config · Codex ≥0.160",
+      "sources": [
+        {
+          "path": "src/task.ts",
+          "line": 21,
+          "label": "byte limit"
+        },
+        {
+          "path": "src/preflight.ts",
+          "line": 12,
+          "label": "version floor"
+        }
+      ],
+      "width": 150
+    },
+    {
+      "id": "laya",
+      "lane": "routing",
+      "col": 2,
+      "type": "cloud",
+      "label": "Laya — first",
+      "sublabel": "127.0.0.1:8765 · ¾ of remaining",
+      "sources": [
+        {
+          "path": "src/systemone.ts",
+          "line": 194,
+          "end_line": 195,
+          "label": "loopback endpoint"
+        }
+      ],
+      "width": 150
+    },
+    {
+      "id": "jev",
+      "lane": "routing",
+      "col": 3,
+      "type": "cloud",
+      "label": "Jev — failover",
+      "sublabel": "api.typesafe.ai · triple gate",
+      "sources": [
+        {
+          "path": "src/systemone.ts",
+          "line": 130,
+          "end_line": 131,
+          "label": "triple gate"
+        }
+      ],
+      "width": 150
+    },
+    {
+      "id": "decision",
+      "lane": "turnhelm",
+      "col": 3,
+      "type": "backend",
+      "label": "Select + Journal",
+      "sublabel": "6 profiles · routes.jsonl",
+      "sources": [
+        {
+          "path": "src/route.ts",
+          "line": 67,
+          "end_line": 71,
+          "label": "selected decision"
+        },
+        {
+          "path": "src/journal.ts",
+          "line": 35,
+          "label": "journal path"
+        }
+      ],
+      "width": 150
+    },
+    {
+      "id": "worker",
+      "lane": "turnhelm",
+      "col": 5,
+      "type": "backend",
+      "label": "Codex Worker",
+      "sublabel": "≤1 · sandbox by --write",
+      "sources": [
+        {
+          "path": "src/codex.ts",
+          "line": 15,
+          "end_line": 17,
+          "label": "sandboxed exec"
+        }
+      ],
+      "width": 150
+    },
+    {
+      "id": "receipt",
+      "lane": "caller",
+      "col": 5,
+      "type": "backend",
+      "label": "Receipt + Exit",
+      "sublabel": "one receipt · 0/1/130/143",
+      "icon": "flag",
+      "sources": [
+        {
+          "path": "src/cli.ts",
+          "line": 204,
+          "end_line": 205,
+          "label": "single receipt"
+        }
+      ],
+      "width": 150
+    },
+    {
+      "id": "rejected",
+      "lane": "failures",
+      "col": 1,
+      "type": "security",
+      "label": "Rejected",
+      "sublabel": "no receipt · exit 1",
+      "sources": [
+        {
+          "path": "src/task.ts",
+          "line": 15,
+          "end_line": 21,
+          "label": "validation rejections"
+        }
+      ],
+      "width": 150
+    },
+    {
+      "id": "failclosed",
+      "lane": "failures",
+      "col": 4,
+      "type": "security",
+      "label": "Fail-Closed",
+      "sublabel": "no worker · one receipt",
+      "sources": [
+        {
+          "path": "src/route.ts",
+          "line": 78,
+          "end_line": 81,
+          "label": "fail-closed outcome"
+        }
+      ],
+      "width": 150
+    }
+  ],
+  "edges": [
+    {
+      "id": "edgeSubmit",
+      "from": "submit",
+      "to": "intake",
+      "label": "task",
+      "role": "main",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "edgeReject",
+      "from": "intake",
+      "to": "rejected",
+      "label": "invalid input",
+      "role": "error",
+      "variant": "security"
+    },
+    {
+      "id": "edgeLayaChoice",
+      "from": "laya",
+      "to": "decision",
+      "label": "typed choice",
+      "role": "main",
+      "variant": "emphasis"
+    },
+    {
+      "id": "edgeClassify",
+      "from": "intake",
+      "to": "laya",
+      "label": "classify",
+      "role": "main"
+    },
+    {
+      "id": "edgeFailover",
+      "from": "laya",
+      "to": "jev",
+      "label": "timeout / miss",
+      "role": "branch",
+      "variant": "dashed"
+    },
+    {
+      "id": "edgeJevChoice",
+      "from": "jev",
+      "to": "decision",
+      "label": "typed choice",
+      "role": "main"
+    },
+    {
+      "id": "edgeFailClosed",
+      "from": "jev",
+      "to": "failclosed",
+      "label": "no valid choice",
+      "role": "error",
+      "variant": "security"
+    },
+    {
+      "id": "edgeSpawn",
+      "from": "decision",
+      "to": "worker",
+      "label": "spawn ≤1",
+      "role": "main",
+      "variant": "emphasis"
+    },
+    {
+      "id": "edgeWorkerOut",
+      "from": "worker",
+      "to": "receipt",
+      "label": "stdout · exit code",
+      "role": "return"
+    },
+    {
+      "id": "edgeFailOut",
+      "from": "failclosed",
+      "to": "receipt",
+      "label": "receipt · exit 1",
+      "role": "error",
+      "variant": "security",
+      "route": "outside-right"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Budget",
+      "items": [
+        "Default routing budget 10000 ms (routingTimeoutMs)",
+        "Dual-backend: Laya gets floor(remaining × ¾) — 7500 ms at defaults, reserving a quarter for Jev",
+        "Sole backend gets the full remaining budget",
+        "A sole-backend timeout also fails closed",
+        "Cancellation: SIGINT exits 130, SIGTERM exits 143"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Fail-closed",
+      "items": [
+        "No valid choice within budget → no worker, no retry",
+        "Rejection before classification emits no receipt",
+        "Exactly one turnhelm.receipt once classification starts"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Worker safety",
+      "items": [
+        "At most one Codex worker per run",
+        "Sandbox read-only unless --write",
+        "Child env strips credentials; TURNHELM_MANAGED_CHILD=1 blocks recursion"
+      ]
+    }
+  ]
+}
