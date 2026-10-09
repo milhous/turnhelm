@@ -203,6 +203,20 @@ closed: no Codex child, heuristic fallback, or bypass. Backend failover stays
 within the configured gates; classifier or model-access failure never triggers
 an unapproved model retry. Local Laya may require `LAYA_API_KEY`.
 
+## Route decision journal
+
+Every `run` that reaches classification appends one JSON line to
+`.turnhelm/routes.jsonl` in the project root before the worker starts,
+regardless of whether routing selected, failed, or was cancelled. Each line
+records the timestamp, the task's SHA-256 hash and byte length (never the task
+text), the routing status, attempts with per-backend outcomes and durations,
+and, for a selection, the backend, profile, model, effort, and the classifier's
+`confidence` when the backend reports one. The journal is evidence for
+reviewing routing decisions; it is written best-effort — an append failure is
+reported on stderr and never fails the run. A journal path that is not a
+regular file (for example a symlink or a FIFO) is refused and skipped rather
+than opened.
+
 ## Safety boundaries
 
 - **Read-only by default.** The Codex child receives `--sandbox read-only`

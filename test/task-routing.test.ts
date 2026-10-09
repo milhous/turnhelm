@@ -438,7 +438,7 @@ test("rejects invalid or inherited choices at the route level", async () => {
 
 test("accepts only own-property choice replies", async () => {
   for (const id of PROFILE_IDS) {
-    assert.equal(await call(decisionReply(id)), id);
+    assert.equal((await call(decisionReply(id))).profileId, id);
   }
 });
 
@@ -454,10 +454,10 @@ test("declared Laya truncation metadata must contain its own valid flags", async
 });
 
 test("a complete Laya usage report allows the full-task choice", async () => {
-  assert.equal(await call({
+  assert.equal((await call({
     answers: { route: { type: "choice", choice: "frontier" } },
     usage: { input_tokens: 1692, output_tokens: 0, state_tokens: 1543, state_tokens_dropped: 0, truncated: false, truncated_questions: [] }
-  }), "frontier");
+  })).profileId, "frontier");
 });
 
 test("the Laya request carries the task, model, six criteria and credentials", async () => {

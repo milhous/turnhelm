@@ -9,6 +9,7 @@ export type TaskDecision = Readonly<{
   profile: TaskProfile;
   attempts: readonly TaskAttempt[];
   routingMs: number;
+  confidence?: number;
 }>;
 
 export type RoutingResult =
@@ -53,7 +54,7 @@ export async function routeTask(
     attempts.push(attempt);
     const attemptStarted = performance.now();
     try {
-      const profileId = await requestTaskChoice(config, task, backend, options.env, signal, request);
+      const { profileId, confidence } = await requestTaskChoice(config, task, backend, options.env, signal, request);
       attempt.durationMs = Math.round(performance.now() - attemptStarted);
       if (caller?.aborted) {
         attempt.outcome = "cancelled";
@@ -64,7 +65,8 @@ export async function routeTask(
         continue;
       }
       const decision = deepFreeze({
-        backend, profileId, profile: config.profiles[profileId], attempts, routingMs: elapsed()
+        backend, profileId, profile: config.profiles[profileId], attempts, routingMs: elapsed(),
+        ...(confidence !== undefined ? { confidence } : {})
       });
       return { status: "selected", decision };
     } catch {

@@ -3,6 +3,7 @@ import { executeWorker, type WorkerResult } from "./codex.js";
 import { readProjectConfig } from "./config.js";
 import { doctorProject } from "./doctor.js";
 import { initProject } from "./init.js";
+import { appendRouteJournal } from "./journal.js";
 import { inspectCodex, inspectGit } from "./preflight.js";
 import { resolveProject } from "./project.js";
 import { routeTask } from "./route.js";
@@ -193,6 +194,9 @@ const runCommand = async (root: string, write: boolean, positionalTask: string |
     }
     // Classification starts here; exactly one receipt is emitted below.
     const routing = await routeTask(task, config, { env, signal: controller.signal });
+    // Evidence for routing decisions is journaled best-effort before the worker;
+    // a journaling failure never blocks the run itself.
+    await appendRouteJournal(root, task, routing, diagnostic);
     const attempts = routing.status === "selected" ? routing.decision.attempts : routing.attempts;
     const routingMs = routing.status === "selected" ? routing.decision.routingMs : routing.routingMs;
     const counts: Record<string, number> = { laya: 0, jev: 0 };

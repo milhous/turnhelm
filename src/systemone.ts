@@ -153,7 +153,9 @@ const ownObject = (value: unknown): Record<string, unknown> | undefined =>
     ? value as Record<string, unknown>
     : undefined;
 
-function validateChoice(reply: unknown, backend: TaskBackend): ProfileId {
+export type TaskChoice = Readonly<{ profileId: ProfileId; confidence?: number }>;
+
+function validateChoice(reply: unknown, backend: TaskBackend): TaskChoice {
   const envelope = ownObject(reply);
   if (!envelope || !Object.hasOwn(envelope, "answers")) throw new Error("classifier returned no route");
   const answers = ownObject(envelope.answers);
@@ -172,7 +174,12 @@ function validateChoice(reply: unknown, backend: TaskBackend): ProfileId {
       throw new Error("classifier returned truncated or invalid Laya usage");
     }
   }
-  return route.choice as ProfileId;
+  // Confidence is required by the hosted protocol and optional on a local backend;
+  // anything outside [0, 1] is treated as absent rather than trusted.
+  const confidence = route.confidence;
+  return typeof confidence === "number" && Number.isFinite(confidence) && confidence >= 0 && confidence <= 1
+    ? { profileId: route.choice as ProfileId, confidence }
+    : { profileId: route.choice as ProfileId };
 }
 
 export async function requestTaskChoice(
@@ -182,7 +189,7 @@ export async function requestTaskChoice(
   env: NodeJS.ProcessEnv,
   signal: AbortSignal,
   request: ChoiceRequest = directChoiceRequest
-): Promise<ProfileId> {
+): Promise<TaskChoice> {
   const url = backend === "jev"
     ? new URL("/v1/systemone", "https://api.typesafe.ai")
     : new URL("/v1/systemone", config.backends.laya.url);
