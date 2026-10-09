@@ -351,3 +351,22 @@ approval. Detailed, dated evidence and remaining limits are recorded in
 The [2026-10-05 design](docs/superpowers/specs/2026-10-05-turnhelm-task-entry-design.md)
 and [implementation plan](docs/superpowers/plans/2026-10-05-turnhelm-task-entry.md)
 are historical design records, not current invocation instructions.
+
+## Diagrams
+
+Interactive, evidence-pinned diagrams live under [`.archify/`](.archify/).
+GitHub Markdown cannot embed interactive HTML, so the static captures below
+link to the artifacts; open the HTML files locally (for example
+`open .archify/architecture-turnhelm-20261009-130339/turnhelm-architecture.html`)
+for the interactive versions with zoom, guided views, and source links.
+
+[![Architecture diagram](.archify/architecture-turnhelm-20261009-130339/visual-check/turnhelm-architecture.visual-check.1440x900.light.png)](.archify/architecture-turnhelm-20261009-130339/turnhelm-architecture.html)
+
+[Architecture](.archify/architecture-turnhelm-20261009-130339/turnhelm-architecture.html)
+— components, the host-loopback boundary, and trust gates.
+
+[![Routing workflow diagram](.archify/workflow-turnhelm-run-20261009-130339/visual-check/turnhelm-run-workflow.visual-check.1440x900.light.png)](.archify/workflow-turnhelm-run-20261009-130339/turnhelm-run-workflow.html)
+
+[Routing workflow](.archify/workflow-turnhelm-run-20261009-130339/turnhelm-run-workflow.html)
+— one `turnhelm run` from task submission to receipt, including rejection
+and fail-closed paths.
