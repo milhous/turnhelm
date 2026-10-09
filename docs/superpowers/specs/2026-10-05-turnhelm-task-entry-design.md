@@ -101,7 +101,7 @@ The starter template is:
 ```json
 {
   "version": 1,
-  "routingTimeoutMs": 4000,
+  "routingTimeoutMs": 10000,
   "backends": {
     "laya": { "enabled": true, "url": "http://127.0.0.1:8765" },
     "jev": { "enabled": false }
@@ -165,6 +165,9 @@ authority. Validate at the classifier boundary before constructing a decision.
 
 Apply these bounds:
 
+The dual-backend time allocation below was amended on 2026-10-09 after a
+same-task CPU measurement exceeded the original fixed one-second Laya cap.
+
 - Task text: at most 8192 UTF-8 bytes. Reject invalid UTF-8, NUL, and blank input.
   For deterministic continuation rejection, compare the whole trimmed input
   against `continue`, `go on`, `proceed`, `do the above`, `继续`, `接着做`,
@@ -177,7 +180,9 @@ Apply these bounds:
   responses without exposing their bodies.
 - One monotonic total deadline covers classification, response reading, and
   failover. With two backends, Laya receives at most
-  `min(1000 ms, floor(total budget / 4))`; Jev uses only the remaining budget.
+  `floor(remaining budget * 3 / 4)`; the final quarter is reserved for Jev,
+  which uses only the time still left on the shared deadline. An early Laya
+  failure leaves Jev more time; scheduling delays can consume that reserve.
   With one backend, it receives the total budget.
 - At most one application-level request per eligible backend. No parallel race,
   voting, repeated attempts, or extra model used for classification summaries.

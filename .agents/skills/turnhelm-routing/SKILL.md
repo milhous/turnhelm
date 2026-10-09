@@ -1,6 +1,6 @@
 ---
 name: turnhelm-routing
-description: Use when a Codex CLI or Claude Code agent needs Turnhelm project setup, readiness checks, or a separate model/effort-routed Codex child.
+description: Use when an agent needs to prepare or inspect a Turnhelm project, execute an authorized task in a separate model/effort-routed Codex child, or review Turnhelm route decision evidence.
 ---
 
 <!-- turnhelm-template v1 -->
@@ -64,12 +64,13 @@ classifier and child cannot see session context. Input is limited to
 8192 UTF-8 bytes; invalid/oversized input is rejected, never shortened.
 
 - Default sandbox is `read-only`. Add `--write` only after explicit approval
-  immediately before that run. Routing is not write authorization. Review
-  the resulting diff/tests and preserve unrelated changes.
-- Every run selects among `fast`, `balanced`, `deep`, `frontier`,
+  immediately before that run. Routing is not write authorization; `--write`
+  does not override host-protected paths or approval policy. Review the
+  resulting diff/tests and preserve unrelated changes.
+- Successful classification selects among `fast`, `balanced`, `deep`, `frontier`,
   `frontier_xhigh`, `frontier_max`. Maximum effort is an ordinary automatic
-  selection; no bypass, max flag, or extra stage exists. Failure means stop,
-  not an unapproved model retry.
+  selection; no bypass, max flag, or extra stage exists. A run launches at most
+  one worker. A failed run means stop, not an unapproved model retry.
 - Never run recursively when `TURNHELM_MANAGED_CHILD=1`.
 
 ## Backend and data boundaries
@@ -81,9 +82,11 @@ use. Do not enable gates or edit config without approval; keep write/hosted
 opt-ins out of reusable defaults. Laya may require `LAYA_API_KEY`.
 
 The full task goes to the classifier: remove secrets and consider residency,
-cost, and consent first. Keep keys out of prompts/logs/diffs/config. The child
-does not inherit `LAYA_API_KEY`, `TYPESAFE_API_KEY`,
-`TURNHELM_ALLOW_HOSTED_JEV`, or legacy `TURNHELM_CONFIG`.
+cost, and consent first. Keep keys out of prompts/logs/diffs/config. The child's
+initial environment omits `LAYA_API_KEY`, `TYPESAFE_API_KEY`,
+`TURNHELM_ALLOW_HOSTED_JEV`, and legacy `TURNHELM_CONFIG`. This is not filesystem
+or shell-startup isolation: a shell can reload host secrets. Do not read key
+values or change authentication/shell settings to make a check pass.
 
 ## Interpret results
 
@@ -92,25 +95,37 @@ are on stderr **once classification starts**. Input/config/preflight rejection
 has no receipt. Read the exit code and routing/worker statuses, not stderr
 presence or a selected profile alone.
 
+Every run that reaches classification appends one JSON evidence line to
+`.turnhelm/routes.jsonl` in the project root before the worker starts,
+whatever the outcome. It records the task's SHA-256 hash and byte length
+(never the task text), the routing status, per-backend attempts, and, on
+selection, the backend, profile, model, effort, and the classifier's
+`confidence` when the backend reports one. Journaling is best-effort: a
+missing, unwritable, or non-regular journal path (symlink, FIFO) is diagnosed
+and skipped; it never fails or blocks the run. Use it to review routing
+decisions after the fact.
+
 To validate routing, submit the complete current requirement once, with
 `--write` only for an explicitly approved edit; then review the actual receipt,
 worker exit, scoped diff and checks. No forced profile or preliminary worker
-is needed. Routing is sequential: Laya success means no Jev run request.
-An authorized `doctor --probe` checks each eligible classifier separately,
-not the worker. Health/probe success does not guarantee a real task meets the
-deadline; a timeout with `worker.status: "not-started"` is a failure, not
-successful delegation. Report it rather than silently changing gates/budget.
+is needed. Routing is sequential, with at most one attempt per eligible backend:
+Laya success means no Jev run request. When both backends are eligible, Laya
+receives about three quarters of the remaining deadline, reserving the
+remainder for authorized Jev; a sole backend receives all of it. A
+failed/timed-out Laya attempt can still succeed through authorized Jev within
+the shared deadline. If routing fails
+with `worker.status: "not-started"`, no delegation succeeded; report it rather
+than silently changing gates/budget.
+
+Offline `doctor` makes no requests. An authorized `doctor --probe` checks each
+eligible classifier separately, not the worker. The repository's
+`pnpm run test:live` can make up to 48 classifier requests and launches no worker; it is
+not a full-chain check. Health/probe success does not guarantee a real task
+meets the deadline. Receipt request counts record client attempts, not proof
+of server receipt, completed inference, or billing.
 
 Missing worker usage is `"unreported"`; `classifierUsage` is `"unreported"`
 and `wholeRunUsageScope` is `"unverified"`. Snapshots are not whole-task costs
 or savings. Offline doctor/help evidence does not prove runtime config-key
-semantics, model entitlement, or paid benefit.
-
-## Common mistakes
-
-| Mistake | Instead |
-| --- | --- |
-| Using a parent project's config | Select the intended root explicitly. |
-| Treating a read-only run/probe as offline | Authorize classifier requests separately. |
-| Guessing a model after failure | Stop and report the failure. |
-| Counting a receipt as success or total cost | Check statuses; keep usage scope unverified. |
+semantics, model entitlement, or paid benefit. A real worker using ChatGPT login
+is not API-key billing or invoice evidence.

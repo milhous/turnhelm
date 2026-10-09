@@ -15,16 +15,17 @@ responsible for its own authentication and provider access.
 | --- | --- | --- |
 | `turnhelm init [--dry-run]` | Install the managed skill, project config, and AGENTS block | No Codex child |
 | `turnhelm doctor [--json] [--probe]` | Report project, toolchain, config, and skill readiness | No Codex child |
-| `turnhelm run [--write] [--] ["<task>"]` | Classify once, then execute the task in a Codex child | `read-only`; `workspace-write` only with `--write` |
+| `turnhelm run [--write] [--] ["<task>"]` | Route the complete task, then start at most one Codex child | `read-only`; `workspace-write` only with `--write` |
 
 All three commands accept `--project <dir>` (relative to the current directory
 or absolute). Without it, the current directory is the project root; Turnhelm
 does not search parent directories for config or instructions.
 
 The task comes from one self-contained positional argument **or** stdin, not
-both (valid UTF-8, at most 8192 bytes; never truncated). Use `--` before a task
-starting with `--`; put all command options before the delimiter. The router
-and child do not inherit your current session's conversation.
+both (valid UTF-8, at most 8192 bytes; never truncated). Blank, NUL-containing,
+continuation-only and invalid/oversized input is rejected. Use `--` before a
+task starting with `--`; put all command options before the delimiter. The
+router and child do not inherit your current session's conversation.
 
 ## Quick start
 
@@ -41,6 +42,7 @@ turnhelm() { node "$TURNHELM_CLI" "$@"; }
 # Replace this with your target Git work tree (not the Turnhelm checkout).
 PROJECT=/absolute/path/to/your/project
 turnhelm init --project "$PROJECT" --dry-run
+# Obtain approval for the reported installation writes before applying them.
 turnhelm init --project "$PROJECT"
 
 # Offline readiness: may run local version/help checks, never inference.
@@ -80,9 +82,10 @@ evidence of successful routing or access to the selected Codex model.
 
 ## Start an existing local Laya
 
-Reuse an already healthy service; do not start a duplicate. If none is running,
-the following foreground reference is for an **already installed** Laya 0.3.22
-serve-capable virtual environment with cached `typed-decisions` weights:
+Reuse an already healthy service; do not start a duplicate. If none is running
+and startup is authorized, this foreground reference is for an **already
+installed** Laya 0.3.22 serve-capable virtual environment with cached
+`typed-decisions` weights:
 
 ```bash
 LAYA_PYTHON=/absolute/path/to/laya-venv/bin/python
@@ -112,8 +115,9 @@ classified within the routing deadline.
 
 ## Project configuration
 
-`.turnhelm/config.json` (version 1) is the only configuration surface. There
-is no global or home-directory config. Unknown keys are rejected.
+`.turnhelm/config.json` (version 1) is Turnhelm's only configuration file. There
+is no global or home-directory Turnhelm config; Codex manages its own settings
+and authentication separately. Unknown project config keys are rejected.
 
 ```json
 {
@@ -143,7 +147,7 @@ is no global or home-directory config. Unknown keys are rejected.
 
 ## Six profiles and automatic selection
 
-Classification always selects one of the six profiles; there is no bypass,
+Successful classification selects one of the six profiles; there is no bypass,
 no max-effort flag, and no extra classification stage. `frontier_max` is an
 ordinary selection outcome reached when the task genuinely needs maximum
 effort.
@@ -180,7 +184,11 @@ The required response shape is the nested choice answer:
 { "answers": { "route": { "type": "choice", "choice": "<profileId>" } } }
 ```
 
-`choice` must be one of the six own profile IDs; anything else fails the run.
+`choice` must be one of the six own profile IDs; anything else fails that
+backend attempt, with only the budgeted, authorized failover below available.
+The reply may also carry `confidence`, a number in `[0, 1]`; Turnhelm validates
+that range, records the value in the route journal, and never uses it to gate
+selection.
 When Laya returns `usage`, it must report `truncated: false` and
 `state_tokens_dropped: 0`; otherwise that attempt fails. Absent usage does not
 prove the classifier consumed the full task.
@@ -189,9 +197,13 @@ prove the classifier consumed the full task.
 
 Routing is sequential, not parallel. Local Laya is tried first when
 `backends.laya.enabled` is true; a successful Laya choice means no Jev request.
-When **both** backends are eligible, Laya receives `min(1000, floor(routingTimeoutMs / 4))`
-of the routing budget so a hosted attempt can still run; a sole eligible
-backend receives the total remaining budget. Hosted Jev is attempted only
+When **both** backends are eligible, Laya receives `floor(remainingBudgetMs * 3 / 4)`:
+approximately 7500ms of the default 10000ms total budget, reserving the other
+quarter for authorized Jev failover. This avoids a fixed one-second cutoff for
+CPU inference. Jev receives only the time left on the shared deadline; an early
+Laya failure leaves it more time, while scheduling delays can leave it less.
+A sole eligible backend receives the total remaining budget. These allocations
+are engineering limits, not latency guarantees. Hosted Jev is attempted only
 when **all** of the following hold: `backends.jev.enabled` is true in the
 project config, `TURNHELM_ALLOW_HOSTED_JEV=1` is present in the environment,
 and `TYPESAFE_API_KEY` is nonblank. The config and environment gates require
@@ -221,15 +233,21 @@ than opened.
 
 - **Read-only by default.** The Codex child receives `--sandbox read-only`
   unless `--write` was given explicitly on the same `run` invocation.
+  `--write` does not override host sandbox restrictions on protected paths.
 - **No recursion.** Turnhelm marks its Codex children with
   `TURNHELM_MANAGED_CHILD=1`; `run` inside such a session is refused.
-- **Secrets are stripped from the child.** `LAYA_API_KEY`,
+- **Initial process environment only.** `LAYA_API_KEY`,
   `TYPESAFE_API_KEY`, `TURNHELM_ALLOW_HOSTED_JEV`, and `TURNHELM_CONFIG`
-  never reach the Codex child environment. Keep keys out of tasks, logs,
-  diffs, and committed config.
+  are removed from the environment passed when spawning the Codex worker.
+  This is not host filesystem secret isolation: a worker's later shell can
+  reload keys from startup files. Existing validation observed `.zshenv`
+  reintroducing the Jev key. Keep secrets out of tasks, logs, diffs and config;
+  do not read key values or change host authentication/startup files to make
+  a check pass.
 - **Bounded child output.** Raw worker stderr and arbitrary error text never
   cross the diagnostic boundary; the parent prints fixed-category lines and
-  the structured receipt only.
+  the structured receipt on stderr. Worker messages go to stdout; this is
+  not a general-purpose redactor for secrets in those messages.
 - Remove secrets and sensitive data from a task before routing; the full
   task text is sent to the configured classifier.
 - **Cancellation.** `run` and `doctor` handle SIGINT/SIGTERM, abort owned work,
@@ -237,14 +255,16 @@ than opened.
   cancellation or task/config/preflight rejection emits no run receipt. Once
   classification starts, `run` emits exactly one JSON receipt on stderr at the
   end, including routing failure/cancellation and the worker outcome.
+  Client cancellation does not prove backend inference has stopped.
 
 ## Usage evidence is honest, not authoritative
 
 - When the Codex child reports no usage snapshot, the receipt says
   `usage: "unreported"` — never zero and never omitted.
-- Whole-run usage scope is `"unverified"`: client-side usage aggregation is
-  not confirmed, so receipts report snapshots, not a total task cost or a
-  saving percentage.
+- `classifierUsage` is `"unreported"` and `wholeRunUsageScope` is
+  `"unverified"`: receipts report worker snapshots, not a whole-run token
+  total, bill or saving percentage. The recorded real runs used ChatGPT
+  login; that is not evidence of API-key metered charges.
 - Codex client config-key semantics (for example `agents.enabled`) are
   **unverified** from `--help` evidence alone; doctor reports this
   explicitly instead of claiming a pass.
@@ -264,9 +284,10 @@ turnhelm run --project "$PROJECT" --write < "$TASK_FILE"
 
 Read the exit code and the receipt's `routing`, `selection`, and `worker`
 statuses, then review the scoped diff and tests. A selected model is not
-acceptance of its output. If classification times out, no worker starts;
-report the failure instead of silently increasing the budget or retrying a
-different model/backend.
+acceptance of its output. If no valid choice is obtained within the total
+routing budget, no worker starts; a single Laya timeout can still be followed
+by an authorized Jev success. Report routing/worker failure instead of silently
+increasing the budget or retrying a different model/backend.
 
 To exercise both eligible classifiers, obtain separate request/hosted consent
 before `turnhelm doctor --probe --json --project "$PROJECT"`. It sends one
@@ -274,13 +295,31 @@ synthetic request per eligible backend but no worker. Both probe results plus
 one successful real task prove only those observed paths, not general quality,
 all six model/effort combinations, whole-task cost, or savings.
 
+These checks have different execution and authorization scopes:
+
+| Check | Classifier requests | Actual Turnhelm worker |
+| --- | --- | --- |
+| Plain `doctor` | None; offline version/help/config checks | None |
+| `doctor --probe` | One synthetic request per eligible backend, at most two | None |
+| Normal `run` | Full real task; at most one attempt per eligible backend, sequentially | At most one, after selection |
+| `pnpm run test:live` | Up to 48 (six labelled prompts × four repeats × two isolated backends) | None |
+
+`test:live` is a separately authorized real-classifier test, not part of the
+offline suite and not a worker/model-access test. Do not use it, help/health,
+or a short `1+1` smoke prompt as acceptance of the actual documentation or
+implementation task. Receipt request counts are client attempts, not proof
+of server receipt or billed requests; generic tool-progress lines are not a
+count of the worker's internal calls.
+
 ## Agent skills (Codex CLI + Claude Code)
 
 The canonical shared skill is
 `.agents/skills/turnhelm-routing/SKILL.md`; `turnhelm init` installs it into
-the project and the package includes that same file. Maintain this single
-shared source, not a separate Claude copy. Codex CLI and Claude Code use the
-same instructions:
+the project and the package includes that same file. In this source checkout,
+`.claude/skills/turnhelm-routing` is a symlink to the shared directory; preserve
+it, not a separate Claude copy. `init` refuses differing installed skill bytes,
+so updating the source template does not silently migrate existing consumers.
+Codex CLI and Claude Code use the same instructions:
 one self-contained prompt, read-only default, explicit `--write`, automatic
 `frontier_max` selection, and no unapproved model retry after failure.
 
@@ -298,11 +337,16 @@ env -u TYPESAFE_API_KEY -u LAYA_API_KEY -u TURNHELM_ALLOW_HOSTED_JEV pnpm run te
 pnpm audit --audit-level high
 ```
 
-Compatibility evidence: Codex CLI 0.160.0 (official native binary:
+The minimum Codex contract remains **0.160.0**. Compatibility evidence includes
+0.160.0 (official native binary:
 `--version` exit 0, `exec --help` advertising `--json`, `--ephemeral`,
-`--sandbox`, and stdin) and local 0.160.1. Functional delivery does not
-authorize a benefit trial; any comparison against a fixed baseline requires
-separate owner approval. Current task-entry verification is recorded in
+`--sandbox`, and stdin), local 0.160.1, and actual **0.161.0** use in the
+post-merge Laya → Codex and hosted Jev → Codex runs. Both returned the same
+eight-case coupon oracle correctly with CLI/worker exit 0, naturally selecting
+different profiles. These are observed paths, not six-profile access,
+classification-quality or billing guarantees. Functional delivery does not
+authorize a benefit trial; a fixed-baseline comparison needs separate owner
+approval. Detailed, dated evidence and remaining limits are recorded in
 [`docs/validation/2026-10-08-turnhelm-task-entry.md`](docs/validation/2026-10-08-turnhelm-task-entry.md).
 The [2026-10-05 design](docs/superpowers/specs/2026-10-05-turnhelm-task-entry-design.md)
 and [implementation plan](docs/superpowers/plans/2026-10-05-turnhelm-task-entry.md)

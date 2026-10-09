@@ -1,38 +1,43 @@
-# Turnhelm task-entry 验证记录
+# Turnhelm task-entry validation record
 
-运行基线：合并后的 `main`，`053d42d`（PR #1）。本记录区分离线契约、
-真实调用的具体路径证据，以及仍未验证的质量、权限和计费语义。
+Run baseline: merged `main`, `053d42d` (PR #1). This record separates offline
+contracts, path-specific evidence from real invocations, and quality,
+permission, and billing semantics that remain unverified.
 
-- 使用说明：[README](../../README.md)。
-- 已批准的历史设计：[task-entry spec](../superpowers/specs/2026-10-05-turnhelm-task-entry-design.md)。
-- 已完成的执行计划：[七任务计划](../superpowers/plans/2026-10-05-turnhelm-task-entry.md)。
-- 打包及 `init` 共用的规范指令：[routing skill](../../.agents/skills/turnhelm-routing/SKILL.md)。
+- Usage instructions: [README](../../README.md).
+- Approved historical design: [task-entry spec](../superpowers/specs/2026-10-05-turnhelm-task-entry-design.md).
+- Completed execution plan: [seven-task plan](../superpowers/plans/2026-10-05-turnhelm-task-entry.md).
+- Canonical instructions shared by packaging and `init`: [routing skill](../../.agents/skills/turnhelm-routing/SKILL.md).
 
-## 已保留的离线验收证据
+## Retained offline acceptance evidence
 
-下表保留此前验收结果，不表示本次文档 worker 重新执行了覆盖率、审计或
-独立评审。合并基线的离线 CI 已通过。
+The table below retains earlier acceptance results; it does not mean this
+documentation worker re-ran coverage, audits, or independent review. The
+merged baseline's offline CI passed.
 
-| 检查 | 证据及边界 |
+| Check | Evidence and boundaries |
 | --- | --- |
-| 项目配置及任务输入 | 六个 profile ID、v1 配置快照、严格字段校验、8192 UTF-8 byte 输入及取消。 |
-| 分类与 direct transport | 有界响应、共享 deadline、Laya 优先、Jev 三重 eligibility gate、取消不 failover；分类失败不启动 worker。 |
-| 单 worker 生命周期 | 明确 argv/environment/sandbox、JSONL 事件、粘滞失败、背压、部分 usage、owned group 终止与 sink 清理。 |
-| `init` / offline `doctor` | 包相对模板；dry-run、幂等、冲突/竞态保护；独立只读检查；doctor 信号取消后的 inspection/probe 清理。 |
-| CLI / receipt | 当前目录或显式 `--project`，无父配置发现；递归拒绝；分类开始后恰好一份回执，之前的拒绝无回执；SIGINT 130 / SIGTERM 143。 |
-| 实际打包安装 | 独立、带空格的 Git consumer 中安装真实 tarball；18 个包条目、13 次 installed-bin 调用；双 Node；禁止 checkout 读取和 HTTP 请求，零 worker。 |
-| 全量测试 | 2026-10-08 新分支 Node 26.5.0 基线及先前文档修改后各 317/317，失败、取消、跳过均为 0；此前 Node 22.8.0 的 317/317 为历史兼容证据。 |
-| 覆盖率 | 2026-10-07：lines 95.82%、branches 89.52%、functions 95.58%；2026-10-08 此前复核：95.82% / 89.41% / 95.58%，各项 >=80%。 |
-| 依赖审计 | 2026-10-07 及 2026-10-08 此前 `pnpm audit --audit-level high` 通过，无已知漏洞。 |
-| 最低 CLI 兼容性 | 实际官方 Codex 0.160.0 原生二进制的完整性、version/help 及本地 inspect 通过；本机 0.160.1 同样通过。只证明版本/flag 证据。 |
+| Project config and task input | Six profile IDs, v1 config snapshot, strict field validation, 8192 UTF-8 byte input, and cancellation. |
+| Classification and direct transport | Bounded responses, shared deadline, Laya first, the triple Jev eligibility gate, cancellation never fails over; classification failure starts no worker. |
+| Single-worker lifecycle | Explicit argv/environment/sandbox, JSONL events, sticky failure, backpressure, partial usage, owned-group termination and sink cleanup. |
+| `init` / offline `doctor` | Package-relative templates; dry-run, idempotence, conflict/race protection; independent read-only checks; doctor's inspection/probe cleanup after signal cancellation. |
+| CLI / receipt | Current directory or explicit `--project`, no parent-config discovery; recursion refused; exactly one receipt once classification starts, none for earlier rejections; SIGINT 130 / SIGTERM 143. |
+| Real packaged installation | Real tarball installed in an independent Git consumer with spaces in its path; 18 package entries, 13 installed-bin invocations; dual Node; checkout reads and HTTP requests forbidden, zero workers. |
+| Full test suite | 2026-10-08: 317/317 on the new branch under Node 26.5.0 and again after the documentation changes below, with 0 failures/cancellations/skips; the earlier 317/317 under Node 22.8.0 is historical compatibility evidence. |
+| Coverage | 2026-10-07: lines 95.82%, branches 89.52%, functions 95.58%; 2026-10-08 earlier recheck: 95.82% / 89.41% / 95.58%, each >=80%. |
+| Dependency audit | `pnpm audit --audit-level high` passed on 2026-10-07 and again earlier on 2026-10-08, no known vulnerabilities. |
+| Minimum CLI compatibility | Integrity, version/help, and local inspect passed against the actual official Codex 0.160.0 native binary; local 0.160.1 also passed. Proves version/flag evidence only. |
 
-Node 22.8.0 是最低支持版本，26.5.0 是验收环境；不是要求切换用户的
-默认 Node。打包检查不是 npm registry 发布（`package.json` 仍为 private）。
-不保留旧的全局配置、route bypass 或兼容 adapter。
+Node 22.8.0 is the minimum supported version and 26.5.0 the acceptance
+environment; this is not a request to switch the user's default Node. The
+packaging check is not an npm registry publish (`package.json` remains
+private). No legacy global config, route bypass, or compatibility adapter is
+retained.
 
-## 可重复的离线验证
+## Repeatable offline verification
 
-从 source checkout 运行，不能把 `pnpm build` 误认为安装了全局 bin：
+Run from the source checkout; do not mistake `pnpm build` for installing a
+global bin:
 
 ```bash
 pnpm install --frozen-lockfile --ignore-scripts
@@ -41,206 +46,496 @@ env -u TYPESAFE_API_KEY -u LAYA_API_KEY -u TURNHELM_ALLOW_HOSTED_JEV pnpm run te
 pnpm audit --audit-level high
 ```
 
-`test/live.integration.ts` 只参与编译，不在上述离线测试中执行。
-不要为了重现本记录擅自执行 `pnpm run test:live`、真实 worker、backend
-probe 或付费收益试验。`doctor --probe` 也会向每个 eligible backend 各发
-一次合成分类请求；它不等同于普通离线 doctor。
+`test/live.integration.ts` only participates in compilation and is not
+executed by the offline tests above. Do not run `pnpm run test:live`, a real
+worker, backend probes, or paid benefit trials on your own initiative to
+reproduce this record. `doctor --probe` also sends one synthetic
+classification request per eligible backend; it is not equivalent to plain
+offline doctor.
 
-## 2026-10-08 已授权的真实调用
+## 2026-10-08 authorized real invocations
 
-以下均使用实际服务和生产 CLI，无 mock 或 harness 自动重试；仅证明
-列出的路径，不是六档模型资格测试、分类质量基准或收益对照试验。
+All of the following used real services and the production CLI, with no mocks
+or harness-driven retries; they prove only the listed paths, not six-profile
+model entitlement, classification-quality benchmarks, or benefit comparisons.
 
-| 场景 | 实际结果及边界 |
+| Scenario | Actual result and boundaries |
 | --- | --- |
-| Jev 单后端 | 分类 707ms，选择 `fast / gpt-6-luna / low`；真实只读 worker 47013ms、exit 0、算术答案正确。 |
-| Laya 不可用时的备用路径 | Laya 失败 3ms → Jev 成功 921ms，共 924ms < 4000ms；真实只读 worker 36714ms、exit 0、答案正确。这是启动本地服务前的历史场景。 |
-| 两个后端的真实 probe | `doctor --probe` 对 Laya/Jev 各请求一次，均返回有效 choice；整个命令 1299ms，未记录单后端延迟，零 worker。 |
-| Laya 成功优先路径 | 两个后端 eligible；实际 `run` 在 538ms 内经 Laya 选择 `fast / gpt-6-luna / low`；真实只读 worker 42834ms、exit 0、答案正确。该 run 请求数 Laya 1 / Jev 0。 |
+| Jev sole backend | Classification 707ms, selected `fast / gpt-6-luna / low`; real read-only worker 47013ms, exit 0, arithmetic answer correct. |
+| Fallback path with Laya unavailable | Laya failed in 3ms → Jev succeeded in 921ms, 924ms total < 4000ms; real read-only worker 36714ms, exit 0, answer correct. Historical scenario from before the local service was started. |
+| Real probe of both backends | `doctor --probe` made one request each to Laya/Jev, both returned a valid choice; whole command 1299ms, per-backend latency not recorded, zero workers. |
+| Laya-success first path | Both backends eligible; an actual `run` selected `fast / gpt-6-luna / low` via Laya in 538ms; real read-only worker 42834ms, exit 0, answer correct. That run's request count was Laya 1 / Jev 0. |
 
-最后两项属于同一次验证范围：合计 Laya 2 / Jev 1 分类请求、一个真实
-worker。不是并行双分类，也不是该 worker 经两个后端各执行一次。
-临时 consumer 未被只读 worker 改动，随后清理；main 和全局 Codex 配置
-保持不变。既有本地 Laya 保持健康、仅监听 `127.0.0.1:8765`。
+The last two items belong to the same verification scope: Laya 2 / Jev 1
+classification requests and one real worker in total. Not a parallel dual
+classification, and not one worker executed once per backend. The temporary
+consumer was left unmodified by the read-only worker and cleaned up
+afterwards; main and the global Codex config stayed unchanged. The existing
+local Laya stayed healthy, listening only on `127.0.0.1:8765`.
 
-Laya 0.3.22 使用已安装环境及已缓存 `typed-decisions`、CPU/有界线程，
-运行于当前登录会话的 launchd job；未安装登录/重启自启动，未扩大隐私
-权限或重新下载模型。离线加载和健康证据不等同于真实任务路由成功。
+Laya 0.3.22 used the installed environment and cached `typed-decisions`,
+CPU/bounded threads, running as a launchd job in the current login session;
+no login/reboot autostart was installed, no privacy permissions widened, no
+models re-downloaded. Offline loading and health evidence do not equal
+successful routing of a real task.
 
-## 此前真实文档需求的路由失败
+## Earlier routing failure of the real documentation requirement
 
-此前在新分支 `milhous/docs-routing-validation` 上，将 README、skill 和
-过时文档清理需求连同完整执行边界作为一个 6076 UTF-8 byte 任务，
-交给实际生产 `turnhelm run --write`；没有预选模型、缩短任务或改变
-当时默认六档配置及 4000ms deadline。该次仅允许本地 Laya，未启用 Jev。
+Earlier, on new branch `milhous/docs-routing-validation`, the README, skill,
+and stale-document cleanup requirement with its complete execution boundaries
+was submitted as one 6076 UTF-8 byte task to the actual production
+`turnhelm run --write`; no preselected model, no shortened task, and no
+change to the then-default six-profile config or the 4000ms deadline. Only
+local Laya was allowed; Jev was not enabled.
 
-- 结果：**失败**。Laya 请求尝试 1 次，4002ms 超时；routing 总计
-  4003ms，CLI exit 1，恰好一份 receipt。
-- `worker.status: "not-started"`、worker usage `"unreported"`；没有选择
-  profile，没有启动付费 Codex worker，也没有由该 run 写入文档。
-- 临时项目配置按内容校验后移除；现有 Laya 仍健康，无服务重启。
-- 未自动延长预算、启用 hosted gate、替换模型或重试。健康检查及此前
-  短任务成功不能保证实际需求在默认期限内成功；当次记录未确定超时
-  原因，不能归因于模型权限或据此声称分类质量不佳。
+- Result: **failed**. One Laya request attempt, 4002ms timeout; routing
+  totaled 4003ms, CLI exit 1, exactly one receipt.
+- `worker.status: "not-started"`, worker usage `"unreported"`; no profile
+  selected, no paid Codex worker started, and no documentation written by
+  that run.
+- The temporary project config was removed after content verification; the
+  existing Laya stayed healthy, no service restart.
+- No automatic budget extension, hosted-gate enabling, model substitution, or
+  retry. Health checks and earlier short-task successes do not guarantee a
+  real requirement succeeds within the default deadline; that record did not
+  determine the timeout cause and must not be attributed to model
+  entitlement or cited as evidence of poor classification quality.
 
-文档维护由父会话接续；不能把后续文档检查通过记作此次路由成功。
-任何追加 hosted 请求/重试都需要本次授权，不能借用旧试验的许可。
+Documentation maintenance was continued by the parent session; later
+documentation checks passing must not be recorded as routing success for
+that attempt. Any additional hosted requests/retries required their own
+authorization; earlier trials' permission was not carried over.
 
-## 后续授权的根因修复与真实需求复验
+## Later authorized root-cause fix and real-requirement reverification
 
-- 同一完整请求的受控诊断：上传约 4ms，Laya 服务端推理
-  5473.54ms，超过旧的 4000ms 预算；另一次同请求仅 653ms。
-  延迟确有波动，尚未证明具体的冷启动、负载或缓存原因。
-- 更重要的是，未指定 token 窗口时，checkpoint 的 1024-token
-  默认值丢掉了 1543 个 state tokens 中的 668 个，`truncated: true`。
-  仅延长超时不能修复基于不完整需求作判断的问题。
-- 先写回归测试，观察旧实现的预算、窗口及截断校验失败，再修复共享
-  分类边界：Laya 显式带 `max_len: 8192`；若声明 usage，其截断标记
-  必须是自身字段 `truncated: false`、`state_tokens_dropped: 0`。
-  Jev envelope、eligibility、failover share 和取消规则未改。
-  模板预算改为 10000ms；既有项目配置不自动改写，预算也不是延迟保证。
-- 修复后的生产路由边界使用原始 6076-byte 任务和实际 direct transport：
-  1646ms 选择 `frontier / gpt-6-astra / high`；后端报告 input 1692
-  tokens、state 1543、dropped 0、`truncated: false`。没有 worker 或 mock。
-- 随后实际生产 CLI 使用同一原始任务及当前默认配置：Laya 尝试 1602ms，
-  routing 1603ms，自动选择上述 profile；一个 `workspace-write` Codex
-  worker 完成 README/验证记录对齐，276592ms、exit 0；CLI exit 0、
-  恰好一份 receipt，run 请求数 Laya 1 / Jev 0。
-- 本次排查及复验合计 6 次真实本地分类请求（4 次诊断、1 次路由边界
-  复验、1 次 CLI run）、一个真实 Codex worker；没有 hosted 请求、
-  自动重试、预选模型、服务重启或全局配置修改。临时配置校验后移除。
+- Controlled diagnostics on the same complete request: ~4ms upload, Laya
+  server-side inference 5473.54ms, exceeding the old 4000ms budget; another
+  invocation of the same request took only 653ms. Latency genuinely varied;
+  the specific cold-start, load, or caching cause was not proven.
+- More importantly, without an explicit token window the checkpoint's
+  1024-token default dropped 668 of 1543 state tokens, `truncated: true`.
+  Extending the timeout alone could not fix judgments made on an incomplete
+  requirement.
+- Regression tests were written first, the old implementation's budget,
+  window, and truncation-validation failures observed, then the shared
+  classification boundary was fixed: Laya explicitly sends `max_len: 8192`;
+  when usage is declared, its truncation flags must be own fields
+  `truncated: false` and `state_tokens_dropped: 0`. The Jev envelope,
+  eligibility, failover share, and cancellation rules were unchanged. The
+  template budget became 10000ms; existing project configs are not rewritten
+  automatically, and the budget is not a latency guarantee.
+- The fixed production routing boundary, using the original 6076-byte task
+  and the actual direct transport: selected
+  `frontier / gpt-6-astra / high` in 1646ms; the backend reported input 1692
+  tokens, state 1543, dropped 0, `truncated: false`. No worker or mock.
+- The actual production CLI then used the same original task and the current
+  default config: Laya attempt 1602ms, routing 1603ms, automatically
+  selecting the profile above; one `workspace-write` Codex worker completed
+  the README/validation-record alignment in 276592ms, exit 0; CLI exit 0,
+  exactly one receipt, run request counts Laya 1 / Jev 0.
+- This investigation and reverification totaled 6 real local classification
+  requests (4 diagnostics, 1 routing-boundary reverification, 1 CLI run) and
+  one real Codex worker; no hosted requests, automatic retries, preselected
+  models, service restarts, or global config modifications. The temporary
+  config was removed after verification.
 
-worker 内全量测试未通过：其报告 250 通过、23 失败，包括 21 项 loopback
-`EPERM`、CLI 测试 Node 原生断言崩溃及一个权限竞态用例；相关离线测试
-102/102 通过。父会话独立复现 `mode edit between inspection and apply is
-refused as a race` 在继承 `umask 077` 时的失败：fixture 初始已为 0600，
-再 chmod 0600 没有产生模式变化。未扩大 worker 权限、修改无关用例或
-为此追加付费 worker；这不等于 worker 内全量测试通过。
+The full test suite inside the worker did not pass: it reported 250 passing,
+23 failing, including 21 loopback `EPERM`, a Node native assertion crash in
+the CLI tests, and one permission-race case; the related offline tests
+passed 102/102. The parent session independently reproduced the
+`mode edit between inspection and apply is refused as a race` failure when
+inheriting `umask 077`: the fixture was already 0600 at creation, so a
+further chmod 0600 produced no mode change. Worker permissions were not
+widened, unrelated cases not modified, and no additional paid worker added;
+this does not equal the full suite passing inside the worker.
 
-worker 退出后，父会话在普通 shell 环境重新执行全量测试及全量覆盖率，
-均为 321/321、零失败/取消/跳过；最新覆盖率 lines 95.84%、branches
-89.63%、functions 95.58%，均 >=80%。依赖审计无已知漏洞；skill 结构校验、
-9 个 Bash/zsh 代码块、8 个本地链接及 README/配置模板一致性检查通过。
-现有 skill 已含所需启动指引，worker 的 `.agents` 写入受只读策略限制，
-没有为此扩大权限或覆盖已通过场景验收的 skill。
+After the worker exited, the parent session re-ran the full tests and full
+coverage in a normal shell environment: 321/321 both, zero
+failures/cancellations/skips; latest coverage lines 95.84%, branches 89.63%,
+functions 95.58%, all >=80%. The dependency audit found no known
+vulnerabilities; skill structure validation, 9 Bash/zsh code blocks, 8 local
+links, and README/config-template consistency checks passed. The existing
+skill already contained the needed startup guidance; the worker's `.agents`
+writes were blocked by the read-only policy, and no permissions were widened
+nor the skill — already accepted for these scenarios — overwritten for this.
 
-本次产品修复仅涉及 `src/systemone.ts`、`assets/config.json` 和
-`test/task-routing.test.ts`，并对齐 README/本记录；保留此前文档清理，
-当前 10-05 plan/spec、skill/UI 元数据、六档绑定、全局配置及 Laya job 未变。
+This product fix touched only `src/systemone.ts`, `assets/config.json`, and
+`test/task-routing.test.ts`, plus aligning the README/this record; the
+earlier documentation cleanup is retained, and the current 10-05 plan/spec,
+skill/UI metadata, six-profile bindings, global config, and Laya job are
+unchanged.
 
-receipt 仍报告 `classifierUsage: "unreported"` 和
-`wholeRunUsageScope: "unverified"`；上面的 classifier token 数据来自
-独立的真实路由边界复验，不是 CLI receipt 的 usage 或 whole-run 费用。
+The receipt still reports `classifierUsage: "unreported"` and
+`wholeRunUsageScope: "unverified"`; the classifier token data above came
+from the separate real routing-boundary reverification, not from the CLI
+receipt's usage or whole-run costs.
 
-## 本轮动态路由验收：真实路径与剩余缺口
+## This round's dynamic-routing acceptance: real paths and remaining gaps
 
-用户授权按正常使用完整验证，意外失败最多追加三次重试。本轮只在独立
-临时 Git consumer 中使用当前生产 `init`、`doctor`、`run`、实际 Laya/Jev
-及已安装 Codex 0.160.1；没有强制 profile、伪造分类答案或用内部 worker
-接口冒充动态路由。预期拒绝、超时及取消按正确行为计为通过，不付费重试。
+The user authorized full verification as in normal use, with at most three
+additional retries for unexpected failures. This round used the current
+production `init`, `doctor`, and `run` only in an independent temporary Git
+consumer, with the actual Laya/Jev and installed Codex 0.160.1; no forced
+profiles, fabricated classification answers, or internal worker interfaces
+impersonating dynamic routing. Expected rejections, timeouts, and
+cancellations count as passes with correct behavior, not paid retries.
 
-共记录 **38 个验收结果：34 通过、4 失败**；六个有用任务加三次授权重试，
-共 **9 个实际 Codex worker**，均 completed、worker/CLI exit 0。
-worker 完成不等于全部验收条件通过：四个失败结果均保留，未被后续成功覆盖。
+**38 acceptance results were recorded: 34 passed, 4 failed**; six useful
+tasks plus three authorized retries totaled **9 actual Codex workers**, all
+completed with worker/CLI exit 0. Worker completion does not mean all
+acceptance conditions passed: all four failed results are retained and were
+not overwritten by later successes.
 
-| 真实场景 | 结果及证据边界 |
+| Real scenario | Result and evidence boundaries |
 | --- | --- |
-| 安装、离线检查及分类前拒绝 | 26 项通过：dry-run/幂等/保留 owner 文本及有效自定义配置、offline doctor、UTF-8/字节边界/非法参数、无父配置发现、递归拒绝、Jev gates、Git 前置及 stdin SIGINT/SIGTERM。零分类、零 worker。 |
-| 实际 Laya 超时及取消 | 100ms 本地预算产生 timeout；已建立实际 Laya TCP 连接后 SIGINT 产生 cancelled/exit 130。各一份 receipt、零 worker、零 Jev；客户端取消不证明服务端推理已经结束。 |
-| 双后端本地成功优先、只读 stdin | Laya 340ms → `balanced / gpt-6.1-sol / medium`；worker 69534ms，答案正确、文件字节未变，Jev 请求数为 0。 |
-| Jev 单后端区间合并实现、写权限 | 同一完整任务初次及三次重试，自然选择依次 fast/balanced/fast/balanced；父级不可变测试每次均 12/12 通过，仅允许的产物变化。但额外 shell 环境检查全部失败，详见下文。 |
-| Laya 单后端异步账本实现、写权限 | routing 1657ms → `frontier / gpt-6-astra / high`；worker 120767ms；父级不可变测试 8/8 通过，仅 queue/ledger 两个实现文件变化。 |
-| 连接失败后的 hosted fallback、只读审计 | 临时配置指向确认未监听的 loopback 端口；Laya failed 3ms → Jev success 677ms，routing 680ms；`frontier_xhigh / gpt-6-astra / xhigh`，worker 345705ms、独立契约核对通过、零文件变化。未停止用户 Laya。 |
-| 实际本地 worker 控制边界审计 | Laya 984ms → frontier/high，worker 369819ms；独立契约核对通过、零文件变化，发现下述两处真实收尾缺陷。 |
-| 完整当前验收需求、双后端只读报告 | 8014 UTF-8 bytes，未缩短任务；Laya timeout 1002ms → Jev success 693ms，routing 1695ms；frontier_xhigh/xhigh，worker 676588ms。报告及文件不变由父级核对；该源码快照在下述 worker 修复之前，不是修复后 live 证明。 |
-| 实际双后端 doctor probe | Laya/Jev 各一个合成请求，均通过，零 worker；不作为有用任务或模型访问证明。 |
+| Installation, offline checks, and pre-classification rejections | 26 passes: dry-run/idempotence/owner-text preservation and valid custom config, offline doctor, UTF-8/byte boundaries/invalid arguments, no parent-config discovery, recursion refusal, Jev gates, Git precondition, and stdin SIGINT/SIGTERM. Zero classifications, zero workers. |
+| Real Laya timeout and cancellation | A 100ms local budget produced a timeout; SIGINT after a real Laya TCP connection was established produced cancelled/exit 130. One receipt each, zero workers, zero Jev; client cancellation does not prove server-side inference stopped. |
+| Dual-backend local-success-first, read-only stdin | Laya 340ms → `balanced / gpt-6.1-sol / medium`; worker 69534ms, answer correct, file bytes unchanged, Jev request count 0. |
+| Jev sole-backend interval-merge implementation, write permission | Same complete task on the first attempt and three retries, naturally selecting fast/balanced/fast/balanced in turn; the parent's immutable tests passed 12/12 each time, with only the allowed artifact changes. But the additional shell-environment checks all failed; see below. |
+| Laya sole-backend async-ledger implementation, write permission | routing 1657ms → `frontier / gpt-6-astra / high`; worker 120767ms; parent's immutable tests 8/8, only the two queue/ledger implementation files changed. |
+| Hosted fallback after connection failure, read-only audit | Temporary config pointed at a confirmed-unlistened loopback port; Laya failed 3ms → Jev succeeded 677ms, routing 680ms; `frontier_xhigh / gpt-6-astra / xhigh`, worker 345705ms, independent contract check passed, zero file changes. The user's Laya was not stopped. |
+| Real local worker control-boundary audit | Laya 984ms → frontier/high, worker 369819ms; independent contract check passed, zero file changes, and the two real teardown defects below were found. |
+| Complete current acceptance requirement, dual-backend read-only report | 8014 UTF-8 bytes, task not shortened; Laya timeout 1002ms → Jev success 693ms, routing 1695ms; frontier_xhigh/xhigh, worker 676588ms. Report and file immutability verified by the parent; that source snapshot predates the worker fixes below and is not a post-fix live proof. |
+| Real dual-backend doctor probe | One synthetic request each to Laya/Jev, both passed, zero workers; not evidence of a useful task or model access. |
 
-本轮合计 Jev **7 次实际请求**（run 6、probe 1）；Laya **8 次客户端尝试**
-（run 7、probe 1），其中一次为上述未监听端口连接失败，不能计作服务
-实际接收了请求。健康 GET 不计分类。没有为补齐档位而重试有效选择。
-实际 completed 回执自然覆盖 fast、balanced、frontier、frontier_xhigh；
-**deep 和 frontier_max 的实际访问仍未验证**。
+This round totaled **7 actual Jev requests** (6 run, 1 probe) and **8 Laya
+client attempts** (7 run, 1 probe), one of which was the connection failure
+to the unlistened port above and must not be counted as the service actually
+receiving a request. Health GETs do not count as classifications. No valid
+selection was retried to fill in profile coverage. Actual completed receipts
+naturally cover fast, balanced, frontier, and frontier_xhigh; **actual
+access to deep and frontier_max remains unverified**.
 
-### 环境检查失败与定向清理
+### Environment-check failures and targeted cleanup
 
-- 区间任务首次未生成环境验证产物；三次重试改用始终输出布尔观测的
-  helper，均发现正常 worker shell 中 `TYPESAFE_API_KEY` 存在，故仍失败。
-  完整分类任务字节未变；helper 的可观测性修正及首次失败均保留。
-- 实际 Codex **进程环境**观测证明四个敏感变量已删除、managed 标记为 1；
-  无模型调用的独立对照证明 `zsh -lc` 会重新引入 Jev key，而不读取
-  启动文件的 zsh/bash 对照不会。宿主 `.zshenv` 含该变量名。
-  所有观测只保存布尔值，不打印密钥；没有修改启动文件、认证或 shell
-  默认设置。进程环境剥离不等于宿主文件系统秘密隔离，不能将此风险写成通过。
-- 实际 workspace-write 执行期间，全局 Codex 配置新增五个本轮临时项目
-  trust 条目。获得用户单独授权后，仅移除这五个条目；复核其余 TOML
-  配置值完全一致、权限仍为 0600、五条均不存在。文件原始字节哈希未恢复
-  到本轮起始值；不声称整个文件字节还原，也未扩大清理范围。
-- 现有 Laya 保持 PID 55374、launchd runs 1、健康且仅监听 loopback；
-  未重启服务、下载模型或改变隐私权限。临时项目与脱敏证据留在私有归档。
+- The interval task first produced no environment-verification artifacts;
+  the three retries switched to a helper that always outputs boolean
+  observations, and all found `TYPESAFE_API_KEY` present in the normal
+  worker shell, so they still failed. The complete classification task's
+  bytes were unchanged; the helper's observability fix and the first failure
+  are both retained.
+- Actual Codex **process-environment** observation proved the four sensitive
+  variables deleted and the managed marker set to 1; an independent control
+  with no model calls proved `zsh -lc` reintroduces the Jev key, while
+  zsh/bash controls that do not read startup files do not. The host
+  `.zshenv` contains that variable name. All observations saved booleans
+  only and never printed key values; no startup files, authentication, or
+  shell defaults were modified. Process-environment stripping is not host
+  filesystem secret isolation, and this risk must not be recorded as
+  passing.
+- During the actual workspace-write executions, the global Codex config
+  gained five trust entries for this round's temporary projects. With the
+  user's separate authorization, only those five entries were removed;
+  re-verification confirmed all other TOML values identical, permissions
+  still 0600, and all five entries absent. The file's original byte hash was
+  not restored to this round's starting value; no claim of whole-file byte
+  restoration is made, and the cleanup scope was not widened.
+- The existing Laya kept PID 55374, launchd runs 1, healthy and listening
+  only on loopback; the service was not restarted, no models downloaded, no
+  privacy permissions changed. Temporary projects and redacted evidence
+  remain in a private archive.
 
-### 验收发现的 worker 缺陷及回归
+### Worker defects found by acceptance, and regressions
 
-`src/codex.ts` 的两个缺陷均先复现再实现：已有协议失败、child close 和
-进程组清理完成后，若输出仍有未回调的 accepted write，迟到取消没有
-重新驱动 settle；shutdown 后 stdout handler 仍拼接已弃用帧，TERM grace
-期间可保留无界缓冲。回归证明消息/诊断两个迟到取消均挂起，以及实际
-TERM-resistant fixture 洪泛保留 2621440 bytes。
+Both defects in `src/codex.ts` were reproduced before being fixed: after an
+existing protocol failure, child close, and process-group cleanup, a late
+cancellation did not re-drive settle if accepted writes still lacked
+callbacks; after shutdown the stdout handler kept concatenating retired
+frames, allowing an unbounded buffer during TERM grace. The regressions
+prove both late message/diagnostic cancellations hang, and that a real
+TERM-resistant fixture flood retained 2621440 bytes.
 
-生产修复仅三处：shutdown 清空 frame；后续 stdout chunks 直接丢弃但
-继续排空 pipe；onAbort 重新 settle。未改变 API、argv、profile、失败优先级、
-后端策略或客户端配置。新增三项回归使用真实受控子进程/进程组；迟到
-取消由 child close 与 group ESRCH 共同触发，不靠固定睡眠猜测时序。
-私有基线诊断允许冷启动后仍证明两个生命周期阶段的挂起；tracked 防挂起
-限制未改。初版洪泛背压及私有 observer 转义错误的失败日志保留，不计作
-有效 RED。最终 focused 3/3 通过，独立评审无 Critical/Important/Minor。
+The production fix is threefold: shutdown clears the frame; subsequent
+stdout chunks are dropped but the pipe keeps draining; onAbort re-settles.
+No API, argv, profile, failure-priority, backend-policy, or client-config
+changes. Three new regressions use real controlled subprocesses/process
+groups; late cancellation is triggered jointly by child close and group
+ESRCH, not by guessing timing with fixed sleeps. Private baseline
+diagnostics allowed proving the two lifecycle-phase hangs even after cold
+start; the tracked anti-hang limits are unchanged. The initial flood
+backpressure and private observer escaping-error failure logs are retained
+and not counted as valid RED. The final focused run passed 3/3 with
+independent review finding no Critical/Important/Minor findings.
 
-最新完整**串行**覆盖率验证为 **324/324、零失败/取消/跳过**；lines 95.67%、
-branches 89.74%、functions 95.58%，全部满足 80% 全局阈值。依赖审计零已知漏洞，
-skill 结构校验通过。使用原有 build 和覆盖率选项，另加 `--test-concurrency=1`，
-没有删测试或放宽断言。默认并行及早期串行覆盖率失败日志均保留。
-默认 `pnpm test` 初次及三次重试分别为 319/324、320/324、323/324、321/324；
-最终仍有三项原有 fixture 检查失败，不能冒充默认命令已通过。本机临时
-shebang 脚本曾在成功 spawn 后 3139ms 才有首个 stdout，超过原 2500ms
-fixture watchdog；独立对照复现启动阶段延迟，底层 OS 原因尚未证明。
-另外出现原有 2000ms preflight inspection 的 fixture 超时；没有增加生产
-预算或改动无关测试。不能从一次串行通过推断默认并行测试在此宿主稳定。
+The latest complete **serial** coverage verification is **324/324, zero
+failures/cancellations/skips**; lines 95.67%, branches 89.74%, functions
+95.58%, all meeting the 80% global thresholds. The dependency audit found
+zero known vulnerabilities; skill structure validation passed. Using the
+original build and coverage options plus `--test-concurrency=1`, with no
+tests deleted and no assertions relaxed. The default-parallel and early
+serial coverage failure logs are retained. Default `pnpm test` on the first
+attempt and three retries scored 319/324, 320/324, 323/324, 321/324; three
+pre-existing fixture checks still failed at the end, and this must not be
+passed off as the default command passing. A local temporary shebang script
+once took 3139ms to first stdout after a successful spawn, exceeding the
+original 2500ms fixture watchdog; an independent control reproduced the
+startup-phase delay, and the underlying OS cause is unproven. There was
+also a fixture timeout of the pre-existing 2000ms preflight inspection; no
+production budgets were increased and no unrelated tests changed. One
+serial pass does not let you infer the default parallel tests are stable on
+this host.
 
-私有归档 `turnhelm-dynamic-acceptance-9po9nun9` 保存 manifest、完整任务及
-hash、results、每次 stdout/stderr/receipt、父级产物/测试、RED/GREEN、覆盖率、
-环境布尔观测及定向清理记录。只增加必要的 `src/codex.ts`、现有 worker
-测试及本记录；此前 README/skill/路由修复与文档清理保留，main 未改、未发布。
-本轮结论是**代表性真实路径与所列修复已验证，不能签署“所有真实场景全部通过”**。
+The private archive `turnhelm-dynamic-acceptance-9po9nun9` holds the
+manifest, complete tasks and hashes, results, each run's
+stdout/stderr/receipt, parent artifacts/tests, RED/GREEN, coverage,
+environment boolean observations, and the targeted-cleanup record. Only the
+necessary `src/codex.ts`, existing worker tests, and this record were added;
+the earlier README/skill/routing fixes and documentation cleanup are
+retained, main unchanged, nothing published. This round's conclusion is
+**representative real paths and the listed fixes are verified; it cannot be
+signed off as "all real scenarios pass"**.
 
-## 文档与 skill 维护边界
+## Documentation and skill maintenance boundaries
 
-- 更新 README、共享 skill 和本记录；移除已被任务入口替代的
-  2026-10-02/03/04 旧方案及旧接口验证文档，历史可从 Git 追溯。
-- 本文档 worker 不修改 2026-10-05 task-entry plan/spec、产品源码、测试、
-  依赖、UI 元数据、模板标记及自动发现政策；保留他人的既有修改。
-- 先完成 317/317 离线基线及独立 reference 场景：旧 skill 无法给出
-  已安装 Laya 的 loopback/cache-only 启动指引，再按 `skill-creator`
-  补充该指引及真实需求验收方法。结构校验不替代实际应用场景验证。
+- README, the shared skill, and this record were updated; the superseded
+  2026-10-02/03/04 old-design and old-interface validation documents were
+  removed — history is recoverable from Git.
+- This documentation worker did not modify the 2026-10-05 task-entry
+  plan/spec, product source, tests, dependencies, UI metadata, template
+  markers, or auto-discovery policy; others' existing modifications were
+  preserved.
+- The 317/317 offline baseline and the independent reference scenario were
+  completed first: the old skill could not provide offline/loopback startup
+  instructions for an installed Laya, then per `skill-creator` that guidance
+  and the real-requirement acceptance method were added. Structure
+  validation is not a substitute for real application-scenario validation.
 
-此前文档维护的离线复核：`skill-creator` 结构校验通过；独立场景可从新 skill
-正确提出既有 venv 的离线/loopback 启动、当前需求单次执行、分开的
-write/hosted 授权以及 receipt/费用边界。独立源码及证据复核无实质问题。
-9 个 shell 代码块通过 Bash/zsh 语法检查，8 个本地 Markdown 链接有效，
-README 配置与资产模板一致。实际 README source-checkout shell function
-在临时带空格 Git consumer 中完成 6 次 init/doctor 调用，验证 dry-run、
-幂等、用户 AGENTS 保留、skill/metadata 精确复制及无父配置发现；使用
-实际 Codex 0.160.1 version/help，fetch 拒绝 guard 记录零请求、零 worker。
-这些检查仍不代表当前需求的成功路由。
+Offline recheck of the earlier documentation maintenance: `skill-creator`
+structure validation passed; independent scenarios could correctly derive
+from the new skill the existing venv's offline/loopback startup, the current
+requirement's single execution, separate write/hosted authorization, and
+the receipt/cost boundaries. Independent source and evidence review found
+no substantive issues. 9 shell code blocks passed Bash/zsh syntax checks, 8
+local Markdown links resolve, and the README config matches the asset
+template. The actual README source-checkout shell function completed 6
+init/doctor invocations in a temporary space-containing Git consumer,
+verifying dry-run, idempotence, user AGENTS preservation, exact
+skill/metadata copying, and no parent-config discovery; using the actual
+Codex 0.160.1 version/help, the fetch-refusal guard recorded zero requests
+and zero workers. These checks still do not represent successful routing
+of the current requirement.
 
-## 仍未验证
+## Still unverified
 
-- 本轮未自然选择的 `deep / gpt-6.1-sol / high` 与
-  `frontier_max / gpt-6-astra / max` 的实际访问。
-- `agents.enabled` 等 Codex 配置键的运行时语义；help/传参证据不足。
-- Laya/Jev 对一般真实需求的分类质量；本次文档任务成功路径不代表质量基准。
-- whole-run usage 聚合及真实费用/收益。Codex 使用 ChatGPT 登录，
-  不是按 API key 计费的证明；worker 快照不代表发票金额。
-- worker 无 usage 时为 `"unreported"`，`classifierUsage` 为
-  `"unreported"`，`wholeRunUsageScope` 为 `"unverified"`；不能补零
-  或换算节省比例。固定模型付费对照仍需 owner 单独批准。
-- launchd 注入崩溃后的自动重启行为；本轮未做破坏性测试。
-- 宿主 shell 重读 Jev key 后的秘密隔离，以及默认并行测试的冷启动稳定性。
+- Actual access to `deep / gpt-6.1-sol / high` and
+  `frontier_max / gpt-6-astra / max`, not naturally selected this round.
+- Runtime semantics of Codex config keys such as `agents.enabled`; help/
+  argument-passing evidence is insufficient.
+- Laya/Jev classification quality on general real requirements; this
+  documentation task's success path is not a quality benchmark.
+- Whole-run usage aggregation and real costs/benefits. Codex uses ChatGPT
+  login, which is not proof of API-key metered billing; worker snapshots
+  are not invoice amounts.
+- With no worker usage it is `"unreported"`, `classifierUsage` is
+  `"unreported"`, and `wholeRunUsageScope` is `"unverified"`; these must not
+  be zero-filled or converted into savings percentages. A fixed-model paid
+  comparison still requires separate owner approval.
+- Automatic restart behavior after a launchd-injected crash; no destructive
+  testing was done this round.
+- Secret isolation after the host shell rereads the Jev key, and the
+  cold-start stability of the default parallel tests.
+
+## 2026-10-08 post-merge dual-chain service reverification
+
+This run created a normal branch `feat/paid-chain-validation` from the
+squashed `dc9ee9c7f224e424c54c72a18c5ac65b15fac2c7`, reusing the existing
+checkout, creating no workspace/worktree. It used the currently built normal
+`init`, offline `doctor`, and `run` CLI; the real Codex was **0.161.0**,
+Node 26.5.0, and the existing Laya is CPU `typed-decisions`. The user
+separately authorized one run per chain, with Jev receiving a complete
+sensitive-data-free test task; Jev and the single-process hosted opt-in were
+enabled only for the private test project. The six profiles and the default
+10000ms routing budget were unmodified, with no forced profiles, `--write`,
+extra probes, automatic paid retries, or the classifier-only 48-request
+`test:live`.
+
+The two tasks used the same integer-amount coupon rule and eight boundary
+inputs, differing only in the result marker. The parent independently
+computed the oracle and verified stdout as complete, unique, exactly
+matching JSON:
+
+| Real full chain | Natural selection | routing | worker | CLI / worker exit | Business cases |
+| --- | --- | --- | --- | --- | --- |
+| Laya → Codex | `frontier / gpt-6-astra / high` | 5621ms | 64762ms | 0 / 0 | 8/8 |
+| hosted Jev → Codex | `fast / gpt-6-luna / low` | 1398ms | 62305ms | 0 / 0 | 8/8 |
+
+Both were `routing.status=selected`, `worker.status=completed`, one receipt
+each. This round totaled **1 classification request** each for Laya/Jev and
+**2 Turnhelm worker launches**, with no timeouts or retries. Each stderr
+carried two generic `tool-progress` lines; they prove neither actual tool
+nor internal API request counts, nor the runtime semantics of
+`agents.enabled`. All observed owned process groups exited; the two private
+projects' file hashes/permissions, product sources and build outputs, and
+the global Codex config hash/0600 permissions were unchanged. Only this
+record was appended; nothing committed or pushed.
+
+Worker usage snapshots, in input/output/cached/reasoning order: Laya
+`18219 / 234 / 8064 / 131`, Jev `18219 / 101 / 6912 / 0`. The current Codex
+uses **ChatGPT login, not API-key billing evidence**; `classifierUsage`
+remains `"unreported"` and `wholeRunUsageScope` `"unverified"`; invoices,
+actual charges, and whole-run totals were not reconciled and must not be
+converted into cost/savings ratios.
+
+The conclusion is **both real service chains and the read-only business
+results pass on the current version** — not six-profile, classification-
+quality, or billing acceptance. The same-rule tasks selected differently
+across Laya/Jev; no model changes or reruns to fill profile coverage, and
+the pre-existing shell secret-isolation risk and other unverified items do
+not disappear because of this pass. The private archive
+`turnhelm-paid-chain-validation-ujgpefwm` holds the complete tasks, oracle,
+invocation logs, receipts, the anti-double-start journal, file/config
+seals, and verification results.
+
+## 2026-10-09 documentation worker: actual changes and check boundaries
+
+This section records only what this documentation worker itself did; the
+parent's dynamic-routing receipt for it, the worker's final exit code,
+usage, and full task acceptance must be recorded independently after the
+worker exits. Last night's dual-chain results, earlier failures, and
+historical statistics are not counted as this run's results.
+
+- Read the local `skill-creator/SKILL.md` and `references/openai_yaml.md`,
+  reviewing the trigger description, duplicate prompts, authorization, and
+  secret boundaries per the narrow-scope update principle for existing
+  skills; did not re-init the skill, invoke generators, or add references,
+  policy, icons, or dependencies.
+- First verified `src/assets.ts`, init/doctor, config/routing/systemone/
+  Codex, and the live harness consumers via CodeGraph, then compared against
+  the originals. What was actually written is the README and this section:
+  tightened complete-input, project-config, single-worker, in-budget
+  fallback, authorization, and cancellation wording, distinguished initial
+  process environment from host secrets, and separated offline doctor,
+  probe, run, and the 48-request-limit classifier-only `test:live`; linked
+  the existing 0.161.0 dual-chain evidence, with the minimum still 0.160.0.
+- **Skill modifications were not written**: editing
+  `.agents/skills/turnhelm-routing/SKILL.md` was rejected by the current
+  sandbox's protected-path policy (`writing outside of the project;
+  rejected by user approval settings`). No bypass via the `.claude` symlink,
+  no widened permissions. The parent still had to complete the approved
+  skill update; the existing UI fields are accurate and metadata unchanged.
+- Local Python 3.14 / installed PyYAML 6.0.3 each ran skill-creator's
+  `scripts/quick_validate.py`; both the shared source and the Claude symlink
+  entrance printed `Skill is valid!`, exit 0; what was validated is **the
+  existing skill that could not be modified**, not a successful update.
+- Using the installed MarkdownIt/PyYAML on the three Markdown documents:
+  12 fenced blocks closed, 8 local links resolve, 9 shell code blocks pass
+  Bash/zsh syntax checks, 3 JSON blocks parse; the README config matches
+  `assets/config.json`. Template v1 markers, existing required UI fields,
+  default auto-discovery, and the shared symlink target are all preserved.
+  These are structure/syntax checks, not shell-example execution or
+  independent skill behavior acceptance.
+- Read-only invocations of the current build's template reading and
+  installation inspection confirmed the shared template bytes match and the
+  existing installation has no pending writes; a synthetic sentinel
+  environment checked the four-variable deletion, unchanged original input,
+  and the managed marker, and synthetic selections checked
+  read-only/workspace-write argv. All passed, with no worker started, no
+  classification requests, and no host key values read.
+- This subprocess did not run the full `pnpm test`, coverage, dependency
+  audit, probe, live harness, or another paid worker; the full default
+  tests/coverage were left to the parent. The user-provided existing local
+  337/337 and push/PR/main CI results are historical evidence and are not
+  counted as new passes this time.
+- Work-state read/write tools were both rejected by the current
+  `approval policy: never`; no approval bypass. No modifications to source,
+  tests, template config, dependencies, historical design/plan, AGENTS,
+  temporary project config, global config/auth, startup files, or services;
+  nothing committed, pushed, branch-switched, or delegated to agents.
+- Before delivery, verified the SHA-256 of the original validation
+  document's 21618-byte prefix is exactly identical (including the existing
+  final 37 lines), and the other baseline tracked files, AGENTS, temporary
+  config, and symlinks unchanged; branch/HEAD kept their original values,
+  and `git diff --check` passed.
+
+## 2026-10-09 current documentation-requirement dynamic routing: parent acceptance
+
+This run, on the original `feat/paid-chain-validation` checkout at baseline
+`dc9ee9c`, submitted the **5937 UTF-8 byte complete README, skill-creator,
+and related documentation maintenance requirement** — under the user's newly
+confirmed write and hosted/data authorization — to a normal `run --write`,
+not a shortened smoke. The temporary project config enabled both backends,
+still with the default 10000ms total budget and the original six profiles;
+no forced profiles, extra probes, `test:live`, or paid retries. The
+anti-double-start journal, original task, and hashes are archived.
+
+The parent re-parsed the single receipt from actual stderr:
+
+| Classification attempt | outcome | duration |
+| --- | --- | --- |
+| Laya (normal local-first budget share) | `timeout` | 1002ms |
+| Authorized hosted Jev | `success` | 1034ms |
+
+Total routing **2037ms**, natural selection
+**`frontier_xhigh / gpt-6-astra / xhigh`**; the actual Codex **0.161.0**
+worker was `completed`, 417899ms, exit 0, CLI exit 0. This round had exactly
+**1 real Turnhelm worker launch**; the receipt's client attempt counts were
+Laya/Jev 1 each; no harness retries, outer timeouts, or forced kills, and
+all observed owned process groups exited. Client counts and generic
+tool-progress prove neither server receipt, internal call counts, nor
+billing.
+
+**Routing and worker execution passed, but the worker's delivery on the
+original complete task was only partial.** The parent checked the actual
+four target files: the README and the previous section's 40 lines were
+written; the skill/metadata were still byte-identical to baseline at that
+time. The worker explicitly reported `.agents` writes rejected by the
+protected-path policy and did not bypass the symlink or widen permissions;
+exit 0 must not be recorded as full acceptance of the documentation
+requirement.
+
+The parent then completed the canonical skill within its own existing
+permissions and approved scope: tightened the trigger scope, removed
+duplicate prompts, and clarified initial-environment stripping versus host
+secrets/protected paths, authorized in-budget fallback, the four check
+kinds, and billing evidence boundaries. This was not a worker rerun or a
+subprocess-sandbox modification. The UI description was already accurate;
+metadata, default auto-discovery, and the Claude shared symlink are
+unchanged, with no new resources or policy.
+
+The parent independently executed and read current results this time (not
+historical CI):
+
+- skill-creator `quick_validate.py`: both the updated canonical and the
+  Claude symlink entrance print `Skill is valid!`, exit 0.
+- Markdown/YAML/JSON, local-link, and Bash/zsh syntax checks passed: 12
+  closed fences, 8 local links, 9 shell blocks, 3 JSON blocks; the README
+  config exactly matches the asset template. This is not equivalent to
+  executing every shell example or adding independent skill behavior
+  trials.
+- While the temporary installation still existed, the current real CLI
+  `init --dry-run` and offline `doctor --json` both exited 0; template
+  bytes, no pending writes, synthetic four-variable stripping, and both
+  sandbox argv checks passed, with no classification requests or real
+  workers. The parent's first synthetic argv check failed due to an
+  expected-argument-order mistake; after correcting the check against the
+  unmodified source it passed, the failure evidence retained — not a
+  product fix or paid retry.
+- Unmodified `pnpm test` and `pnpm run test:coverage` each **337/337**,
+  fail/cancel/skip all 0; no reduced default parallelism and no
+  test/timeout modifications. Coverage: lines **95.67%**, branches
+  **89.64%**, functions **95.58%**, all meeting the original 80% gates.
+- `pnpm audit --audit-level high` exit 0, no known vulnerabilities found.
+- The original validation document's **21618 bytes** (including last
+  night's 37 lines) and the worker's appended record are preserved as a
+  complete prefix. Only the newly created root project config and AGENTS —
+  with dev/ino/hash/mode all matching exactly — were deleted, then the
+  empty owned `.turnhelm` directory removed; no recursive cleanup. The
+  other 44 tracked items, 13 compiled sources, global Codex config
+  hash/0600 permissions, and all refs/worktree registrations unchanged.
+
+This run's worker usage snapshot was input/output/cached/reasoning
+`1044503 / 13690 / 888192 / 3269`. The existing **ChatGPT login** does not
+prove API-key billing; `classifierUsage="unreported"` and
+`wholeRunUsageScope="unverified"`; invoices, actual charges, and benefits
+unverified, and this does not sign off full six-profile access, general
+classification quality, host secret isolation, or automatic writability of
+protected paths. The review phase added no real classification/worker runs
+and modified no product source; nothing committed or pushed.
+
+The archive `turnhelm-docs-skill-routing-cjsrm2bw` retains the complete
+task, invocation journal/logs, receipt, before/after worker images, the
+parent's first check failure and corrected result, test/coverage/audit
+logs, and the exact cleanup and file/config seals. The final conclusions
+are recorded separately: **dynamic-routing execution passed; the single
+worker's complete delivery was partial; the parent-completed README/skill/
+related records and the offline verifications above passed**.
