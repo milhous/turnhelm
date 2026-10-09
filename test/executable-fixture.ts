@@ -11,10 +11,12 @@ export function prepareExecutable(path: string): Promise<void> {
     const child = spawn(path, [PREPARE], { detached: true, stdio: "ignore" });
     let failure: Error | undefined;
     let closeGuard: NodeJS.Timeout | undefined;
+    let cleanupDone = false;
     const killOwned = (): void => {
-      if (child.pid === undefined) return;
+      if (child.pid === undefined || cleanupDone) return;
       try { process.kill(-child.pid, "SIGKILL"); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+      cleanupDone = true;
     };
     const finish = (error?: Error): void => {
       clearTimeout(timer);

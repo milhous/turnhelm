@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { appendFile, lstat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open } from "node:fs/promises";
 import { join } from "node:path";
 import type { RoutingResult } from "./route.js";
 
@@ -34,10 +35,7 @@ export async function appendRouteJournal(
   }
   const journalPath = join(root, ".turnhelm", "routes.jsonl");
   try {
-    // lstat (not stat) so a symlink is seen as the link, not its target: the
-    // journal stays a regular file inside the project and is never redirected
-    // out of it, and a non-regular path (symlink, FIFO, directory) is skipped
-    // instead of opened — an append to a readerless FIFO would block the run.
+    // Skip known nonregular leaves; safe open below also protects substitutions.
     const stat = await lstat(journalPath).catch(error => {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       throw error;
@@ -46,7 +44,21 @@ export async function appendRouteJournal(
       diagnostic("the route journal path is not a regular file; continuing without it.");
       return;
     }
-    await appendFile(journalPath, JSON.stringify(entry) + "\n");
+    if (!(constants.O_NOFOLLOW > 0 && constants.O_NONBLOCK > 0)) {
+      throw new Error("safe journal open flags are unavailable");
+    }
+    // Final-leaf protection only: parent directories and hardlinks remain trusted.
+    const journal = await open(journalPath,
+      constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      if (!(await journal.stat()).isFile()) {
+        diagnostic("the route journal path is not a regular file; continuing without it.");
+        return;
+      }
+      await journal.appendFile(JSON.stringify(entry) + "\n");
+    } finally {
+      await journal.close();
+    }
   } catch {
     // Best-effort evidence: a journaling failure must never fail the run.
     diagnostic("the route journal could not be appended; continuing without it.");

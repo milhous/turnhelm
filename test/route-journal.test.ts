@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { requestTaskChoice } from "../src/systemone.js";
 import { routeTask } from "../src/route.js";
 import { appendRouteJournal } from "../src/journal.js";
@@ -22,6 +24,29 @@ const journalRoot = async (): Promise<string> => {
 const readEntries = async (root: string): Promise<Record<string, unknown>[]> => {
   const text = await readFile(join(root, ".turnhelm", "routes.jsonl"), "utf8");
   return text.trim().split("\n").map(line => JSON.parse(line) as Record<string, unknown>);
+};
+
+// Isolate built-in interposition and bound even the original readerless-FIFO hang.
+const journalChild = async (root: string, body: string, mockModules = false): Promise<void> => {
+  // Node >=22.3 module mocks need this opt-in; only these owned children suppress its warning.
+  const options = mockModules ? ["--experimental-test-module-mocks", "--disable-warning=ExperimentalWarning"] : [];
+  const { stdout, stderr } = await promisify(execFile)(process.execPath, [...options, "--input-type=module", "--eval", `
+    import assert from "node:assert/strict";
+    import fs from "node:fs/promises";
+    import { constants, fstatSync, openSync, closeSync, readSync } from "node:fs";
+    import { execFileSync } from "node:child_process";
+    import { syncBuiltinESMExports } from "node:module";
+    import { join } from "node:path";
+    import { appendRouteJournal } from ${JSON.stringify(new URL("../src/journal.js", import.meta.url).href)};
+    const root = process.argv[1];
+    const path = join(root, ".turnhelm", "routes.jsonl");
+    const task = "PRIVATE_JOURNAL_TASK";
+    const routing = { status: "failed", attempts: [], routingMs: 1 };
+    const diagnostics = [];
+    ${body}
+  `, root], { timeout: 3000, killSignal: "SIGKILL", maxBuffer: 64 * 1024 });
+  assert.equal(stdout, "");
+  assert.equal(stderr, "");
 };
 
 test("requestTaskChoice returns the selected profile with the classifier confidence", async () => {
@@ -104,9 +129,32 @@ test("a failed routing journals attempts without selection fields", async () => 
   }
 });
 
+test("a cancelled routing journals hash-only evidence without selection fields", async () => {
+  const root = await journalRoot();
+  try {
+    const task = "Cancelled PRIVATE_JOURNAL_TASK";
+    await appendRouteJournal(root, task, { status: "cancelled", attempts: [], routingMs: 1 });
+    const [entry] = await readEntries(root);
+    assert.equal(entry.status, "cancelled");
+    assert.equal(entry.taskSha256, sha256(task));
+    assert.equal(entry.taskBytes, Buffer.byteLength(task));
+    assert.deepEqual(entry.attempts, []);
+    assert.equal(entry.routingMs, 1);
+    for (const key of ["backend", "profileId", "model", "effort", "confidence", "task"]) {
+      assert.ok(!(key in entry));
+    }
+    assert.ok(!(await readFile(join(root, ".turnhelm", "routes.jsonl"), "utf8")).includes(task));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("journal entries append; earlier lines are preserved", async () => {
   const root = await journalRoot();
   try {
+    const path = join(root, ".turnhelm", "routes.jsonl");
+    await writeFile(path, '{"earlier":true}\n');
+    await chmod(path, 0o640);
     for (const choice of ["fast", "deep"]) {
       const routing = await routeTask("Explain the entry points without editing files.", fixtureConfig(), {
         env: fakeEnv, request: withReply(decisionReply(choice))
@@ -115,9 +163,12 @@ test("journal entries append; earlier lines are preserved", async () => {
       await appendRouteJournal(root, "Explain the entry points without editing files.", routing);
     }
     const entries = await readEntries(root);
-    assert.equal(entries.length, 2);
-    assert.equal(entries[0].profileId, "fast");
-    assert.equal(entries[1].profileId, "deep");
+    assert.equal(entries.length, 3);
+    assert.deepEqual(entries[0], { earlier: true });
+    assert.equal(entries[1].profileId, "fast");
+    assert.equal(entries[2].profileId, "deep");
+    assert.equal((await stat(path)).mode & 0o777, 0o640);
+    assert.ok((await readFile(path, "utf8")).startsWith('{"earlier":true}\n'));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -181,3 +232,174 @@ test("a symlinked journal path is refused, never written through", async () => {
     await rm(outside, { recursive: true, force: true });
   }
 });
+
+test("a regular journal replaced by a symlink after inspection cannot redirect the append", async () => {
+  const root = await journalRoot();
+  const outside = await mkdtemp(join(tmpdir(), "turnhelm-journal-out-"));
+  try {
+    await journalChild(root, `
+      const outside = ${JSON.stringify(join(outside, "owned-outside-sentinel"))};
+      await fs.writeFile(outside, "unchanged\\n");
+      await fs.writeFile(path, "existing\\n");
+      const realLstat = fs.lstat;
+      fs.lstat = async (...args) => {
+        const inspected = await realLstat(...args);
+        assert.ok(inspected.isFile());
+        await fs.unlink(path);
+        await fs.symlink(outside, path);
+        return inspected;
+      };
+      syncBuiltinESMExports();
+      await appendRouteJournal(root, task, routing, message => diagnostics.push(message));
+      assert.equal(await fs.readFile(outside, "utf8"), "unchanged\\n");
+      assert.equal(diagnostics.length, 1);
+      assert.ok(!diagnostics[0].includes(task));
+    `);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+for (const replacement of [false, true]) {
+  test(`a ${replacement ? "regular journal replaced by a" : "static"} readerless FIFO is skipped without blocking`, async () => {
+    const root = await journalRoot();
+    try {
+      await journalChild(root, replacement ? `
+        await fs.writeFile(path, "existing\\n");
+        const realLstat = fs.lstat;
+        fs.lstat = async (...args) => {
+          const inspected = await realLstat(...args);
+          assert.ok(inspected.isFile());
+          await fs.unlink(path);
+          execFileSync("mkfifo", [path]);
+          return inspected;
+        };
+        syncBuiltinESMExports();
+        await appendRouteJournal(root, task, routing, message => diagnostics.push(message));
+        assert.equal(diagnostics.length, 1);
+        assert.ok((await realLstat(path)).isFIFO());
+      ` : `
+        execFileSync("mkfifo", [path]);
+        await appendRouteJournal(root, task, routing, message => diagnostics.push(message));
+        assert.equal(diagnostics.length, 1);
+        assert.ok((await fs.lstat(path)).isFIFO());
+      `);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("an opened replacement FIFO is refused and closed without writing to its reader", async () => {
+  const root = await journalRoot();
+  try {
+    await journalChild(root, `
+      await fs.writeFile(path, "existing\\n");
+      const realLstat = fs.lstat;
+      let reader;
+      fs.lstat = async (...args) => {
+        const inspected = await realLstat(...args);
+        await fs.unlink(path);
+        execFileSync("mkfifo", [path]);
+        reader = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+        return inspected;
+      };
+      const realOpen = fs.open;
+      let fd;
+      fs.open = async (...args) => {
+        const handle = await realOpen(...args);
+        fd = handle.fd;
+        return handle;
+      };
+      syncBuiltinESMExports();
+      try {
+        await appendRouteJournal(root, task, routing, message => diagnostics.push(message));
+        assert.equal(diagnostics.length, 1);
+        assert.equal(typeof fd, "number");
+        assert.throws(() => fstatSync(fd), { code: "EBADF" });
+        assert.equal(readSync(reader, Buffer.alloc(1024), 0, 1024, null), 0);
+      } finally {
+        closeSync(reader);
+      }
+    `);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+for (const flag of ["O_NOFOLLOW", "O_NONBLOCK"]) {
+  for (const value of ["missing", "zero"]) {
+    test(`a ${value} ${flag} refuses journal append without an unsafe open`, async () => {
+      const root = await journalRoot();
+      try {
+        await journalChild(root, `
+          const sentinel = Buffer.from("owned journal sentinel\\n");
+          await fs.writeFile(path, sentinel);
+          const unavailable = { ...constants };
+          ${value === "missing" ? `delete unavailable.${flag};` : `unavailable.${flag} = 0;`}
+          const { mock } = await import("node:test");
+          // Node 26 renamed namedExports; the minimum Node 22.8 still needs it.
+          const exports = { constants: unavailable };
+          mock.module("node:fs", Number(process.versions.node.split(".")[0]) >= 26 ? { exports } : { namedExports: exports });
+          const { appendRouteJournal: guardedAppend } = await import(${JSON.stringify(new URL("../src/journal.js?unavailable-flag", import.meta.url).href)});
+          const realOpen = fs.open;
+          let opens = 0;
+          let writes = 0;
+          fs.open = async (...args) => {
+            opens++;
+            const handle = await realOpen(...args);
+            const realAppend = handle.appendFile.bind(handle);
+            handle.appendFile = async (...args) => { writes++; return realAppend(...args); };
+            return handle;
+          };
+          syncBuiltinESMExports();
+          await guardedAppend(root, task, routing, message => diagnostics.push(message));
+          assert.equal(opens, 0, "unsafe journal open must never be attempted");
+          assert.equal(writes, 0);
+          assert.deepEqual(diagnostics, ["the route journal could not be appended; continuing without it."]);
+          assert.deepEqual(await fs.readFile(path), sentinel);
+        `, true);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
+for (const failure of ["none", "stat", "appendFile", "close"]) {
+  test(`the journal closes its opened descriptor after ${failure === "none" ? "success" : failure + " failure"}`, async () => {
+    const root = await journalRoot();
+    try {
+      await journalChild(root, `
+        await fs.writeFile(path, "existing\\n");
+        const realOpen = fs.open;
+        let fd;
+        fs.open = async (...args) => {
+          const handle = await realOpen(...args);
+          fd = handle.fd;
+          const failure = ${JSON.stringify(failure)};
+          if (failure === "close") {
+            const realClose = handle.close.bind(handle);
+            handle.close = async () => { await realClose(); throw new Error(task); };
+          } else if (failure !== "none") {
+            handle[failure] = async () => { throw new Error(task); };
+          }
+          return handle;
+        };
+        syncBuiltinESMExports();
+        await appendRouteJournal(root, task, routing, message => diagnostics.push(message));
+        assert.equal(typeof fd, "number");
+        assert.throws(() => fstatSync(fd), { code: "EBADF" });
+        assert.equal(diagnostics.length, ${failure === "none" ? 0 : 1});
+        assert.ok(diagnostics.every(message => !message.includes(task)));
+        const text = await fs.readFile(path, "utf8");
+        assert.ok(text.startsWith("existing\\n"));
+        assert.equal(text.includes('"taskSha256"'), ${failure === "none" || failure === "close"});
+        assert.ok(!text.includes(task));
+      `);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
