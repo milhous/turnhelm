@@ -28,8 +28,12 @@ const readEntries = async (root: string): Promise<Record<string, unknown>[]> => 
 
 // Isolate built-in interposition and bound even the original readerless-FIFO hang.
 const journalChild = async (root: string, body: string, mockModules = false): Promise<void> => {
-  // Node >=22.3 module mocks need this opt-in; only these owned children suppress its warning.
-  const options = mockModules ? ["--experimental-test-module-mocks", "--disable-warning=ExperimentalWarning"] : [];
+  // Node >=22.3 module mocks need this opt-in; only these owned children suppress its warnings.
+  // namedExports is deprecated on newer patch lines (Node 24.x backports) before the Node 26 rename;
+  // "exports" cannot replace it here because the minimum Node 22.8 ignores that spelling.
+  const options = mockModules
+    ? ["--experimental-test-module-mocks", "--disable-warning=ExperimentalWarning", "--no-deprecation"]
+    : [];
   const { stdout, stderr } = await promisify(execFile)(process.execPath, [...options, "--input-type=module", "--eval", `
     import assert from "node:assert/strict";
     import fs from "node:fs/promises";

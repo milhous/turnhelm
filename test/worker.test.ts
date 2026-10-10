@@ -4,6 +4,7 @@ import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { PROFILE_IDS, type ProfileId, type ProjectConfig } from "../src/config.js";
 import type { TaskDecision } from "../src/route.js";
@@ -34,7 +35,15 @@ fs.writeFileSync(path.join(here, "boot"), String(Date.now()));
 fs.writeFileSync(path.join(here, "runs"), (fs.existsSync(path.join(here, "runs")) ? fs.readFileSync(path.join(here, "runs"), "utf8") : "") + "1");
 fs.writeFileSync(path.join(here, "argv.json"), JSON.stringify(process.argv.slice(2)));
 fs.writeFileSync(path.join(here, "cwd.txt"), process.cwd());
-fs.writeFileSync(path.join(here, "env.json"), JSON.stringify(process.env));
+fs.writeFileSync(path.join(here, "env.json"), JSON.stringify({
+  PATH: process.env.PATH,
+  CODEX_HOME: process.env.CODEX_HOME,
+  TURNHELM_MANAGED_CHILD: process.env.TURNHELM_MANAGED_CHILD,
+  LAYA_API_KEY: Object.hasOwn(process.env, "LAYA_API_KEY"),
+  TYPESAFE_API_KEY: Object.hasOwn(process.env, "TYPESAFE_API_KEY"),
+  TURNHELM_ALLOW_HOSTED_JEV: Object.hasOwn(process.env, "TURNHELM_ALLOW_HOSTED_JEV"),
+  TURNHELM_CONFIG: Object.hasOwn(process.env, "TURNHELM_CONFIG")
+}));
 const ready = () => fs.writeFileSync(path.join(here, "ready"), "1");
 const emit = event => process.stdout.write(JSON.stringify(event) + "\\n");
 const finish = body => {
@@ -351,7 +360,14 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
     }
   `;
   const run = await execute(process.execPath, ["--input-type=module", "--eval", inner], {
-    env: { ...process.env, PATH: directory, CODEX_HOME: join(directory, "codex-home") },
+    env: {
+      PATH: directory,
+      CODEX_HOME: join(directory, "codex-home"),
+      LAYA_API_KEY: "TEST_LAYA_SENTINEL",
+      TYPESAFE_API_KEY: "TEST_JEV_SENTINEL",
+      TURNHELM_ALLOW_HOSTED_JEV: "1",
+      TURNHELM_CONFIG: "/synthetic/turnhelm.json"
+    },
     timeout: 20_000
   }).catch(async error => {
     // The outer exec timeout may kill the harness before its watchdog runs.
@@ -430,6 +446,43 @@ test("worker environment additionally marks the managed child", () => {
   assert.equal(env.CODEX_HOME, "/tmp/codex");
 });
 
+test("fake worker records only safe environment evidence", { timeout: 30_000 }, async t => {
+  const { recorded, directory } = await runWorker(t, {
+    script: `
+fs.writeFileSync(path.join(here, "parent-canary-present.json"), JSON.stringify(Object.hasOwn(process.env, "TURNHELM_TEST_PARENT_CANARY")));
+finish(() => emit({ type: "turn.completed" }));
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(JSON.parse(await fakeFile(directory, "parent-canary-present.json")), false);
+  assert.deepEqual(JSON.parse(await fakeFile(directory, "env.json")), {
+    PATH: directory,
+    CODEX_HOME: join(directory, "codex-home"),
+    TURNHELM_MANAGED_CHILD: "1",
+    LAYA_API_KEY: false,
+    TYPESAFE_API_KEY: false,
+    TURNHELM_ALLOW_HOSTED_JEV: false,
+    TURNHELM_CONFIG: false
+  });
+});
+
+test("fake worker never forwards an unrelated synthetic parent canary", { timeout: 30_000 }, async () => {
+  const { stdout, stderr } = await execute(process.execPath, [
+    "--test", "--test-reporter=tap", "--test-name-pattern=^fake worker records only safe environment evidence$", fileURLToPath(import.meta.url)
+  ], {
+    env: {
+      TURNHELM_TEST_PARENT_CANARY: "TEST_UNRELATED_PARENT_SENTINEL",
+      LAYA_API_KEY: "TEST_LAYA_SENTINEL",
+      TYPESAFE_API_KEY: "TEST_JEV_SENTINEL",
+      TURNHELM_ALLOW_HOSTED_JEV: "1",
+      TURNHELM_CONFIG: "/synthetic/turnhelm.json"
+    },
+    timeout: 20_000
+  });
+  assert.match(stdout, /^ok \d+ - fake worker records only safe environment evidence$/m);
+  assert.equal(stderr, "");
+});
+
 test("one worker run binds decision, root, stdin task, and sanitized environment", { timeout: 30_000 }, async t => {
   const task = "Fix the pago row\n第二行 ✓";
   const { recorded, stdout, stderr, directory } = await runWorker(t, {
@@ -464,12 +517,12 @@ finish(() => {
   assert.equal(await fakeFile(directory, "cwd.txt"), await realpath(join(directory, "root")));
   assert.equal(await fakeFile(directory, "task.txt"), task);
   assert.equal(await fakeFile(directory, "runs"), "1");
-  const env = JSON.parse(await fakeFile(directory, "env.json")) as Record<string, string>;
+  const env = JSON.parse(await fakeFile(directory, "env.json")) as Record<string, string | boolean>;
   assert.equal(env.TURNHELM_MANAGED_CHILD, "1");
-  assert.equal(env.LAYA_API_KEY, undefined);
-  assert.equal(env.TYPESAFE_API_KEY, undefined);
-  assert.equal(env.TURNHELM_ALLOW_HOSTED_JEV, undefined);
-  assert.equal(env.TURNHELM_CONFIG, undefined);
+  assert.equal(env.LAYA_API_KEY, false);
+  assert.equal(env.TYPESAFE_API_KEY, false);
+  assert.equal(env.TURNHELM_ALLOW_HOSTED_JEV, false);
+  assert.equal(env.TURNHELM_CONFIG, false);
   assert.equal(env.CODEX_HOME, join(directory, "codex-home"));
   assert.equal(env.PATH, directory);
   assert.ok(stdout.includes("worker result\n"));
@@ -1132,7 +1185,7 @@ test("descriptor-exhausted spawn fails without an unhandled process error", { ti
         for (const descriptor of descriptors) closeSync(descriptor);
       }
       await writeFile(${JSON.stringify(resultFile)}, JSON.stringify(recorded));
-    `], { env: { ...process.env, PATH: directory }, timeout: 20_000 });
+    `], { env: { PATH: directory }, timeout: 20_000 });
   assert.equal(result.stderr, "");
   const recorded = JSON.parse(await readFile(resultFile, "utf8")) as Recorded;
   assert.equal(recorded.harnessError, undefined);
