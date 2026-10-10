@@ -29,8 +29,9 @@ router and child do not inherit your current session's conversation.
 
 ## Quick start
 
-Requirements: Node.js `>=22.8.0`, pnpm `10.12.1` (pinned in `package.json`),
-a local Git work tree, and a Codex CLI 0.160.0 or newer.
+Requirements: Node.js `>=24.0.0` (Node 22.8 support has been dropped;
+validation runs on an actual `24.x >=24.5.0`), pnpm `10.12.1` (pinned in
+`package.json`), a local Git work tree, and a Codex CLI 0.160.0 or newer.
 
 ```bash
 # From the Turnhelm source checkout:

@@ -24,7 +24,7 @@ export type DoctorOptions = Readonly<{
   request?: ChoiceRequest;
 }>;
 
-const NODE_FLOOR: readonly [number, number, number] = [22, 8, 0];
+const NODE_FLOOR: readonly [number, number, number] = [24, 0, 0];
 // Fixed synthetic task: probes only prove the classification round trip works;
 // the answer is never used for routing here.
 const PROBE_TASK = "turnhelm doctor readiness probe: reply with the lightest eligible route.";
@@ -211,7 +211,7 @@ export async function doctorProject(root: string, options: DoctorOptions): Promi
   const node = numericVersion(process.versions.node);
   checks.push(atLeast(node, NODE_FLOOR)
     ? check("node", "pass", "node " + node.join(".") + " satisfies the supported range", "")
-    : check("node", "fail", "node " + node.join(".") + " is below the supported range", "upgrade node to 22.8.0 or newer"));
+    : check("node", "fail", "node " + node.join(".") + " is below the supported range", "upgrade node to 24.0.0 or newer"));
 
   // codex + git (bounded non-inference CLI evidence only). E8: help output is
   // flag evidence, never proof of runtime config-key semantics.

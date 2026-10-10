@@ -93,6 +93,9 @@ test("the packed distribution installs offline and serves the project entry end 
       "examples/config.json", "2000 UTF-16"]) {
       assert.ok(!readme.includes(retired), "packed README must not advertise retired path: " + retired);
     }
+    for (const fragment of ["Node.js `>=24.0.0`", "Node 22.8 support has been dropped", "`24.x >=24.5.0`"]) {
+      assert.ok(readme.includes(fragment), "packed README must state the current Node requirement: " + fragment);
+    }
 
     // 3. Install offline into an unrelated temporary Git project whose root
     //    path contains spaces; no registry access is possible.
@@ -110,7 +113,13 @@ test("the packed distribution installs offline and serves the project entry end 
     assert.equal(configAsset.version, 1);
     assert.deepEqual(Object.keys(configAsset.profiles).sort(),
       ["balanced", "deep", "fast", "frontier", "frontier_max", "frontier_xhigh"]);
-    await readFile(join(installed, ".agents", "skills", "turnhelm-routing", "SKILL.md"), "utf8");
+    const installedPackage = JSON.parse(await readFile(join(installed, "package.json"), "utf8")) as { engines: { node: string } };
+    assert.equal(installedPackage.engines.node, ">=24.0.0",
+      "the installed package must declare the Node 24 floor");
+    const installedSkill = await readFile(join(installed, ".agents", "skills", "turnhelm-routing", "SKILL.md"), "utf8");
+    for (const fragment of ["Node >=24.0.0", "22.8 support dropped", "24.x >=24.5.0"]) {
+      assert.ok(installedSkill.includes(fragment), "packed skill must state the current Node requirement: " + fragment);
+    }
     assert.equal((await readdir(join(installed, "dist", "src"))).includes("cli.js"), true);
     const bin = join(consumer, "node_modules", ".bin", "turnhelm");
     await readFile(bin); // pnpm created the bin link.
@@ -153,6 +162,7 @@ test("the packed distribution installs offline and serves the project entry end 
       assert.ok(status.has(id), "doctor must report the " + id + " check");
     }
     assert.equal(status.get("root"), "pass");
+    assert.equal(status.get("node"), "pass", "the installed doctor must pass the node check on the actual runtime");
     assert.equal(status.get("codex"), "pass");
     assert.equal(status.get("config"), "pass");
     assert.equal(result.code, 0);

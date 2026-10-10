@@ -15,7 +15,8 @@ Use native tools when no separate Codex child is needed.
 
 Commands use the current directory, or the exact directory passed with
 `--project <dir>`; they never discover a parent config, even inside a Git
-work tree. Requirements: Node >=22.8.0, Codex CLI >=0.160.0; `run` needs Git.
+work tree. Requirements: Node >=24.0.0 (22.8 support dropped; validation on
+an actual 24.x >=24.5.0), Codex CLI >=0.160.0; `run` needs Git.
 
 | Command | Effect |
 | --- | --- |

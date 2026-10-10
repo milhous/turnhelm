@@ -111,6 +111,35 @@ test("offline doctor inspects without classifier requests and without writing", 
   for (const sentinel of ["TEST_LAYA_SENTINEL", "TEST_JEV_SENTINEL"]) {
     assert.ok(!evidence.includes(sentinel), "credential sentinel must never appear in evidence");
   }
+  const actualNode = result.checks.find(check => check.id === "node");
+  assert.equal(actualNode?.status, "pass", "the real unmocked runtime node must pass the node check");
+});
+
+test("doctor node floor is 24.0.0", { concurrency: false }, async (t) => {
+  const root = await preparedProject(t);
+  const bin = await fakeBin(t);
+  const env = await doctorEnv(t, bin);
+  const { request, count } = countingRequest();
+  const descriptor = Object.getOwnPropertyDescriptor(process.versions, "node");
+  assert.ok(descriptor !== undefined && descriptor.configurable, "process.versions.node must be configurable to simulate versions");
+  try {
+    for (const [version, status] of [
+      ["22.8.0", "fail"], ["23.99.99", "fail"],
+      ["24.0.0", "pass"], ["24.0.1", "pass"], ["25.0.0", "pass"]
+    ] as const) {
+      Object.defineProperty(process.versions, "node", { ...descriptor, value: version });
+      const result = await doctorProject(root, { probe: false, env, request });
+      const node = result.checks.find(check => check.id === "node");
+      assert.equal(node?.status, status, version);
+      if (status === "fail") assert.equal(node?.next, "upgrade node to 24.0.0 or newer", version);
+    }
+  } finally {
+    Object.defineProperty(process.versions, "node", descriptor);
+  }
+  assert.deepEqual(Object.getOwnPropertyDescriptor(process.versions, "node"), descriptor);
+  assert.equal(count(), 0);
+  const pkg = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { engines: { node: string } };
+  assert.equal(pkg.engines.node, ">=24.0.0");
 });
 
 test("missing config fails config and skips downstream checks", async (t) => {

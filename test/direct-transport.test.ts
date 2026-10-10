@@ -1,7 +1,6 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
@@ -63,8 +62,6 @@ uM2KXlHigxsgSIzxP5wqdwt/3BzHUaMNbPs8rzL/lhH/mys9jENHUzkXVaeoj3TK
 /JbJf0tYaAP90BnyRSU+cTJsBk57DcFPo2lk2oPRiNA=
 -----END CERTIFICATE-----`;
 
-const NODE_22 = "/Users/zhangxiao/.nvm/versions/node/v22.8.0/bin/node";
-
 const CHILD_SCRIPT = `const { directChoiceRequest } = await import(process.argv[2]);
 try {
   const reply = await directChoiceRequest({
@@ -77,6 +74,26 @@ try {
   console.log("REPLY " + JSON.stringify(reply));
 } catch (error) {
   console.log("TRANSPORT_ERROR " + String(error && error.message));
+  process.exit(1);
+}
+`;
+
+// Positive control: a plain default-agent http.get with no explicit agent must
+// be routed through the environment proxy, proving the proxy setup is live.
+const CONTROL_SCRIPT = `const { get } = await import("node:http");
+try {
+  const body = await new Promise((resolve, reject) => {
+    const request = get(process.argv[2], { signal: AbortSignal.timeout(10000) }, response => {
+      let text = "";
+      response.setEncoding("utf8");
+      response.on("data", chunk => { text += chunk; });
+      response.on("end", () => resolve(text));
+    });
+    request.on("error", reject);
+  });
+  console.log("CONTROL " + body);
+} catch (error) {
+  console.log("CONTROL_ERROR " + String(error && error.message));
   process.exit(1);
 }
 `;
@@ -295,6 +312,14 @@ test("accepts delayed headers and delayed bodies within the deadline", async t =
   assert.deepEqual(await directChoiceRequest(spec(delayedBody.url)), decisionReply("fast"));
 });
 
+// The built-in environment proxy (NODE_USE_ENV_PROXY on the default agent)
+// exists on 24.5+ only. On older runtimes the direct assertions below still
+// run, but they are not evidence that an activated proxy was bypassed.
+const supportsEnvProxy = (() => {
+  const [major = 0, minor = 0] = process.versions.node.split(".").map(Number);
+  return major > 24 || (major === 24 && minor >= 5);
+})();
+
 const proxyChild = async (t: TestContext, nodePath: string) => {
   const sentinel = await startServer(t, (request, response) => { response.end("proxied"); });
   const fixture = await startServer(t, (request, response) => {
@@ -305,25 +330,41 @@ const proxyChild = async (t: TestContext, nodePath: string) => {
   t.after(() => rm(directory, { recursive: true, force: true }));
   const script = join(directory, "proxy-child.mjs");
   await writeFile(script, CHILD_SCRIPT);
+  const controlScript = join(directory, "proxy-control.mjs");
+  await writeFile(controlScript, CONTROL_SCRIPT);
   const dist = pathToFileURL(fileURLToPath(new URL("../src/systemone.js", import.meta.url))).href;
   const proxy = sentinel.url.origin;
   for (const noProxy of [undefined, ""]) {
     const env: NodeJS.ProcessEnv = { ...process.env, NODE_USE_ENV_PROXY: "1" };
     delete env.NO_PROXY;
     delete env.no_proxy;
+    delete env.NODE_OPTIONS;
     env.http_proxy = env.https_proxy = env.HTTP_PROXY = env.HTTPS_PROXY = proxy;
     if (noProxy !== undefined) {
       env.NO_PROXY = noProxy;
       env.no_proxy = noProxy;
     }
+    if (supportsEnvProxy) {
+      const sentinelBefore = sentinel.requests.length;
+      const fixtureBefore = fixture.requests.length;
+      const control = await execute(nodePath, [controlScript, fixture.url.href], { encoding: "utf8", timeout: 30000, env })
+        .catch((failure: { stdout?: string; stderr?: string }) => {
+          assert.fail(`control child failed: ${failure.stderr} ${failure.stdout}`);
+        });
+      assert.match(String(control.stdout), /CONTROL proxied/, "a default-agent request must consume the sentinel's proxied reply");
+      assert.equal(sentinel.requests.length, sentinelBefore + 1, "the default-agent control must add exactly one proxy request");
+      assert.equal(fixture.requests.length, fixtureBefore, "the default-agent control must not reach the target directly");
+    }
+    const sentinelAfterControl = sentinel.requests.length;
+    const fixtureAfterControl = fixture.requests.length;
     const run = await execute(nodePath, [script, dist, fixture.url.href], { encoding: "utf8", timeout: 30000, env })
       .catch((failure: { stdout?: string; stderr?: string }) => {
         assert.fail(`child failed: ${failure.stderr} ${failure.stdout}`);
       });
     assert.match(String(run.stdout), /REPLY \{"answers":\{"route":\{"type":"choice","choice":"fast"\}\}\}/);
+    assert.equal(sentinel.requests.length, sentinelAfterControl, "direct transport must add zero proxy requests");
+    assert.equal(fixture.requests.length, fixtureAfterControl + 1, "direct transport must reach the target exactly once");
   }
-  assert.equal(sentinel.requests.length, 0, "the proxy sentinel must see no requests");
-  assert.equal(fixture.requests.length, 2);
 };
 
 test("explicit verification ignores NODE_TLS_REJECT_UNAUTHORIZED=0", async t => {
@@ -344,12 +385,4 @@ test("explicit verification ignores NODE_TLS_REJECT_UNAUTHORIZED=0", async t => 
 
 test("direct transport ignores an enabled environment proxy (current runtime)", async t => {
   await proxyChild(t, process.execPath);
-});
-
-test("direct transport ignores an enabled environment proxy (node 22.8.0)", async t => {
-  if (!existsSync(NODE_22)) {
-    t.skip(`node 22.8.0 binary is not installed at ${NODE_22}; skipping the node 22.8.0 proxy leg`);
-    return;
-  }
-  await proxyChild(t, NODE_22);
 });

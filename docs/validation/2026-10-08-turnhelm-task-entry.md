@@ -34,6 +34,10 @@ packaging check is not an npm registry publish (`package.json` remains
 private). No legacy global config, route bypass, or compatibility adapter is
 retained.
 
+> Superseded 2026-10-10: the minimum is now Node `>=24.0.0` per the
+> [Node 24 baseline record](2026-10-10-node24-baseline.md). The 22.8/26.5
+> results above are retained as historical evidence only.
+
 ## Repeatable offline verification
 
 Run from the source checkout; do not mistake `pnpm build` for installing a

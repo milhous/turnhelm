@@ -19,7 +19,7 @@
     "test:live": "pnpm run build && node --test dist/test/live.integration.js"
   },
   "engines": {
-    "node": ">=22.8.0"
+    "node": ">=24.0.0"
   },
   "devDependencies": {
     "@types/node": "latest",
