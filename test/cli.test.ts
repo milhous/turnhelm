@@ -602,6 +602,24 @@ test("parent stdout EPIPE cancels the worker and exits 1", async t => {
   assert.equal(result.stderr.includes("EPIPE"), false, "no native error text on stderr");
 });
 
+test("receipt and journal retain only finite failure fields", async t => {
+  const f = await fixture(t, { mode: "http-error" });
+  const result = await f.run(["run", TASK], { input: "" });
+  assert.equal(result.code, 1);
+  const receipt = parseReceipt(result.stderr);
+  const routing = receipt.routing as { status: string;
+    attempts: { backend: string; outcome: string; failure?: Record<string, unknown> }[] };
+  assert.equal(routing.status, "failed");
+  assert.deepEqual(routing.attempts.map(attempt => [attempt.backend, attempt.outcome, attempt.failure]),
+    [["laya", "failed", { kind: "http", httpStatus: 500, code: null }]]);
+  const journal = JSON.parse(await readFile(join(f.root, ".turnhelm", "routes.jsonl"), "utf8")) as
+    { attempts: unknown[] };
+  assert.deepEqual(journal.attempts, routing.attempts);
+  const text = JSON.stringify(receipt) + JSON.stringify(journal) + result.stderr;
+  assert.equal(text.includes("CLASSIFIER-BODY-SENTINEL"), false, "the classifier body must not leak");
+  assert.equal(text.includes("dummy-laya-key"), false, "credentials must not leak");
+});
+
 test("routing exhaustion launches zero workers and emits one receipt without a selection", async t => {
   const f = await fixture(t, { mode: "invalid" });
   const result = await f.run(["run", TASK], { input: "" });

@@ -3,12 +3,13 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { createServer as createRawServer, type Socket } from "node:net";
 import { createServer as createHttpsServer } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { directChoiceRequest, type RequestSpec } from "../src/systemone.js";
+import { ClassifierRequestError, classifierFailure, directChoiceRequest, type RequestSpec } from "../src/systemone.js";
 import { decisionReply } from "./fixtures.js";
 
 const execute = promisify(execFile);
@@ -385,4 +386,115 @@ test("explicit verification ignores NODE_TLS_REJECT_UNAUTHORIZED=0", async t => 
 
 test("direct transport ignores an enabled environment proxy (current runtime)", async t => {
   await proxyChild(t, process.execPath);
+});
+
+// Fault injection at the socket boundary: the child wraps http.request to
+// destroy the request with a chosen native code before any response can
+// arrive, proving the transport keeps only whitelisted codes and no message.
+const INJECTED_CODE_SCRIPT = `import http from "node:http";
+import { syncBuiltinESMExports } from "node:module";
+const original = http.request;
+http.request = function (...args) {
+  const request = original.apply(this, args);
+  process.nextTick(() => request.destroy(Object.assign(new Error("injected native failure SECRET-CODE-CANARY"), { code: process.argv[4] })));
+  return request;
+};
+syncBuiltinESMExports();
+const mod = await import(process.argv[2]);
+try {
+  await mod.directChoiceRequest({
+    backend: "laya",
+    url: new URL(process.argv[3]),
+    body: "{}",
+    headers: { "content-type": "application/json" },
+    signal: AbortSignal.timeout(5000)
+  });
+  console.log("UNEXPECTED_REPLY");
+} catch (error) {
+  console.log("FAILURE " + JSON.stringify({
+    typed: error instanceof mod.ClassifierRequestError,
+    message: error && error.message,
+    failure: error && error.failure
+  }));
+}
+`;
+
+const transportError = async (url: URL, signal: AbortSignal = AbortSignal.timeout(5000)): Promise<ClassifierRequestError> => {
+  const error = await directChoiceRequest(spec(url, signal))
+    .then(() => assert.fail("expected the transport to reject"), (failure: unknown) => failure);
+  assert.ok(error instanceof ClassifierRequestError, "every transport failure is a typed error");
+  assert.ok(Object.isFrozen(error.failure), "the failure projection is frozen");
+  assert.deepEqual(Object.keys(error.failure).sort(), ["code", "httpStatus", "kind"]);
+  assert.equal(error.cause, undefined);
+  return error;
+};
+
+test("retains bounded classifier failure without secrets", async t => {
+  const CANARY = "SECRET-FAILURE-CANARY-7f31";
+  // HTTP failure keeps the observed status and nothing from the body.
+  const http = await startServer(t, (request, response) => { response.statusCode = 451; response.end(CANARY); });
+  const httpError = await transportError(http.url);
+  assert.equal(httpError.message, "classifier HTTP 451");
+  assert.deepEqual(httpError.failure, { kind: "http", httpStatus: 451, code: null });
+  assert.ok(!httpError.message.includes(CANARY));
+  assert.ok(!(httpError.stack ?? "").includes(CANARY));
+  assert.equal(classifierFailure(httpError), httpError.failure);
+  // Post-response body failures keep the observed 200 as invalid-response.
+  const badJson = await startServer(t, (request, response) => { response.end("{not json " + CANARY); });
+  const badJsonError = await transportError(badJson.url);
+  assert.equal(badJsonError.message, "invalid classifier response");
+  assert.deepEqual(badJsonError.failure, { kind: "invalid-response", httpStatus: 200, code: null });
+  const invalidUtf8 = await startServer(t, (request, response) => {
+    response.setHeader("content-length", "3");
+    response.end(Buffer.from([0x7b, 0xff, 0x7d]));
+  });
+  assert.deepEqual((await transportError(invalidUtf8.url)).failure, { kind: "invalid-response", httpStatus: 200, code: null });
+  // Node 24 delivers a body short of its declared length as premature close on
+  // the response stream, whatever the peer did; the whitelisted code is kept.
+  const truncatedUrl = await new Promise<URL>(resolve => {
+    const sockets = new Set<Socket>();
+    const server = createRawServer((socket: Socket) => {
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+      socket.end("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n" + jsonReply.slice(0, 20));
+    });
+    t.after(() => {
+      for (const socket of sockets) socket.destroy();
+      return new Promise<void>(done => server.close(() => done()));
+    });
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      assert.ok(address && typeof address !== "string");
+      resolve(new URL(`http://127.0.0.1:${address.port}/v1/systemone`));
+    });
+  });
+  const truncatedError = await transportError(truncatedUrl);
+  assert.equal(truncatedError.message, "classifier response failed");
+  assert.deepEqual(truncatedError.failure, { kind: "response", httpStatus: 200, code: "ECONNRESET" });
+  // A DNS failure keeps only the whitelisted request code, never the host.
+  const notFound = await transportError(new URL("http://transport-invalid-host.invalid/v1/systemone"));
+  assert.equal(notFound.message, "classifier request failed");
+  assert.deepEqual(notFound.failure, { kind: "request", httpStatus: null, code: "ENOTFOUND" });
+  // Non-typed exceptions project to unknown with nothing copied.
+  assert.deepEqual(classifierFailure(new Error("TEST_PRIVATE_SENTINEL")), { kind: "unknown", httpStatus: null, code: null });
+  assert.deepEqual(classifierFailure("raw secret string"), { kind: "unknown", httpStatus: null, code: null });
+  // Native codes are extracted only at the capture boundary, whitelist-only.
+  const fixture = await startServer(t, (request, response) => { response.end(jsonReply); });
+  const directory = await mkdtemp(join(tmpdir(), "turnhelm-code-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const script = join(directory, "code-child.mjs");
+  await writeFile(script, INJECTED_CODE_SCRIPT);
+  const dist = pathToFileURL(fileURLToPath(new URL("../src/systemone.js", import.meta.url))).href;
+  for (const [code, expected] of [
+    ["EACCES", null], ["ECONNRESET", "ECONNRESET"]
+  ] as const) {
+    const run = await execute(process.execPath, [script, dist, fixture.url.href, code], { encoding: "utf8", timeout: 30000 });
+    assert.match(run.stdout, /^FAILURE /);
+    const reported = JSON.parse(run.stdout.slice("FAILURE ".length)) as {
+      typed: boolean; message: string; failure: Record<string, unknown>;
+    };
+    assert.equal(reported.typed, true);
+    assert.equal(reported.message, "classifier request failed");
+    assert.deepEqual(reported.failure, { kind: "request", httpStatus: null, code: expected });
+  }
 });

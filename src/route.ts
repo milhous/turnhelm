@@ -1,6 +1,6 @@
 import type { ProfileId, ProjectConfig, TaskProfile } from "./config.js";
-import { directChoiceRequest, eligibleBackends, requestTaskChoice,
-  type ChoiceRequest, type TaskAttempt, type TaskBackend } from "./systemone.js";
+import { classifierFailure, directChoiceRequest, eligibleBackends, requestTaskChoice,
+  type ChoiceRequest, type ClassifierFailure, type TaskAttempt, type TaskBackend } from "./systemone.js";
 import { validateTask } from "./task.js";
 
 export type TaskDecision = Readonly<{
@@ -27,7 +27,10 @@ const deepFreeze = <T>(value: T): T => {
 const composeSignal = (caller: AbortSignal | undefined, deadline: AbortSignal): AbortSignal =>
   caller ? AbortSignal.any([caller, deadline]) : deadline;
 
-type MutableAttempt = { backend: TaskBackend; outcome: TaskAttempt["outcome"]; durationMs: number };
+// Caller cancellation and the deadline outrank any transport error landing at
+// the same moment; both are fixed projections with nothing observed to keep.
+const CALLER_ABORTED: ClassifierFailure = Object.freeze({ kind: "aborted", httpStatus: null, code: null });
+const DEADLINE_EXCEEDED: ClassifierFailure = Object.freeze({ kind: "timeout", httpStatus: null, code: null });
 
 export async function routeTask(
   task: string,
@@ -38,7 +41,7 @@ export async function routeTask(
   const started = performance.now();
   const caller = options.signal;
   const request = options.request ?? directChoiceRequest;
-  const attempts: MutableAttempt[] = [];
+  const attempts: TaskAttempt[] = [];
   const elapsed = () => Math.round(performance.now() - started);
   const cancelled = (): RoutingResult => deepFreeze({ status: "cancelled", attempts, routingMs: elapsed() });
   if (caller?.aborted) return cancelled();
@@ -50,18 +53,21 @@ export async function routeTask(
     // CPU Laya can take seconds; reserve a quarter of the remaining deadline for Jev.
     const budget = backends.length > 1 && backend === "laya" ? Math.floor(remaining * 3 / 4) : remaining;
     const signal = composeSignal(caller, AbortSignal.timeout(budget));
-    const attempt: MutableAttempt = { backend, outcome: "success", durationMs: 0 };
-    attempts.push(attempt);
+    attempts.push({ backend, outcome: "success", durationMs: 0 });
     const attemptStarted = performance.now();
+    const conclude = (outcome: "failed" | "timeout" | "cancelled", failure: ClassifierFailure, at: number): void => {
+      attempts[attempts.length - 1] = { backend, outcome, durationMs: Math.round(at - attemptStarted), failure };
+    };
     try {
       const { profileId, confidence } = await requestTaskChoice(config, task, backend, options.env, signal, request);
-      attempt.durationMs = Math.round(performance.now() - attemptStarted);
+      const finished = performance.now();
+      attempts[attempts.length - 1] = { backend, outcome: "success", durationMs: Math.round(finished - attemptStarted) };
       if (caller?.aborted) {
-        attempt.outcome = "cancelled";
+        conclude("cancelled", CALLER_ABORTED, finished);
         return cancelled();
       }
-      if (performance.now() - attemptStarted > budget) {
-        attempt.outcome = "timeout";
+      if (finished - attemptStarted > budget) {
+        conclude("timeout", DEADLINE_EXCEEDED, finished);
         continue;
       }
       const decision = deepFreeze({
@@ -69,13 +75,15 @@ export async function routeTask(
         ...(confidence !== undefined ? { confidence } : {})
       });
       return { status: "selected", decision };
-    } catch {
-      attempt.durationMs = Math.round(performance.now() - attemptStarted);
-      if (caller?.aborted) {
-        attempt.outcome = "cancelled";
-        return cancelled();
-      }
-      attempt.outcome = signal.aborted || performance.now() - attemptStarted > budget ? "timeout" : "failed";
+    } catch (error) {
+      const at = performance.now();
+      const timedOut = !caller?.aborted && (signal.aborted || at - attemptStarted > budget);
+      conclude(
+        caller?.aborted ? "cancelled" : timedOut ? "timeout" : "failed",
+        caller?.aborted ? CALLER_ABORTED : timedOut ? DEADLINE_EXCEEDED : classifierFailure(error),
+        at
+      );
+      if (caller?.aborted) return cancelled();
     }
   }
   return caller?.aborted ? cancelled() : deepFreeze({ status: "failed", attempts, routingMs: elapsed() });

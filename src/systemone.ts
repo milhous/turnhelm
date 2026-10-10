@@ -15,14 +15,55 @@ export type RequestSpec = Readonly<{
 // Bounded and decoded directly; never a Fetch Response or a generic client.
 export type ChoiceRequest = (spec: RequestSpec) => Promise<unknown>;
 
-export type TaskAttempt = Readonly<{
-  backend: TaskBackend;
-  outcome: "success" | "failed" | "timeout" | "cancelled";
-  durationMs: number;
+// Bounded, frozen failure projection: only the kind, a status actually
+// observed on an IncomingMessage (integers 100…599), and a whitelisted native
+// code. Nothing parsed out of messages, causes, stacks, URLs, or headers.
+export type ClassifierFailure = Readonly<{
+  kind: "request" | "response" | "http" | "invalid-response" | "aborted" | "timeout" | "invalid-choice" | "unknown";
+  httpStatus: number | null;
+  code: "ENOTFOUND" | "EAI_AGAIN" | "ECONNREFUSED" | "ECONNRESET" | "ETIMEDOUT" | "CERT_HAS_EXPIRED" |
+    "DEPTH_ZERO_SELF_SIGNED_CERT" | "ERR_TLS_CERT_ALTNAME_INVALID" | "UNABLE_TO_VERIFY_LEAF_SIGNATURE" | null;
 }>;
+
+export class ClassifierRequestError extends Error {
+  readonly failure: ClassifierFailure;
+
+  constructor(failure: ClassifierFailure, message: string) {
+    super(message);
+    this.failure = Object.freeze({ ...failure });
+  }
+}
+
+const FAILURE_CODES: ReadonlySet<string> = new Set([
+  "ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "CERT_HAS_EXPIRED",
+  "DEPTH_ZERO_SELF_SIGNED_CERT", "ERR_TLS_CERT_ALTNAME_INVALID", "UNABLE_TO_VERIFY_LEAF_SIGNATURE"
+]);
+
+const UNKNOWN_FAILURE: ClassifierFailure = Object.freeze({ kind: "unknown", httpStatus: null, code: null });
+
+// Rebuilds the whitelist projection only from the local typed error; any other
+// exception, string, or value projects to unknown with nothing copied.
+export function classifierFailure(error: unknown): ClassifierFailure {
+  return error instanceof ClassifierRequestError ? error.failure : UNKNOWN_FAILURE;
+}
+
+export type TaskAttempt = Readonly<
+  | { backend: TaskBackend; outcome: "success"; durationMs: number }
+  | { backend: TaskBackend; outcome: "failed" | "timeout" | "cancelled"; durationMs: number; failure: ClassifierFailure }
+>;
 
 const RESPONSE_LIMIT = 8192;
 const RESPONSE_DECODER = new TextDecoder("utf-8", { fatal: true });
+
+const observedStatus = (status: number | undefined): number | null =>
+  typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599 ? status : null;
+
+// Native codes are extracted only here at the capture boundary and only from
+// the whitelist; a status of 0 or an absent code is not an HTTP response.
+const failureCode = (error: unknown): ClassifierFailure["code"] => {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  return typeof code === "string" && FAILURE_CODES.has(code) ? code as ClassifierFailure["code"] : null;
+};
 
 export function directChoiceRequest(spec: RequestSpec): Promise<unknown> {
   const secure = spec.url.protocol === "https:";
@@ -35,7 +76,7 @@ export function directChoiceRequest(spec: RequestSpec): Promise<unknown> {
     let ownedRequest: ClientRequest | undefined;
     let response: IncomingMessage | undefined;
     let settled = false;
-    const onAbort = (): void => fail("classifier request was cancelled");
+    const onAbort = (): void => fail("classifier request was cancelled", "aborted");
     const finish = (settle: () => void): void => {
       if (settled) return;
       settled = true;
@@ -45,28 +86,29 @@ export function directChoiceRequest(spec: RequestSpec): Promise<unknown> {
       void agent.destroy();
       settle();
     };
-    const fail = (message: string): void => finish(() => reject(new Error(message)));
+    const fail = (message: string, kind: ClassifierFailure["kind"], status: number | null = null, error?: unknown): void =>
+      finish(() => reject(new ClassifierRequestError({ kind, httpStatus: status, code: failureCode(error) }, message)));
     const onResponse = (incoming: IncomingMessage): void => {
       response = incoming;
-      incoming.on("error", () => fail("classifier response failed"));
+      incoming.on("error", error => fail("classifier response failed", "response", observedStatus(incoming.statusCode), error));
       const status = incoming.statusCode ?? 0;
       if (status < 200 || status > 299) {
-        fail("classifier HTTP " + status);
+        fail("classifier HTTP " + status, "http", observedStatus(incoming.statusCode));
         return;
       }
       if (status === 204 || status === 205) {
-        fail("classifier response has no body");
+        fail("classifier response has no body", "response", observedStatus(incoming.statusCode));
         return;
       }
       const encoding = incoming.headers["content-encoding"];
       if (encoding !== undefined && encoding.trim().toLowerCase() !== "identity") {
-        fail("unsupported classifier response encoding");
+        fail("unsupported classifier response encoding", "response", observedStatus(incoming.statusCode));
         return;
       }
       const declared = Number(incoming.headers["content-length"]);
       const declaredSize = Number.isFinite(declared) && declared >= 0 ? declared : undefined;
       if (declaredSize !== undefined && declaredSize > RESPONSE_LIMIT) {
-        fail("classifier response too large");
+        fail("classifier response too large", "response", observedStatus(incoming.statusCode));
         return;
       }
       const chunks: Buffer[] = [];
@@ -74,35 +116,35 @@ export function directChoiceRequest(spec: RequestSpec): Promise<unknown> {
       incoming.on("data", (chunk: Buffer) => {
         size += chunk.length;
         if (size > RESPONSE_LIMIT) {
-          fail("classifier response too large");
+          fail("classifier response too large", "response", observedStatus(incoming.statusCode));
           return;
         }
         chunks.push(chunk);
       });
       incoming.on("end", () => {
         if (declaredSize !== undefined && declaredSize > size) {
-          fail("classifier response was truncated");
+          fail("classifier response was truncated", "invalid-response", observedStatus(incoming.statusCode));
           return;
         }
         let text: string;
         try {
           text = RESPONSE_DECODER.decode(Buffer.concat(chunks));
         } catch {
-          fail("invalid classifier response");
+          fail("invalid classifier response", "invalid-response", observedStatus(incoming.statusCode));
           return;
         }
         let parsed: unknown;
         try {
           parsed = JSON.parse(text) as unknown;
         } catch {
-          fail("invalid classifier response");
+          fail("invalid classifier response", "invalid-response", observedStatus(incoming.statusCode));
           return;
         }
         finish(() => resolve(parsed));
       });
     };
     if (spec.signal.aborted) {
-      fail("classifier request was cancelled");
+      fail("classifier request was cancelled", "aborted");
       return;
     }
     spec.signal.addEventListener("abort", onAbort, { once: true });
@@ -110,15 +152,15 @@ export function directChoiceRequest(spec: RequestSpec): Promise<unknown> {
       ownedRequest = secure
         ? httpsRequest(spec.url, { method: "POST", headers: { ...spec.headers }, agent }, onResponse)
         : httpRequest(spec.url, { method: "POST", headers: { ...spec.headers }, agent }, onResponse);
-    } catch {
-      fail("classifier request failed");
+    } catch (error) {
+      fail("classifier request failed", "request", null, error);
       return;
     }
-    ownedRequest.on("error", () => fail("classifier request failed"));
+    ownedRequest.on("error", error => fail("classifier request failed", "request", null, error));
     try {
       ownedRequest.end(spec.body);
-    } catch {
-      fail("classifier request failed");
+    } catch (error) {
+      fail("classifier request failed", "request", null, error);
     }
   });
 }
@@ -208,5 +250,15 @@ export async function requestTaskChoice(
     ...(backend === "laya" ? { max_len: 8192 } : {}),
     questions: { route: { type: "choice", instructions: CHOICE_INSTRUCTIONS, criteria } }
   });
-  return validateChoice(await request({ backend, url, body, headers, signal }), backend);
+  const reply = await request({ backend, url, body, headers, signal });
+  try {
+    return validateChoice(reply, backend);
+  } catch (error) {
+    // Choice validation is local: a successful direct reply carries no HTTP
+    // metadata, so invalid-choice allows a null status. Messages stay fixed.
+    throw new ClassifierRequestError(
+      { kind: "invalid-choice", httpStatus: null, code: null },
+      error instanceof Error ? error.message : "classifier returned an invalid choice"
+    );
+  }
 }

@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import { parseProjectConfig, PROFILE_IDS } from "../src/config.js";
-import { eligibleBackends, requestTaskChoice, type RequestSpec, type TaskBackend } from "../src/systemone.js";
+import { ClassifierRequestError, classifierFailure, eligibleBackends, requestTaskChoice,
+  type RequestSpec, type TaskBackend } from "../src/systemone.js";
 import { routeTask } from "../src/route.js";
 import { decisionReply, fakeEnv, fixtureConfig } from "./fixtures.js";
 
@@ -571,4 +572,78 @@ test("an optional Laya credential is omitted when absent", async () => {
 test("hosted Jev requires a nonblank key", async () => {
   await assert.rejects(() => call(decisionReply(), "jev", {}), /TYPESAFE_API_KEY/);
   await assert.rejects(() => call(decisionReply(), "jev", { TYPESAFE_API_KEY: "  " }), /TYPESAFE_API_KEY/);
+});
+
+test("late cancellation and deadline override a successful reply", async () => {
+  // A reply landing after caller cancellation is aborted evidence.
+  {
+    const ac = new AbortController();
+    const r = await routeTask("Fix cache invalidation", fixtureConfig(), {
+      env: fakeEnv, signal: ac.signal,
+      request: async () => { ac.abort(); return decisionReply("fast"); }
+    });
+    assert.ok(r.status === "cancelled");
+    const [attempt] = r.attempts;
+    assert.ok(attempt.outcome === "cancelled");
+    assert.deepEqual(attempt.failure, { kind: "aborted", httpStatus: null, code: null });
+    assert.ok(Object.isFrozen(attempt.failure));
+  }
+  // A reply landing past its deadline is timeout evidence.
+  {
+    const c = parseProjectConfig({ ...JSON.parse(JSON.stringify(fixtureConfig())), routingTimeoutMs: 100 });
+    const r = await routeTask("Prove the invariants", c, {
+      env: fakeEnv,
+      request: async () => {
+        const until = performance.now() + 150;
+        while (performance.now() < until) { /* block so deadline timers cannot fire */ }
+        return decisionReply("fast");
+      }
+    });
+    assert.ok(r.status === "failed");
+    const [attempt] = r.attempts;
+    assert.ok(attempt.outcome === "timeout");
+    assert.deepEqual(attempt.failure, { kind: "timeout", httpStatus: null, code: null });
+  }
+  // Success carries no failure field at all.
+  {
+    const r = await routeTask("Prove the invariants", fixtureConfig(), {
+      env: fakeEnv, request: async () => decisionReply("fast")
+    });
+    assert.ok(r.status === "selected");
+    assert.equal("failure" in r.decision.attempts[0], false);
+    assert.deepEqual(Object.keys(r.decision.attempts[0]).sort(), ["backend", "durationMs", "outcome"]);
+  }
+  // A choice-validation failure is invalid-choice and allows a null status.
+  {
+    const r = await routeTask("Fix cache invalidation", fixtureConfig(), {
+      env: fakeEnv, request: async () => ({ answers: { route: "fast" } })
+    });
+    assert.ok(r.status === "failed");
+    const [attempt] = r.attempts;
+    assert.ok(attempt.outcome === "failed");
+    assert.deepEqual(attempt.failure, { kind: "invalid-choice", httpStatus: null, code: null });
+  }
+  // Untyped exceptions project to unknown without copying any text.
+  {
+    const r = await routeTask("Fix cache invalidation", fixtureConfig(), {
+      env: fakeEnv, request: async () => { throw new Error("TEST_PRIVATE_SENTINEL"); }
+    });
+    assert.ok(r.status === "failed");
+    const [attempt] = r.attempts;
+    assert.ok(attempt.outcome === "failed");
+    assert.deepEqual(attempt.failure, { kind: "unknown", httpStatus: null, code: null });
+    assert.equal(JSON.stringify(r.attempts).includes("TEST_PRIVATE_SENTINEL"), false);
+    assert.deepEqual(classifierFailure(new Error("TEST_PRIVATE_SENTINEL")), { kind: "unknown", httpStatus: null, code: null });
+  }
+  // A typed transport error keeps its frozen projection through routing.
+  {
+    const typed = new ClassifierRequestError({ kind: "http", httpStatus: 451, code: null }, "classifier HTTP 451");
+    const r = await routeTask("Fix cache invalidation", fixtureConfig(), {
+      env: fakeEnv, request: async () => { throw typed; }
+    });
+    assert.ok(r.status === "failed");
+    const [attempt] = r.attempts;
+    assert.ok(attempt.outcome === "failed");
+    assert.equal(attempt.failure, typed.failure);
+  }
 });

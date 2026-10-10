@@ -303,14 +303,30 @@ These checks have different execution and authorization scopes:
 | Plain `doctor` | None; offline version/help/config checks | None |
 | `doctor --probe` | One synthetic request per eligible backend, at most two | None |
 | Normal `run` | Full real task; at most one attempt per eligible backend, sequentially | At most one, after selection |
-| `pnpm run test:live` | Up to 48 (six labelled prompts × four repeats × two isolated backends) | None |
+| `pnpm run test:live` | Reserved per suite and never exceeded: `laya` ≤ 11, `jev` ≤ 1, `dual` ≤ 2 per backend | Reserved per suite: `laya` ≤ 7, `jev` ≤ 1, `dual` ≤ 2 |
 
-`test:live` is a separately authorized real-classifier test, not part of the
-offline suite and not a worker/model-access test. Do not use it, help/health,
-or a short `1+1` smoke prompt as acceptance of the actual documentation or
-implementation task. Receipt request counts are client attempts, not proof
-of server receipt or billed requests; generic tool-progress lines are not a
-count of the worker's internal calls.
+`test:live` is a two-step, separately authorized acceptance run, not part of
+the offline suite. `node dist/test/live.integration.js --prepare laya|jev|dual`
+is fully offline and spends nothing: it freezes a private run root, writes
+`manifest.json` (per-case roots, identities, task hashes, configs, oracle
+facts, and reservation caps), and prints the manifest path plus its sha256. A
+human reads the complete manifest and explicitly approves that sha256;
+`--execute <manifest.json> --approve <sha256>` then runs. The manifest claims
+exactly once (a second execute refuses), so a run is never replayed or
+resumed; drift in the baseline, corpus, or any frozen case file stops it
+before further spend. Each case reserves its caps to the append-only evidence
+journal (mode 0600) before any call; the journal stores only bounded fixed
+fields — never task text, worker output, or environment values — and unknown
+receipt data degrades to fixed `invalid`/`unknown` markers. Exit codes: `2`
+usage, `1` failure or incomplete, `0` complete pass, `130`/`143` on interrupt.
+Cancellation signals only the owned CLI child (SIGINT, then SIGTERM after a
+fixed grace); descendants it leaves behind are not scanned or killed, and a
+child that still does not close stops the round as `cleanup-unverified` rather
+than hanging. Do not use `test:live`, help/health, or a short `1+1` smoke prompt
+as acceptance of the actual documentation or implementation task. Receipt
+request counts are client attempts, not proof of server receipt or billed
+requests; generic tool-progress lines are not a count of the worker's internal
+calls.
 
 ## Agent skills (Codex CLI + Claude Code)
 

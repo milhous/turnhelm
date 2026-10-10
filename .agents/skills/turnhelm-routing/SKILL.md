@@ -120,10 +120,18 @@ than silently changing gates/budget.
 
 Offline `doctor` makes no requests. An authorized `doctor --probe` checks each
 eligible classifier separately, not the worker. The repository's
-`pnpm run test:live` can make up to 48 classifier requests and launches no worker; it is
-not a full-chain check. Health/probe success does not guarantee a real task
-meets the deadline. Receipt request counts record client attempts, not proof
-of server receipt, completed inference, or billing.
+`pnpm run test:live` is a two-step acceptance run: an offline `--prepare`
+spends nothing and freezes a manifest a human must read and approve by
+sha256 before `--execute` spends the reserved per-suite caps (classifier
+requests: laya ≤ 11, jev ≤ 1, dual ≤ 2 per backend; workers: laya ≤ 7, jev ≤ 1,
+dual ≤ 2). Each manifest claims once — never replayed or resumed — and the
+evidence journal stores bounded fixed fields only, degrading unknown receipt
+data to `invalid`/`unknown`. Cancelling signals only the owned CLI child
+(SIGINT, then SIGTERM after a fixed grace); left-behind descendants are not
+scanned or killed, and a child that still never closes stops the round as
+`cleanup-unverified` rather than hanging. Health/probe success does
+not guarantee a real task meets the deadline. Receipt request counts record
+client attempts, not proof of server receipt, completed inference, or billing.
 
 Missing worker usage is `"unreported"`; `classifierUsage` is `"unreported"`
 and `wholeRunUsageScope` is `"unverified"`. Snapshots are not whole-task costs
