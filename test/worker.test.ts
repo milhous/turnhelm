@@ -428,6 +428,7 @@ test("subprocess environment strips classifier credentials while preserving Code
     TYPESAFE_API_KEY: "TEST_JEV_SENTINEL",
     TURNHELM_ALLOW_HOSTED_JEV: "1",
     TURNHELM_CONFIG: "/tmp/turnhelm.json",
+    NODE_V8_COVERAGE: "/tmp/node-coverage-shared",
     CODEX_HOME: "/tmp/codex",
     PATH: "/bin"
   });
@@ -435,6 +436,7 @@ test("subprocess environment strips classifier credentials while preserving Code
   assert.equal(env.TYPESAFE_API_KEY, undefined);
   assert.equal(env.TURNHELM_ALLOW_HOSTED_JEV, undefined);
   assert.equal(env.TURNHELM_CONFIG, undefined);
+  assert.equal(env.NODE_V8_COVERAGE, undefined);
   assert.equal(env.CODEX_HOME, "/tmp/codex");
   assert.equal(env.PATH, "/bin");
 });
