@@ -145,12 +145,15 @@ test("aliases match but replaced or unsafe roots fail", async t => {
   await copyFile(moved.manifestPath, join(elsewhere, "manifest.json"));
   await assert.rejects(() => claimAcceptance(join(elsewhere, "manifest.json"), moved.sha256), /run root/);
 
-  // A replaced consumer root (same path, new inode) fails identity.
+  // A replaced consumer root (same path, new inode) fails identity. On
+  // filesystems that recycle the freed inode immediately (ext4/overlayfs, as
+  // in CI), identity still matches and the frozen-bytes check rejects instead
+  // — either way a replaced root never claims.
   const replaced = await prepareJev(t);
   const replacedRoot = (await loadManifest(replaced.manifestPath)).cases[0].root;
   await rm(replacedRoot, { recursive: true, force: true });
   await mkdir(replacedRoot);
-  await assert.rejects(() => claimAcceptance(replaced.manifestPath, replaced.sha256), /case root/);
+  await assert.rejects(() => claimAcceptance(replaced.manifestPath, replaced.sha256), /case root|frozen bytes/);
 
   // Symlinked and FIFO case files are unsafe even with identical bytes.
   const unsafe = await prepareJev(t);
