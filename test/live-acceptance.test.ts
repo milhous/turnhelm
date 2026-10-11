@@ -1713,8 +1713,7 @@ test("host snapshot present state pins through a redirect child", async t => {
       env: {
         PATH: process.env.PATH ?? "",
         TURNHELM_TEST_REDIRECTS: JSON.stringify({ read: { [HOST_PATH]: { to: presentHost } } }),
-        // The test runner spawns a per-file child, which a CLI --require would
-        // never reach; NODE_OPTIONS carries the redirect preload into it.
+        // NODE_OPTIONS carries the redirect preload into the test-file child.
         NODE_OPTIONS: "--require " + preload
       }
     });
