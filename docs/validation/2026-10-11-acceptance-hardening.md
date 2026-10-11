@@ -88,14 +88,14 @@
 
 ## 7. Astra 整分支验收与修复轮（2026-10-11 11:05–11:55）
 
-gpt-6-astra 整分支评审（diff e240130..c42f3f4，4 commits）：**ACCEPT WITH FIXES**（1 Critical + 7 Important + 1 Minor）。9 条全部先逐条对照代码核实为真，随后单轮 TDD 修复（每条先看 RED 再 GREEN；按流程不再分发二次评审）。裁决与逐条记录见 SDD ledger。
+gpt-6-astra 整分支评审（diff e240130..c42f3f4，4 commits）：**ACCEPT WITH FIXES**（1 Critical + 7 Important + 1 Minor）。9 条全部先逐条对照代码核实为真，随后单轮 TDD 修复（每条先看 RED 再 GREEN；按流程不再分发二次评审）。
 
 | # | 级别 | 缺陷 | 回归测试 | 修复 |
 | --- | --- | --- | --- | --- |
 | 1 | Critical | caps 按声明的 reservation 校验，执行却按套件级集合预留（批准范围与实际花费范围脱节） | "declared reservations bound what execution reserves" | parseManifest 要求 reservation ⊇ config 启用后端；pre-claim 门槛、中途 drift 复查、reserved 记录全部按 `item.reservation.backends` |
 | 2 | Important | 超时落定不约束进程退出：后代继承管道不关 → 入口挂起或静默 exit 0 | "an abandoned round still exits with the operator's signal code" | postTerm 弃置：destroy owned pipe ends + `child.unref()`，裁决照常落盘、入口按 130 有界退出 |
 | 3 | Important | 校验读抛错会把已落盘的观察一并丢弃 | "a verification error cannot discard the observation" | observed 构造后立即 append（两分支同）；校验读拒绝 → `checks {verifiable:false}`，空检查集不可能空洞通过 |
-| 4 | Important | hashTree 先整文件读入再判长度（超限文件被整个载入后才被拒） | —（防御性资源界，无行为 RED，见 ledger 裁决） | stat 先行、上限 1 MiB，两种次序同样 fail-closed |
+| 4 | Important | hashTree 先整文件读入再判长度（超限文件被整个载入后才被拒） | —（防御性资源界： readFile-then-check 与 stat-gate 两次序结果同为 fail-closed，无行为 RED 可写） | stat 先行、上限 1 MiB，两种次序同样 fail-closed |
 | 5 | Important | 消费者指令文件（AGENTS.md 与 .agents 两个 skill 文件）未随 case 冻结 | "consumer instruction files are frozen with the case" | inputHashes 钉四文件（指令×3 + input.json），parse/prepare/claim/execute 四点一致；claim 的重复检查块折叠进 `verifyCaseFrozen`（两份拷贝已实际漂移过一次） |
 | 6 | Important | hostSnapshot 只解析从不比对 | "host snapshot drift between prepare and claim rejects" | claim 时按 exists+sha256 与仓库根 `.turnhelm/config.json` 比对，不可读按漂移计（fail-closed） |
 | 7 | Important | 预检期间的操作者取消仍会预留并拉起子进程 | "an already-aborted signal never spawns the child" | superviseCli 预 spawn 守卫（aborted 则零 spawn）；execute 在冻结校验后、预留前两次复查信号 |
