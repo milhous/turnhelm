@@ -123,10 +123,15 @@ eligible classifier separately, not the worker. The repository's
 `pnpm run test:live` is a two-step acceptance run: an offline `--prepare`
 spends nothing and freezes a manifest a human must read and approve by
 sha256 before `--execute` spends the reserved per-suite caps (classifier
-requests: laya ≤ 11, jev ≤ 1, dual ≤ 2 per backend; workers: laya ≤ 7, jev ≤ 1,
-dual ≤ 2). Each manifest claims once — never replayed or resumed — and the
+requests: laya ≤ 7, jev ≤ 1, dual ≤ 2 per backend, calibration-dev and
+calibration-holdout ≤ 12 each; workers: laya ≤ 7, jev ≤ 1, dual ≤ 2, and the
+calibration suites 0). Each manifest covers exactly one suite, claims once —
+never replayed or resumed — and the
 evidence journal stores bounded fixed fields only, degrading unknown receipt
-data to `invalid`/`unknown`. Cancelling signals only the owned CLI child
+data to `invalid`/`unknown`. Exit `3` means a complete calibration roster with
+a band-policy mismatch: the roster ran all 12 calls and only the exit code
+plus the terminal checks prove completion, not a visible `completed` record.
+Cancelling signals only the owned CLI child
 (SIGINT, then SIGTERM after a fixed grace); left-behind descendants are not
 scanned or killed, and a child that still never closes stops the round as
 `cleanup-unverified` rather than hanging. Health/probe success does

@@ -1,21 +1,69 @@
 {
-  "version": 1,
-  "classifierOnlyTasks": [
+  "version": 2,
+  "calibrationTasks": [
     {
-      "id": "classifier-en-local-edit",
-      "task": "Rename the README heading to Turnhelm; change only that line."
+      "id": "heading-en",
+      "pairId": "heading",
+      "language": "en",
+      "split": "dev",
+      "task": "Rename the README heading to Turnhelm; change only that line.",
+      "allowedProfiles": ["fast", "balanced"]
     },
     {
-      "id": "classifier-zh-local-edit",
-      "task": "把 README 的标题改成 Turnhelm，只改这一行。"
+      "id": "heading-zh",
+      "pairId": "heading",
+      "language": "zh",
+      "split": "dev",
+      "task": "把 README 的标题改成 Turnhelm，只改这一行。",
+      "allowedProfiles": ["fast", "balanced"]
     },
     {
-      "id": "classifier-en-investigation",
-      "task": "Investigate a worker/database race, fix it, and add regression tests."
+      "id": "race-en",
+      "pairId": "race",
+      "language": "en",
+      "split": "dev",
+      "task": "Investigate a worker/database race: an enqueued job sometimes runs before the creating transaction commits and reads missing data. Trace the transaction, enqueue, and worker-read ordering; fix the cause and add a deterministic regression test. Limit changes to this flow; preserve successful-job behavior.",
+      "allowedProfiles": ["deep", "frontier", "frontier_xhigh"]
     },
     {
-      "id": "classifier-zh-investigation",
-      "task": "审查认证流程中的权限提升和令牌泄漏风险，并给出证据。"
+      "id": "race-zh",
+      "pairId": "race",
+      "language": "zh",
+      "split": "dev",
+      "task": "排查 worker 与数据库的竞态：入队任务有时在创建它的事务提交前执行，读不到数据。追踪事务、入队和 worker 读取的顺序，修复根因并添加确定性回归测试。只改这一条流程，保持成功任务的行为不变。",
+      "allowedProfiles": ["deep", "frontier", "frontier_xhigh"]
+    },
+    {
+      "id": "decoy-en",
+      "pairId": "decoy",
+      "language": "en",
+      "split": "holdout",
+      "task": "In README, rename the heading \"Security architecture\" to \"Security\"; change only that heading line, with no code or behavior changes.",
+      "allowedProfiles": ["fast", "balanced"]
+    },
+    {
+      "id": "decoy-zh",
+      "pairId": "decoy",
+      "language": "zh",
+      "split": "holdout",
+      "task": "在 README 中把标题“Security architecture”改成“Security”；只改这行标题，不修改代码或行为。",
+      "allowedProfiles": ["fast", "balanced"]
+    },
+    {
+      "id": "auth-en",
+      "pairId": "auth",
+      "language": "en",
+      "split": "holdout",
+      "task": "Review tenant isolation and token revocation across an API gateway, session store, and asynchronous workers. Analyze concurrent token rotation, revocation during store outages, and sensitive data leakage in telemetry; provide evidence, attack timelines, trade-offs, and a minimal remediation and regression-test plan. Do not change files.",
+      "allowedProfiles": ["frontier", "frontier_xhigh", "frontier_max"]
+    },
+    {
+      "id": "auth-zh",
+      "pairId": "auth",
+      "language": "zh",
+      "split": "holdout",
+      "task": "审查 API 网关、会话存储和异步 worker 之间的租户隔离与令牌撤销。分析并发令牌轮换、存储故障期间撤销以及遥测中的敏感数据泄漏，给出证据、攻击时序、权衡和最小修复与回归测试计划。不要修改文件。",
+      "allowedProfiles": ["frontier", "frontier_xhigh", "frontier_max"]
     }
   ],
   "workerReadonlyTask": "Read the file input.json at the repository root. It holds a JSON object with a values array. Count the values and add them up, then reply with exactly one JSON object of the form {\"count\":<count>,\"sum\":<sum>} on stdout and nothing else. Do not create, modify, or delete any file.",

@@ -16,8 +16,9 @@ import { initProject } from "../src/init.js";
 import { readProjectFile } from "../src/project.js";
 import { routeTask } from "../src/route.js";
 import { eligibleBackends } from "../src/systemone.js";
+import { validateTask } from "../src/task.js";
 
-export type LiveSuite = "laya" | "jev" | "dual";
+export type LiveSuite = "laya" | "jev" | "dual" | "calibration-dev" | "calibration-holdout";
 
 export type AcceptanceCaseKind = "worker-readonly" | "worker-write" | "classifier-only";
 
@@ -26,7 +27,7 @@ export type AcceptanceBackend = "laya" | "jev";
 export type AcceptanceOracle =
   | Readonly<{ kind: "stdout-json"; expected: Readonly<{ count: number; sum: number }> }>
   | Readonly<{ kind: "summary-file"; expected: Readonly<{ count: number; sum: number }> }>
-  | Readonly<{ kind: "classifier-valid" }>;
+  | Readonly<{ kind: "classifier-band"; pairId: string; language: "en" | "zh"; split: "dev" | "holdout"; trial: 1 | 2 | 3; allowedProfiles: readonly ProfileId[] }>;
 
 export type AcceptanceCase = Readonly<{
   id: string;
@@ -44,7 +45,7 @@ export type AcceptanceCase = Readonly<{
 }>;
 
 export type AcceptanceManifest = Readonly<{
-  version: 1;
+  version: 2;
   suite: LiveSuite;
   baseline: Readonly<{
     head: string;
@@ -67,7 +68,8 @@ export type SafeEvidence =
   | Readonly<{ phase: "prepared"; suite: LiveSuite; manifestSha256: string; startedAt: string }>
   | Readonly<{ phase: "reserved"; caseId: string; worker: number; backends: readonly AcceptanceBackend[] }>
   | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number }>
-  | Readonly<{ phase: "verified"; caseId: string; verdict: "pass" | "fail"; checks: Readonly<Record<string, boolean>> }>
+  | Readonly<{ phase: "verified"; caseId: string; verdict: "pass" | "fail"; policy: "match" | "mismatch" | "not-applicable"; checks: Readonly<Record<string, boolean>> }>
+  | Readonly<{ phase: "completed"; outcome: "pass" | "policy-mismatch"; cases: number; policyMatches: number; policyMismatches: number }>
   | Readonly<{ phase: "stopped"; caseId: string | null; reason: StoppedReason }>;
 
 export type ClaimedRun = Readonly<{
@@ -92,9 +94,11 @@ const MAX_MANIFEST_BYTES = 1 << 20;
 // Fixed per-suite reservation ceilings (AH-05): an approved manifest may
 // reserve less than the frozen suite, never more.
 const SUITE_CAPS: Readonly<Record<LiveSuite, Readonly<{ worker: number; laya: number; jev: number }>>> = {
-  laya: { worker: 7, laya: 11, jev: 0 },
+  laya: { worker: 7, laya: 7, jev: 0 },
   jev: { worker: 1, laya: 0, jev: 1 },
-  dual: { worker: 2, laya: 2, jev: 2 }
+  dual: { worker: 2, laya: 2, jev: 2 },
+  "calibration-dev": { worker: 0, laya: 12, jev: 0 },
+  "calibration-holdout": { worker: 0, laya: 12, jev: 0 }
 };
 
 // The per-case frozen file set: the worker input plus the consumer
@@ -146,9 +150,15 @@ const deepFreeze = <T>(value: T): T => {
 const parseManifest = (value: unknown): AcceptanceManifest => {
   if (!isRecord(value)) throw fail("manifest must be an object");
   expectKeys(value, ["version", "suite", "baseline", "runRoot", "hostSnapshot", "caps", "cases"], "manifest");
-  if (value.version !== 1) throw fail("manifest version must be 1");
-  if (value.suite !== "laya" && value.suite !== "jev" && value.suite !== "dual") throw fail("manifest suite is unknown");
+  if (value.version !== 2) throw fail("manifest version must be 2");
+  if (value.suite !== "laya" && value.suite !== "jev" && value.suite !== "dual"
+    && value.suite !== "calibration-dev" && value.suite !== "calibration-holdout") {
+    throw fail("manifest suite is unknown");
+  }
   const suite: LiveSuite = value.suite;
+  // Calibration suites are classifier-only; worker suites never accept a
+  // classifier-only case — the kinds cannot mix within one frozen suite.
+  const isCalibration = suite === "calibration-dev" || suite === "calibration-holdout";
 
   if (!isRecord(value.baseline)) throw fail("baseline must be an object");
   const baseline = value.baseline;
@@ -208,6 +218,10 @@ const parseManifest = (value: unknown): AcceptanceManifest => {
     seen.add(id);
     if (raw.kind !== "worker-readonly" && raw.kind !== "worker-write" && raw.kind !== "classifier-only") throw fail("case kind is unknown");
     const kind: AcceptanceCaseKind = raw.kind;
+    // Calibration suites freeze classifier-only cases; worker suites freeze
+    // worker cases. The kinds never mix within one suite (spec §4.2).
+    if (isCalibration && kind !== "classifier-only") throw fail("calibration suites must not carry worker cases");
+    if (!isCalibration && kind === "classifier-only") throw fail("worker suites must not carry classifier-only cases");
     const config = parseProjectConfig(raw.config);
 
     if (typeof raw.root !== "string") throw fail("case root must be a string");
@@ -257,9 +271,23 @@ const parseManifest = (value: unknown): AcceptanceManifest => {
     if (!isRecord(raw.oracle)) throw fail("case oracle must be an object");
     let oracle: AcceptanceOracle;
     if (kind === "classifier-only") {
-      expectKeys(raw.oracle, ["kind"], "case oracle");
-      if (raw.oracle.kind !== "classifier-valid") throw fail("classifier-only case oracle must be classifier-valid");
-      oracle = { kind: "classifier-valid" };
+      expectKeys(raw.oracle, ["kind", "pairId", "language", "split", "trial", "allowedProfiles"], "case oracle");
+      if (raw.oracle.kind !== "classifier-band") throw fail("classifier-only case oracle must be classifier-band");
+      const pairId = expectString(raw.oracle.pairId, "case oracle pairId");
+      if (raw.oracle.language !== "en" && raw.oracle.language !== "zh") throw fail("case oracle language must be en or zh");
+      if (raw.oracle.split !== "dev" && raw.oracle.split !== "holdout") throw fail("case oracle split must be dev or holdout");
+      if (raw.oracle.split !== (suite === "calibration-dev" ? "dev" : "holdout")) throw fail("case oracle split must match the suite");
+      if (raw.oracle.trial !== 1 && raw.oracle.trial !== 2 && raw.oracle.trial !== 3) throw fail("case oracle trial must be 1, 2, or 3");
+      if (!Array.isArray(raw.oracle.allowedProfiles) || raw.oracle.allowedProfiles.length === 0) {
+        throw fail("case oracle allowedProfiles must be a nonempty array");
+      }
+      const allowedProfiles: ProfileId[] = [];
+      for (const profile of raw.oracle.allowedProfiles) {
+        if (typeof profile !== "string" || !PROFILE_IDS.includes(profile as ProfileId)) throw fail("case oracle allowed profile is unknown");
+        if (allowedProfiles.includes(profile as ProfileId)) throw fail("case oracle allowedProfiles must be unique");
+        allowedProfiles.push(profile as ProfileId);
+      }
+      oracle = { kind: "classifier-band", pairId, language: raw.oracle.language, split: raw.oracle.split, trial: raw.oracle.trial, allowedProfiles };
     } else {
       expectKeys(raw.oracle, ["kind", "expected"], "case oracle");
       const wantedKind = kind === "worker-write" ? "summary-file" : "stdout-json";
@@ -309,7 +337,7 @@ const parseManifest = (value: unknown): AcceptanceManifest => {
   }
 
   return deepFreeze({
-    version: 1,
+    version: 2,
     suite,
     baseline: {
       head: baseline.head as string,
@@ -340,11 +368,159 @@ const readManifestBytes = async (manifestPath: string): Promise<Buffer> => {
   }
 };
 
-type FrozenCorpus = {
-  classifierOnlyTasks: readonly { id: string; task: string }[];
+type CalibrationTask = Readonly<{
+  id: string;
+  pairId: string;
+  language: "en" | "zh";
+  split: "dev" | "holdout";
+  task: string;
+  allowedProfiles: readonly ProfileId[];
+}>;
+
+type FrozenCorpus = Readonly<{
+  version: 2;
+  calibrationTasks: readonly CalibrationTask[];
   workerReadonlyTask: string;
   workerWriteTask: string;
   workerFixtureInput: Readonly<{ values: readonly number[] }>;
+}>;
+
+// The corpus is validated against the frozen §4.2 shape before anything is
+// prepared or claimed: eight calibration tasks as four en/zh pairs (two per
+// split, one language each, one shared band per pair), unique ids, transport
+// legal tasks, and safe-integer worker fixture values.
+const corpusFail = (what: string): Error => new Error("acceptance corpus is invalid: " + what);
+const parseCorpus = (value: unknown): FrozenCorpus => {
+  if (!isRecord(value)) throw corpusFail("corpus must be an object");
+  const corpusKeys = ["version", "calibrationTasks", "workerReadonlyTask", "workerWriteTask", "workerFixtureInput"];
+  for (const key of Object.keys(value)) {
+    if (!corpusKeys.includes(key)) throw corpusFail("corpus must not contain unknown field " + JSON.stringify(key));
+  }
+  for (const key of corpusKeys) {
+    if (!Object.hasOwn(value, key)) throw corpusFail("corpus must contain own field " + JSON.stringify(key));
+  }
+  if (value.version !== 2) throw corpusFail("corpus version must be 2");
+  if (typeof value.workerReadonlyTask !== "string" || value.workerReadonlyTask.length === 0) {
+    throw corpusFail("workerReadonlyTask must be a nonempty string");
+  }
+  if (typeof value.workerWriteTask !== "string" || value.workerWriteTask.length === 0) {
+    throw corpusFail("workerWriteTask must be a nonempty string");
+  }
+  validateTask(value.workerReadonlyTask);
+  validateTask(value.workerWriteTask);
+  if (!isRecord(value.workerFixtureInput) || !Array.isArray(value.workerFixtureInput.values)) {
+    throw corpusFail("workerFixtureInput values must be an array");
+  }
+  let fixtureSum = 0;
+  for (const entry of value.workerFixtureInput.values) {
+    if (typeof entry !== "number" || !Number.isSafeInteger(entry)) {
+      throw corpusFail("workerFixtureInput values must be safe integers");
+    }
+    fixtureSum += entry;
+    if (!Number.isSafeInteger(fixtureSum)) throw corpusFail("workerFixtureInput values must sum to a safe integer");
+  }
+  if (!Array.isArray(value.calibrationTasks)) throw corpusFail("calibrationTasks must be an array");
+  const tasks = value.calibrationTasks.map(raw => {
+    if (!isRecord(raw)) throw corpusFail("calibration task must be an object");
+    const taskKeys = ["id", "pairId", "language", "split", "task", "allowedProfiles"];
+    for (const key of Object.keys(raw)) {
+      if (!taskKeys.includes(key)) throw corpusFail("calibration task must not contain unknown field " + JSON.stringify(key));
+    }
+    for (const key of taskKeys) {
+      if (!Object.hasOwn(raw, key)) throw corpusFail("calibration task must contain own field " + JSON.stringify(key));
+    }
+    for (const key of ["id", "pairId", "task"] as const) {
+      if (typeof raw[key] !== "string" || (raw[key] as string).length === 0) {
+        throw corpusFail("calibration task " + key + " must be a nonempty string");
+      }
+    }
+    const id = raw.id as string;
+    const pairId = raw.pairId as string;
+    const task = raw.task as string;
+    if (raw.language !== "en" && raw.language !== "zh") throw corpusFail("calibration task language must be en or zh");
+    if (raw.split !== "dev" && raw.split !== "holdout") throw corpusFail("calibration task split must be dev or holdout");
+    if (Buffer.byteLength(task, "utf8") > MAX_TASK_BYTES) throw corpusFail("calibration task exceeds the transport bound");
+    validateTask(task);
+    if (!Array.isArray(raw.allowedProfiles) || raw.allowedProfiles.length === 0) {
+      throw corpusFail("calibration task allowedProfiles must be a nonempty array");
+    }
+    const allowedProfiles: ProfileId[] = [];
+    for (const profile of raw.allowedProfiles) {
+      if (typeof profile !== "string" || !PROFILE_IDS.includes(profile as ProfileId)) {
+        throw corpusFail("calibration task allowed profile is unknown");
+      }
+      if (allowedProfiles.includes(profile as ProfileId)) throw corpusFail("calibration task allowedProfiles must be unique");
+      allowedProfiles.push(profile as ProfileId);
+    }
+    return {
+      id, pairId, language: raw.language, split: raw.split, task, allowedProfiles
+    } satisfies CalibrationTask;
+  });
+  if (tasks.length !== 8) throw corpusFail("calibrationTasks must freeze exactly eight tasks");
+  const seenIds = new Set<string>();
+  for (const task of tasks) {
+    if (seenIds.has(task.id)) throw corpusFail("calibration task id " + JSON.stringify(task.id) + " is duplicated");
+    seenIds.add(task.id);
+  }
+  for (const split of ["dev", "holdout"] as const) {
+    const ofSplit = tasks.filter(task => task.split === split);
+    if (ofSplit.length !== 4) throw corpusFail("each split must freeze exactly four tasks");
+    const pairIds = new Set(ofSplit.map(task => task.pairId));
+    if (pairIds.size !== 2) throw corpusFail("each split must freeze exactly two task pairs");
+    for (const pairId of pairIds) {
+      const pair = ofSplit.filter(task => task.pairId === pairId);
+      if (pair[0].language === pair[1].language) throw corpusFail("each pair must freeze one en and one zh task");
+      if (pair[0].allowedProfiles.length !== pair[1].allowedProfiles.length
+        || pair[0].allowedProfiles.some((profile, index) => profile !== pair[1].allowedProfiles[index])) {
+        throw corpusFail("each pair must freeze the same allowed-profile band");
+      }
+    }
+  }
+  // Pair identity is global, not per-split: a pairId reused across splits, or a
+  // pair with more or fewer than its two members anywhere in the corpus, is a
+  // forgery even when every split looks well-formed on its own.
+  const pairGroups = new Map<string, typeof tasks>();
+  for (const task of tasks) {
+    const members = pairGroups.get(task.pairId) ?? [];
+    members.push(task);
+    pairGroups.set(task.pairId, members);
+  }
+  if (pairGroups.size !== 4) throw corpusFail("calibrationTasks must freeze exactly four distinct task pairs");
+  for (const [pairId, members] of pairGroups) {
+    if (members.length !== 2) throw corpusFail("pair " + JSON.stringify(pairId) + " must freeze exactly two tasks");
+    if (members[0].split !== members[1].split) {
+      throw corpusFail("pair " + JSON.stringify(pairId) + " must stay within one split");
+    }
+    if (members[0].language === members[1].language) {
+      throw corpusFail("pair " + JSON.stringify(pairId) + " must freeze one en and one zh task");
+    }
+    if (members[0].allowedProfiles.length !== members[1].allowedProfiles.length
+      || members[0].allowedProfiles.some((profile, index) => profile !== members[1].allowedProfiles[index])) {
+      throw corpusFail("pair " + JSON.stringify(pairId) + " must freeze the same allowed-profile band");
+    }
+  }
+  return deepFreeze({
+    version: 2,
+    calibrationTasks: tasks,
+    workerReadonlyTask: value.workerReadonlyTask,
+    workerWriteTask: value.workerWriteTask,
+    workerFixtureInput: deepFreeze({ values: Object.freeze([...value.workerFixtureInput.values]) })
+  }) as FrozenCorpus;
+};
+
+// The host project config is read through production project-path semantics
+// (spec §5.1): only ENOENT counts as absent. An unreadable, linked, special,
+// or oversized host refuses rather than silently reading as absent.
+const readHostSnapshot = async (): Promise<Readonly<{ exists: boolean; sha256: string | null }>> => {
+  const bytes = await readProjectFile(REPO_ROOT, ".turnhelm/config.json", 65536);
+  return bytes === undefined ? { exists: false, sha256: null } : { exists: true, sha256: sha256hex(bytes) };
+};
+
+const verifyHostSnapshot = async (manifest: AcceptanceManifest): Promise<void> => {
+  const current = await readHostSnapshot();
+  if (current.exists !== manifest.hostSnapshot.exists || current.sha256 !== manifest.hostSnapshot.sha256) {
+    throw new Error("acceptance host snapshot drifted from the manifest");
+  }
 };
 
 const runGit = async (cwd: string, args: readonly string[]): Promise<string> => {
@@ -389,9 +565,12 @@ const rebindAllProfiles = (source: ProfileId, config: ProjectConfig): ProjectCon
   withBackends(config, { enabled: config.backends.laya.enabled }, { enabled: config.backends.jev.enabled }, source);
 
 export async function prepareAcceptance(suite: LiveSuite): Promise<{ manifestPath: string; sha256: string }> {
+  // Both frozen inputs are validated before any run root exists: a corpus or
+  // host that refuses the contract leaves nothing behind.
   const corpusBytes = await readFile(CORPUS_PATH);
-  const corpus = JSON.parse(corpusBytes.toString("utf8")) as FrozenCorpus;
+  const corpus = parseCorpus(JSON.parse(corpusBytes.toString("utf8")));
   const template = parseProjectConfig(JSON.parse((await readFile(TEMPLATE_PATH)).toString("utf8")));
+  const hostSnapshot = await readHostSnapshot();
 
   const runRoot = await mkdtemp(join(tmpdir(), "turnhelm-live-" + suite + "-"));
   await mkdir(join(runRoot, "consumers"), { mode: 0o700 });
@@ -436,22 +615,25 @@ export async function prepareAcceptance(suite: LiveSuite): Promise<{ manifestPat
     };
   };
 
-  const makeClassifierOnly = (id: string, task: string, config: ProjectConfig): AcceptanceCase => {
-    const taskBytes = Buffer.from(task, "utf8");
-    if (taskBytes.length > MAX_TASK_BYTES) throw new Error("classifier task exceeds the transport bound");
+  const makeCalibrationCase = (entry: CalibrationTask, trial: 1 | 2 | 3, config: ProjectConfig): AcceptanceCase => {
+    const taskBytes = Buffer.from(entry.task, "utf8");
+    if (taskBytes.length > MAX_TASK_BYTES) throw new Error("calibration task exceeds the transport bound");
     return {
-      id,
+      id: `${entry.id}-trial-${trial}`,
       kind: "classifier-only",
       root: "",
       identity: { dev: 0, ino: 0 },
-      task,
+      task: entry.task,
       taskHash: sha256hex(taskBytes),
       taskBytes: taskBytes.length,
       config,
       inputHashes: {},
       allowedChanges: [],
-      oracle: { kind: "classifier-valid" },
-      reservation: { worker: 0, backends: [suite === "jev" ? "jev" : "laya"] }
+      oracle: {
+        kind: "classifier-band", pairId: entry.pairId, language: entry.language,
+        split: entry.split, trial, allowedProfiles: [...entry.allowedProfiles]
+      },
+      reservation: { worker: 0, backends: ["laya"] }
     };
   };
 
@@ -468,7 +650,6 @@ export async function prepareAcceptance(suite: LiveSuite): Promise<{ manifestPat
       ));
     }
     cases.push(await makeConsumer("default-natural", layaOnly, "worker-readonly", ["laya"]));
-    for (const entry of corpus.classifierOnlyTasks) cases.push(makeClassifierOnly(entry.id, entry.task, layaOnly));
   } else if (suite === "jev") {
     cases.push(await makeConsumer(
       "jev-default-readonly",
@@ -476,6 +657,16 @@ export async function prepareAcceptance(suite: LiveSuite): Promise<{ manifestPat
       "worker-readonly",
       ["jev"]
     ));
+  } else if (suite === "calibration-dev" || suite === "calibration-holdout") {
+    const calibrationConfig = withBackends(template, { enabled: true }, { enabled: false });
+    const split = suite === "calibration-dev" ? "dev" : "holdout";
+    // Trial-major roster (spec §4.2): every corpus entry of the split, once
+    // per trial, in frozen table order.
+    for (const trial of [1, 2, 3] as const) {
+      for (const entry of corpus.calibrationTasks) {
+        if (entry.split === split) cases.push(makeCalibrationCase(entry, trial, calibrationConfig));
+      }
+    }
   } else {
     const dualBackends = withBackends(template, { enabled: true }, { enabled: true });
     // The fixture case gets an offline-chosen high loopback port, frozen only
@@ -495,18 +686,11 @@ export async function prepareAcceptance(suite: LiveSuite): Promise<{ manifestPat
   const hashFile = async (path: string) => ({ path, sha256: sha256hex(await readFile(join(REPO_ROOT, path))) });
   const sourceFiles = (await readdir(join(REPO_ROOT, "src"))).filter(name => name.endsWith(".ts")).sort();
   const distFiles = (await readdir(join(REPO_ROOT, "dist/src"))).filter(name => name.endsWith(".js")).sort();
-  let hostSha256: string | null = null;
-  let hostExists = false;
-  try {
-    const host = await readFile(join(REPO_ROOT, ".turnhelm", "config.json"));
-    hostExists = true;
-    hostSha256 = sha256hex(host);
-  } catch { /* an absent host config is recorded as such */ }
   const canonical = await realpath(runRoot);
   const runInfo = await stat(runRoot);
 
   const manifest: AcceptanceManifest = {
-    version: 1,
+    version: 2,
     suite,
     baseline: {
       head: await runGit(REPO_ROOT, ["rev-parse", "HEAD"]),
@@ -523,7 +707,7 @@ export async function prepareAcceptance(suite: LiveSuite): Promise<{ manifestPat
       }
     },
     runRoot: { canonical, dev: runInfo.dev, ino: runInfo.ino },
-    hostSnapshot: { exists: hostExists, sha256: hostSha256 },
+    hostSnapshot: { exists: hostSnapshot.exists, sha256: hostSnapshot.sha256 },
     caps,
     cases
   };
@@ -551,14 +735,7 @@ export async function claimAcceptance(manifestPath: string, approvedSha256: stri
   // the environment it was granted in; a claim elsewhere (or against a forged
   // snapshot) must not proceed. An unreadable file counts as absent-present
   // drift — the comparison fails closed.
-  let hostNow: Buffer | null = null;
-  try {
-    hostNow = await readFile(join(REPO_ROOT, ".turnhelm", "config.json"));
-  } catch { /* an absent host config is a recorded state, not an error */ }
-  const hostMatches = manifest.hostSnapshot.exists
-    ? hostNow !== null && manifest.hostSnapshot.sha256 === sha256hex(hostNow)
-    : hostNow === null;
-  if (!hostMatches) throw new Error("acceptance host snapshot drifted from the manifest");
+  await verifyHostSnapshot(manifest);
 
   const manifestReal = await realpath(manifestPath);
   const runRoot = dirname(manifestReal);
@@ -583,7 +760,8 @@ export async function claimAcceptance(manifestPath: string, approvedSha256: stri
   // The corpus bytes already match the manifest hash, so the case tasks and
   // oracle facts are pinned to what that corpus actually freezes: a crafted
   // manifest cannot widen scope with its own task text or expected pair.
-  const corpus = JSON.parse((await readFile(CORPUS_PATH)).toString("utf8")) as FrozenCorpus;
+  const corpus = parseCorpus(JSON.parse((await readFile(CORPUS_PATH)).toString("utf8")));
+  const template = parseProjectConfig(JSON.parse((await readFile(TEMPLATE_PATH)).toString("utf8")));
   const corpusWorkerHash = new Map<AcceptanceCaseKind, string>([
     ["worker-readonly", sha256hex(Buffer.from(corpus.workerReadonlyTask, "utf8"))],
     ["worker-write", sha256hex(Buffer.from(corpus.workerWriteTask, "utf8"))]
@@ -592,19 +770,60 @@ export async function claimAcceptance(manifestPath: string, approvedSha256: stri
     count: corpus.workerFixtureInput.values.length,
     sum: corpus.workerFixtureInput.values.reduce((total, value) => total + value, 0)
   };
-  const classifierTaskHashes = new Set(corpus.classifierOnlyTasks.map(entry => sha256hex(Buffer.from(entry.task, "utf8"))));
-  for (const item of manifest.cases) {
-    if (item.kind === "classifier-only") {
-      if (!classifierTaskHashes.has(item.taskHash)) {
+
+  // The calibration roster is rebuilt from the corpus exactly as prepare
+  // froze it: id, task hash, full oracle metadata, and every template binding
+  // must match case for case — a crafted manifest cannot swap trials, bands,
+  // or configs inside an approved hash.
+  const calibrationSplit = manifest.suite === "calibration-dev" ? "dev"
+    : manifest.suite === "calibration-holdout" ? "holdout" : null;
+  if (calibrationSplit !== null) {
+    const entries = corpus.calibrationTasks.filter(entry => entry.split === calibrationSplit);
+    const roster = [1, 2, 3].flatMap(trial => entries.map(entry => ({ entry, trial })));
+    if (manifest.cases.length !== roster.length) {
+      throw new Error("acceptance calibration roster is incomplete: " + manifest.cases.length
+        + " of " + roster.length + " cases");
+    }
+    for (const [index, item] of manifest.cases.entries()) {
+      const { entry, trial } = roster[index];
+      if (item.kind !== "classifier-only") {
+        throw new Error("acceptance calibration roster has a non-calibration case: " + item.id);
+      }
+      if (item.id !== `${entry.id}-trial-${trial}`) {
+        throw new Error("acceptance case id is not the frozen roster id: " + item.id);
+      }
+      if (item.taskHash !== sha256hex(Buffer.from(entry.task, "utf8"))) {
         throw new Error("acceptance case task is not the frozen corpus task: " + item.id);
       }
-      continue;
+      const oracle = item.oracle;
+      if (oracle.kind !== "classifier-band"
+        || oracle.pairId !== entry.pairId || oracle.language !== entry.language
+        || oracle.split !== entry.split || oracle.trial !== trial
+        || oracle.allowedProfiles.length !== entry.allowedProfiles.length
+        || oracle.allowedProfiles.some((profile, at) => profile !== entry.allowedProfiles[at])) {
+        throw new Error("acceptance case oracle is not the corpus fact: " + item.id);
+      }
+      if (item.config.routingTimeoutMs !== template.routingTimeoutMs) {
+        throw new Error("acceptance calibration config drifted from the template: " + item.id);
+      }
+      if (!item.config.backends.laya.enabled || item.config.backends.jev.enabled) {
+        throw new Error("acceptance calibration config must be laya-only: " + item.id);
+      }
+      for (const id of PROFILE_IDS) {
+        if (item.config.profiles[id].model !== template.profiles[id].model
+          || item.config.profiles[id].effort !== template.profiles[id].effort) {
+          throw new Error("acceptance calibration profiles drifted from the template: " + item.id);
+        }
+      }
     }
+  }
+  for (const item of manifest.cases) {
+    if (item.kind === "classifier-only") continue;
     if (item.taskHash !== corpusWorkerHash.get(item.kind)) {
       throw new Error("acceptance case task is not the frozen corpus task: " + item.id);
     }
     const oracle = item.oracle;
-    if (oracle.kind === "classifier-valid") {
+    if (oracle.kind === "classifier-band") {
       throw new Error("acceptance case oracle is not the corpus fact: " + item.id);
     }
     if (oracle.expected.count !== corpusFact.count || oracle.expected.sum !== corpusFact.sum) {
@@ -651,7 +870,10 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
   const raw = record as unknown as Record<string, unknown>;
   switch (raw.phase) {
     case "prepared": {
-      if (raw.suite !== "laya" && raw.suite !== "jev" && raw.suite !== "dual") throw evidenceReject("prepared suite is unknown");
+      if (raw.suite !== "laya" && raw.suite !== "jev" && raw.suite !== "dual"
+        && raw.suite !== "calibration-dev" && raw.suite !== "calibration-holdout") {
+        throw evidenceReject("prepared suite is unknown");
+      }
       const manifestSha256 = evidenceString(raw.manifestSha256);
       const startedAt = evidenceString(raw.startedAt);
       if (manifestSha256 === null || startedAt === null) throw evidenceReject("prepared fields are malformed");
@@ -681,7 +903,36 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
           if (typeof verdict === "boolean") checks[name] = verdict;
         }
       }
-      return { phase: "verified", caseId: evidenceString(raw.caseId) ?? "", verdict: raw.verdict === "pass" ? "pass" : "fail", checks };
+      const policy = raw.policy;
+      if (policy !== "match" && policy !== "mismatch" && policy !== "not-applicable") {
+        throw evidenceReject("verified policy is unknown");
+      }
+      return { phase: "verified", caseId: evidenceString(raw.caseId) ?? "", verdict: raw.verdict === "pass" ? "pass" : "fail", policy, checks };
+    }
+    case "completed": {
+      // The commit-point fact is written only by the runner itself, so its
+      // shape is strict: an unknown field or an impossible count combination
+      // rejects rather than degrades.
+      for (const key of Object.keys(raw)) {
+        if (key !== "phase" && key !== "outcome" && key !== "cases" && key !== "policyMatches" && key !== "policyMismatches") {
+          throw evidenceReject("completed record must not contain unknown field " + JSON.stringify(key));
+        }
+      }
+      const outcome = raw.outcome;
+      if (outcome !== "pass" && outcome !== "policy-mismatch") throw evidenceReject("completed outcome is unknown");
+      const counts = [raw.cases, raw.policyMatches, raw.policyMismatches];
+      if (!counts.every(value => typeof value === "number" && Number.isSafeInteger(value) && value >= 0)) {
+        throw evidenceReject("completed counts must be non-negative safe integers");
+      }
+      const [cases, matches, mismatches] = counts as [number, number, number];
+      if (cases !== 12 || matches + mismatches !== cases) {
+        throw evidenceReject("completed counts must cover the twelve-case roster");
+      }
+      if (outcome === "pass" && mismatches !== 0) throw evidenceReject("a completed pass must report no mismatches");
+      if (outcome === "policy-mismatch" && mismatches === 0) {
+        throw evidenceReject("a completed policy-mismatch must report a mismatch");
+      }
+      return { phase: "completed", outcome, cases, policyMatches: matches, policyMismatches: mismatches };
     }
     case "stopped": {
       const reason = raw.reason;
@@ -976,13 +1227,19 @@ const lastJsonLine = (text: string): Record<string, unknown> | null => {
   }
 };
 
+// The whole payload is parsed once: exactly the two expected own keys with
+// safe-integer values. Prose, fences, a second object, extra or missing keys,
+// and non-integers all fail — only legal JSON whitespace/format/order varies.
 const jsonEquals = (raw: string | null, expected: Readonly<{ count: number; sum: number }>): boolean => {
   if (raw === null) return false;
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return false;
     const record = parsed as Record<string, unknown>;
-    return record.count === expected.count && record.sum === expected.sum;
+    const keys = Object.keys(record);
+    if (keys.length !== 2 || !("count" in record) || !("sum" in record)) return false;
+    return Number.isSafeInteger(record.count) && Number.isSafeInteger(record.sum)
+      && record.count === expected.count && record.sum === expected.sum;
   } catch {
     return false;
   }
@@ -1093,6 +1350,9 @@ export async function executeAcceptance(
     }
 
     try {
+      const isCalibration = run.manifest.suite === "calibration-dev" || run.manifest.suite === "calibration-holdout";
+      let policyMatches = 0;
+      let policyMismatches = 0;
       for (const item of run.manifest.cases) {
         if (abort?.aborted) {
           await appendEvidence(run, { phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
@@ -1133,6 +1393,9 @@ export async function executeAcceptance(
         const caseEnv = fixtureCase === item ? withoutLayaKey(env) : env;
         let observation: SafeEvidence;
         let checks: Record<string, boolean>;
+        let policy: "match" | "mismatch" | "not-applicable" = "not-applicable";
+        let band: readonly string[] | null = null;
+        let selectedProfileId = "unknown";
         let stopReason: StoppedReason | null = null;
         let stopExitCode = 1;
 
@@ -1145,6 +1408,8 @@ export async function executeAcceptance(
           const backend = selected ? routing.decision.backend : "invalid";
           const rawProfile = selected ? routing.decision.profileId : "unknown";
           const profileId = selected && Object.hasOwn(item.config.profiles, rawProfile) ? rawProfile : "unknown";
+          band = item.oracle.kind === "classifier-band" ? item.oracle.allowedProfiles : null;
+          selectedProfileId = profileId;
           observation = {
             phase: "observed", caseId: item.id, backend, profileId, rootMatches: "unknown",
             exitCode: null, durationMs, attempts: attemptsMade
@@ -1210,6 +1475,7 @@ export async function executeAcceptance(
           const backend = backendRaw === "laya" || backendRaw === "jev" ? backendRaw : "invalid";
           const profileRaw = receiptLine !== null && typeof receiptLine.profileId === "string" ? receiptLine.profileId : "";
           const profileId = Object.hasOwn(item.config.profiles, profileRaw) ? profileRaw : "unknown";
+          selectedProfileId = profileId;
           const rootInfo = await stat(item.root).catch(() => null);
           const rootMatches = rootInfo !== null && rootInfo.dev === item.identity.dev && rootInfo.ino === item.identity.ino;
           const receiptFrame = lastJsonLine(decodeBounded(supervision.stderr) ?? "");
@@ -1256,8 +1522,7 @@ export async function executeAcceptance(
                 ? receiptFrame.worker as Record<string, unknown> : null;
               let oracleOk = false;
               if (item.oracle.kind === "stdout-json") {
-                const lines = (stdoutText ?? "").trimEnd().split("\n");
-                oracleOk = jsonEquals(lines.at(-1) ?? null, item.oracle.expected);
+                oracleOk = jsonEquals(stdoutText, item.oracle.expected);
               } else if (item.oracle.kind === "summary-file") {
                 const summary = await readProjectFile(item.root, "out/summary.json", 65536);
                 oracleOk = summary !== undefined && jsonEquals(decodeBounded(summary), item.oracle.expected);
@@ -1281,7 +1546,7 @@ export async function executeAcceptance(
                 ...(run.manifest.suite === "dual" && item === run.manifest.cases[0]
                   ? { "laya-first": backend === "laya" && attempts === 1 }
                   : {}),
-                ...(item.oracle.kind === "classifier-valid" ? {} : { oracle: oracleOk })
+                ...(item.oracle.kind === "classifier-band" ? {} : { oracle: oracleOk })
               };
             } catch {
               // A verification read refused the tree (e.g. a symlink planted
@@ -1298,16 +1563,71 @@ export async function executeAcceptance(
           return stopExitCode;
         }
         const verdict = Object.values(checks).every(Boolean) ? "pass" : "fail";
+        if (item.kind === "classifier-only") {
+          // The engineering verdict is judged first and independently: only a
+          // completed route can claim a band, so a legal-but-out-of-band
+          // selection is a policy mismatch that continues the roster.
+          policy = verdict === "pass"
+            ? (band !== null && band.includes(selectedProfileId) ? "match" : "mismatch")
+            : "not-applicable";
+        }
         try {
-          await appendEvidence(run, { phase: "verified", caseId: item.id, verdict, checks });
+          await appendEvidence(run, { phase: "verified", caseId: item.id, verdict, policy, checks });
         } catch {
           return 1;
         }
+        if (isCalibration && policy === "match") policyMatches += 1;
+        if (isCalibration && policy === "mismatch") policyMismatches += 1;
         if (verdict === "fail") {
           await appendEvidence(run, { phase: "stopped", caseId: item.id, reason: "verdict" }).catch(() => {});
           return 1;
         }
       }
+
+      // §5.1 terminal boundary: after the last verified record is durable,
+      // every suite re-checks the operator signal and the frozen corpus,
+      // source/dist, and host config before returning. Calibration alone
+      // reaches a commit point, and only through the completed protocol.
+      const stopTerminal = async (reason: StoppedReason, exitCode: number): Promise<number> => {
+        await appendEvidence(run, { phase: "stopped", caseId: null, reason }).catch(() => {});
+        return exitCode;
+      };
+      if (abort?.aborted) return await stopTerminal("signal", 130);
+      try {
+        await verifyRepoFrozen(run.manifest);
+        await verifyHostSnapshot(run.manifest);
+      } catch {
+        return await stopTerminal("drift", 1);
+      }
+      let outcome: "pass" | "policy-mismatch" = "pass";
+      if (isCalibration) {
+        outcome = policyMismatches === 0 ? "pass" : "policy-mismatch";
+        try {
+          await appendEvidence(run, {
+            phase: "completed", outcome, cases: run.manifest.cases.length,
+            policyMatches, policyMismatches
+          });
+        } catch {
+          return await stopTerminal("evidence-io", 1);
+        }
+        // The completed line may already be visible here; visibility alone is
+        // never completion — only the whole protocol below commits the run.
+        if (abort?.aborted) return await stopTerminal("signal", 130);
+        try {
+          await verifyRepoFrozen(run.manifest);
+          await verifyHostSnapshot(run.manifest);
+        } catch {
+          return await stopTerminal("drift", 1);
+        }
+      }
+      try {
+        await run.handle.close();
+      } catch {
+        return await stopTerminal("evidence-io", 1);
+      }
+      // The FD is closed: a stop discovered now is reported, never appended.
+      if (abort?.aborted) return 130;
+      if (isCalibration) return outcome === "pass" ? 0 : 3;
       return 0;
     } finally {
       if (fixtureServer !== null) {
