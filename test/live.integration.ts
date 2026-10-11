@@ -6,7 +6,7 @@ import { executeAcceptance, prepareAcceptance, type LiveSuite } from "./live-acc
 
 class UsageError extends Error {}
 
-const USAGE = "usage: node dist/test/live.integration.js --prepare laya|jev|dual | --execute <manifest.json> --approve <sha256>";
+const USAGE = "usage: node dist/test/live.integration.js --prepare laya|jev|dual|calibration-dev|calibration-holdout | --execute <manifest.json> --approve <sha256>";
 
 type Args =
   | { command: "prepare"; suite: LiveSuite }
@@ -20,7 +20,8 @@ const parseArgs = (argv: readonly string[]): Args => {
   if (args.includes("--")) throw new UsageError("only one forwarding separator is allowed");
   if (args.length === 2 && args[0] === "--prepare") {
     const suite = args[1];
-    if (suite !== "laya" && suite !== "jev" && suite !== "dual") throw new UsageError("unknown suite");
+    if (suite !== "laya" && suite !== "jev" && suite !== "dual"
+      && suite !== "calibration-dev" && suite !== "calibration-holdout") throw new UsageError("unknown suite");
     return { command: "prepare", suite };
   }
   if (args.length === 4 && args[0] === "--execute" && args[2] === "--approve") {

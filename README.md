@@ -303,22 +303,29 @@ These checks have different execution and authorization scopes:
 | Plain `doctor` | None; offline version/help/config checks | None |
 | `doctor --probe` | One synthetic request per eligible backend, at most two | None |
 | Normal `run` | Full real task; at most one attempt per eligible backend, sequentially | At most one, after selection |
-| `pnpm run test:live` | Reserved per suite and never exceeded: `laya` ≤ 11, `jev` ≤ 1, `dual` ≤ 2 per backend | Reserved per suite: `laya` ≤ 7, `jev` ≤ 1, `dual` ≤ 2 |
+| `pnpm run test:live` | Reserved per suite and never exceeded: `laya` ≤ 7, `jev` ≤ 1, `dual` ≤ 2 per backend, `calibration-dev`/`calibration-holdout` ≤ 12 each with no Jev | Reserved per suite: `laya` ≤ 7, `jev` ≤ 1, `dual` ≤ 2; the calibration suites reserve 0 workers |
 
 `test:live` is a two-step, separately authorized acceptance run, not part of
-the offline suite. `node dist/test/live.integration.js --prepare laya|jev|dual`
+the offline suite. `node dist/test/live.integration.js --prepare laya|jev|dual|calibration-dev|calibration-holdout`
 is fully offline and spends nothing: it freezes a private run root, writes
 `manifest.json` (per-case roots, identities, task hashes, configs, oracle
 facts, and reservation caps), and prints the manifest path plus its sha256. A
 human reads the complete manifest and explicitly approves that sha256;
-`--execute <manifest.json> --approve <sha256>` then runs. The manifest claims
+`--execute <manifest.json> --approve <sha256>` then runs. Each manifest is one
+suite only; reservations never carry across suites. The manifest claims
 exactly once (a second execute refuses), so a run is never replayed or
 resumed; drift in the baseline, corpus, or any frozen case file stops it
 before further spend. Each case reserves its caps to the append-only evidence
 journal (mode 0600) before any call; the journal stores only bounded fixed
 fields — never task text, worker output, or environment values — and unknown
 receipt data degrades to fixed `invalid`/`unknown` markers. Exit codes: `2`
-usage, `1` failure or incomplete, `0` complete pass, `130`/`143` on interrupt.
+usage, `1` failure or incomplete, `0` complete pass, `3` a complete
+calibration roster containing a band-policy mismatch, `130`/`143` on interrupt.
+In the calibration suites a legal-but-out-of-band selection is recorded as a
+policy mismatch and the roster continues to its full 12 calls — only routing
+failures stop early — while worker suites stop at the first failing case. A
+visible `completed` journal record alone is not proof of completion: a failed
+terminal sync, close, or drift recheck after it still fails the run.
 Cancellation signals only the owned CLI child (SIGINT, then SIGTERM after a
 fixed grace); descendants it leaves behind are not scanned or killed, and a
 child that still does not close stops the round as `cleanup-unverified` rather
