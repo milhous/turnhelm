@@ -12,7 +12,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { parseProjectConfig } from "../src/config.js";
 import {
-  appendEvidence, claimAcceptance, executeAcceptance, prepareAcceptance, superviseCli,
+  appendEvidence, claimAcceptance, executeAcceptance, findOnPath, prepareAcceptance, superviseCli,
   type AcceptanceManifest, type ClaimedRun, type SafeEvidence
 } from "./live-acceptance.js";
 
@@ -433,7 +433,12 @@ test("prepare is offline and freezes independent consumers", async t => {
     if (item.kind === "worker-readonly" || item.kind === "worker-write") {
       const input = await readFile(join(item.root, "input.json"));
       assert.deepEqual(JSON.parse(input.toString("utf8")), corpus.workerFixtureInput);
-      assert.deepEqual(item.inputHashes, { "input.json": sha256hex(input) });
+      // The frozen set covers the input and every installed instruction file.
+      const frozenCaseFiles = ["AGENTS.md", ".agents/skills/turnhelm-routing/SKILL.md",
+        ".agents/skills/turnhelm-routing/agents/openai.yaml", "input.json"] as const;
+      const expectedHashes: Record<string, string> = {};
+      for (const file of frozenCaseFiles) expectedHashes[file] = sha256hex(await readFile(join(item.root, file)));
+      assert.deepEqual(item.inputHashes, expectedHashes);
       assert.equal(item.allowedChanges.length, item.kind === "worker-write" ? 1 : 0);
       if (item.kind === "worker-write") assert.deepEqual(item.allowedChanges, ["out/summary.json"]);
     }
@@ -626,6 +631,22 @@ process.stdin.on("end", () => {
       detached: true, stdio: ["ignore", "inherit", "inherit"]
     }).unref();
   }
+  if (mode === "symlink-summary") {
+    fs.mkdirSync(path.join(process.cwd(), "out"), { recursive: true });
+    fs.writeFileSync(path.join(process.cwd(), "out", "summary.real"), answer);
+    fs.symlinkSync("summary.real", path.join(process.cwd(), "out", "summary.json"));
+  }
+  if (mode === "linger-forever") {
+    // A descendant in its own process group that inherits stdout and never
+    // exits; it writes its pid (outside the consumer tree) so the test can
+    // reap it afterwards.
+    const pidFile = process.env.TURNHELM_LINGER_PID_FILE || path.join(process.cwd(), "linger.pid");
+    require("node:child_process").spawn(process.execPath,
+      ["-e", "require('node:fs').writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 3600);",
+        pidFile], {
+      detached: true, stdio: ["ignore", "inherit", "inherit"]
+    }).unref();
+  }
   if (mode === "ok-write" || mode === "write-readonly") {
     fs.mkdirSync(path.join(process.cwd(), "out"), { recursive: true });
     fs.writeFileSync(path.join(process.cwd(), "out", "summary.json"), answer);
@@ -649,6 +670,8 @@ type CraftedCase = {
   kind: "worker-readonly" | "worker-write" | "classifier-only";
   journalSeed?: readonly string[];
   fixtureUrl?: string;
+  reservation?: readonly ("laya" | "jev")[];
+  jevEnabled?: boolean;
 };
 
 const readEvidence = async (runRoot: string): Promise<Record<string, unknown>[]> =>
@@ -679,13 +702,17 @@ const buildRun = async (
   t.after(() => rm(runRoot, { recursive: true, force: true }));
   await mkdir(join(runRoot, "consumers"), { mode: 0o700 });
   const manifestCases: unknown[] = [];
+  const backendsFor = (entry: CraftedCase): readonly ("laya" | "jev")[] =>
+    entry.reservation ?? (entry.kind === "classifier-only"
+      ? [suite === "jev" ? "jev" : "laya"]
+      : suite === "jev" ? ["jev"] : suite === "dual" ? ["laya", "jev"] : ["laya"]);
   for (const entry of cases) {
     const config = parseProjectConfig({
       version: 1,
       routingTimeoutMs: 1000,
       backends: {
-        laya: { enabled: true, url: entry.fixtureUrl ?? layaUrl },
-        jev: { enabled: suite !== "laya" }
+        laya: { enabled: suite !== "jev", url: entry.fixtureUrl ?? layaUrl },
+        jev: { enabled: entry.jevEnabled ?? suite !== "laya" }
       },
       profiles: template.profiles
     });
@@ -699,7 +726,7 @@ const buildRun = async (
         task, taskHash: sha256hex(taskBytes), taskBytes: taskBytes.length,
         config, inputHashes: {}, allowedChanges: [],
         oracle: { kind: "classifier-valid" },
-        reservation: { worker: 0, backends: [suite === "jev" ? "jev" : "laya"] }
+        reservation: { worker: 0, backends: backendsFor(entry) }
       });
       continue;
     }
@@ -711,6 +738,10 @@ const buildRun = async (
     const input = Buffer.from(JSON.stringify(corpus.workerFixtureInput), "utf8");
     await writeFile(join(root, "input.json"), input, { mode: 0o644 });
     await writeFile(join(root, "AGENTS.md"), "# consumer instructions\n", { mode: 0o644 });
+    await mkdir(join(root, ".agents", "skills", "turnhelm-routing", "agents"), { recursive: true, mode: 0o700 });
+    await writeFile(join(root, ".agents", "skills", "turnhelm-routing", "SKILL.md"), "# turnhelm routing\n", { mode: 0o644 });
+    await writeFile(join(root, ".agents", "skills", "turnhelm-routing", "agents", "openai.yaml"),
+      "model: gpt-6-luna\n", { mode: 0o644 });
     if (entry.journalSeed?.length) {
       await writeFile(join(root, ".turnhelm", "routes.jsonl"), entry.journalSeed.join("\n") + "\n", { mode: 0o644 });
     }
@@ -720,12 +751,17 @@ const buildRun = async (
       identity: { dev: info.dev, ino: info.ino },
       task, taskHash: sha256hex(taskBytes), taskBytes: taskBytes.length,
       config,
-      inputHashes: { "input.json": sha256hex(input) },
+      inputHashes: {
+        "AGENTS.md": sha256hex(await readFile(join(root, "AGENTS.md"))),
+        ".agents/skills/turnhelm-routing/SKILL.md": sha256hex(await readFile(join(root, ".agents", "skills", "turnhelm-routing", "SKILL.md"))),
+        ".agents/skills/turnhelm-routing/agents/openai.yaml": sha256hex(await readFile(join(root, ".agents", "skills", "turnhelm-routing", "agents", "openai.yaml"))),
+        "input.json": sha256hex(input)
+      },
       allowedChanges: entry.kind === "worker-write" ? ["out/summary.json"] : [],
       oracle: entry.kind === "worker-write"
         ? { kind: "summary-file", expected: { count: 4, sum: 17 } }
         : { kind: "stdout-json", expected: { count: 4, sum: 17 } },
-      reservation: { worker: 1, backends: suite === "jev" ? ["jev"] : suite === "dual" ? ["laya", "jev"] : ["laya"] }
+      reservation: { worker: 1, backends: backendsFor(entry) }
     });
   }
   const hashRepoFile = async (relative: string) => ({ path: relative, sha256: sha256hex(await readFile(join(REPO_ROOT, relative))) });
@@ -740,14 +776,18 @@ const buildRun = async (
       source: await Promise.all(srcFiles.map(name => hashRepoFile("src/" + name))),
       dist: await Promise.all([...distFiles.map(name => "dist/src/" + name), "dist/test/live-acceptance.js"].map(hashRepoFile)),
       corpus: sha256hex(await readFile(CORPUS_PATH)),
-      tools: { node: process.version, execPath: process.execPath, git: "git", gitPath: "git" }
+      tools: {
+        node: process.version, execPath: process.execPath,
+        git: (await execute("git", ["--version"], { encoding: "utf8" })).stdout.trim(),
+        gitPath: await findOnPath("git")
+      }
     },
     runRoot: { canonical: await realpath(runRoot), dev: runInfo.dev, ino: runInfo.ino },
     hostSnapshot: { exists: false, sha256: null },
     caps: {
       worker: cases.filter(entry => entry.kind !== "classifier-only").length,
-      laya: cases.filter(entry => suite !== "jev").length,
-      jev: cases.filter(entry => suite === "jev" || suite === "dual").length
+      laya: cases.filter(entry => backendsFor(entry).includes("laya")).length,
+      jev: cases.filter(entry => backendsFor(entry).includes("jev")).length
     },
     cases: manifestCases
   };
@@ -1139,6 +1179,23 @@ test("a child that never closes settles bounded with cleanup unverified", async 
   assert.equal(wedged.exitCode, null, "an abandoned child has no exit fact");
 });
 
+test("an already-aborted signal never spawns the child", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "turnhelm-spawncheck-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const marker = join(directory, "spawned");
+  const scriptPath = join(directory, "marker.js");
+  await writeFile(scriptPath, "require(\"node:fs\").writeFileSync(" + JSON.stringify(marker) + ", \"1\");\n");
+  const controller = new AbortController();
+  controller.abort();
+
+  const result = await superviseCli(process.execPath, [scriptPath],
+    { env: { PATH: process.env.PATH ?? "" }, signal: controller.signal, timeoutMs: 5000 });
+  assert.equal(result.aborted, true, "the stop is attributed to the operator's signal");
+  assert.equal(result.cliClosed, false, "no child ever ran to close");
+  await assert.rejects(() => stat(marker), { code: "ENOENT" },
+    "no child may be spawned after the operator aborted");
+});
+
 test("a lingering descendant stops the round as cleanup-unverified", async t => {
   const classifier = await startClassifierFixture(t);
   const fakeBin = await writeFakeCodex(t);
@@ -1178,6 +1235,39 @@ test("a second interrupt re-raises the default disposition", { timeout: 8000 }, 
   const outcome = await closed;
   assert.equal(outcome.signal, "SIGINT",
     "the second interrupt terminates the entry by signal instead of being swallowed");
+});
+
+test("an abandoned round still exits with the operator's signal code", { timeout: 25000 }, async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  const run = await buildRun(t, "laya", classifier.url, [{ id: "linger-forever", kind: "worker-readonly" }]);
+  const pidFile = join(run.runRoot, "linger.pid");
+  const entry = spawn(process.execPath,
+    [ENTRY_PATH, "--execute", run.manifestPath, "--approve", run.sha256],
+    {
+      env: { ...workerEnv(fakeBin, "linger-forever"), TURNHELM_LINGER_PID_FILE: pidFile },
+      stdio: ["ignore", "ignore", "pipe"]
+    });
+  t.after(() => entry.kill("SIGKILL"));
+  // The descendant never exits on its own; reap it by the pid it dropped.
+  t.after(async () => {
+    try {
+      const pid = Number(await readFile(pidFile, "utf8"));
+      if (Number.isInteger(pid) && pid > 0) process.kill(pid, "SIGKILL");
+    } catch { /* already gone */ }
+  });
+  const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => {
+    entry.on("close", (code, signal) => resolve({ code, signal }));
+  });
+  await new Promise(resolve => setTimeout(resolve, 700));
+  entry.kill("SIGINT");
+  const outcome = await Promise.race([
+    closed,
+    new Promise<null>(resolve => setTimeout(() => resolve(null), 16000))
+  ]);
+  assert.notEqual(outcome, null,
+    "the entry exits bounded even while a descendant holds the pipe open forever");
+  assert.equal(outcome?.code, 130, "the operator's signal intent stands in the exit code");
 });
 
 test("dual fixture port conflict stops before any paid call", async t => {
@@ -1302,6 +1392,25 @@ test("an oversized journal is not a usable receipt", async t => {
     "the oversized journal degrades to an unusable receipt instead of being trusted");
 });
 
+test("a verification error cannot discard the observation", async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+
+  // The worker plants the artifact as a symlink: the oracle read refuses it
+  // (production project-path semantics) and that refusal must not throw the
+  // completed observation away — the case fails as unverifiable instead.
+  const run = await buildRun(t, "laya", classifier.url, [{ id: "symlinker", kind: "worker-write" }]);
+  const code = await executeAcceptance(run.manifestPath, run.sha256, { env: workerEnv(fakeBin, "symlink-summary") });
+  assert.equal(code, 1);
+  const evidence = await readEvidence(run.runRoot);
+  assert.ok(evidence.some(line => line.phase === "observed" && line.caseId === "symlinker"),
+    "the observation is persisted before any fallible verification read");
+  const verified = evidence.find(line => line.phase === "verified");
+  assert.ok(verified);
+  assert.equal((verified.checks as Record<string, unknown>)["verifiable"], false);
+  assert.equal(evidence.at(-1)?.phase, "stopped");
+});
+
 test("crafted manifests cannot widen scope beyond the frozen suite", async t => {
   const classifier = await startClassifierFixture(t);
 
@@ -1350,6 +1459,82 @@ test("crafted manifests cannot widen scope beyond the frozen suite", async t => 
   await assert.rejects(() => claimAcceptance(badOracle.manifestPath, badOracleSha), /corpus fact/);
 });
 
+test("declared reservations bound what execution reserves", async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+
+  // A crafted dual manifest whose cases declare narrower reservations than
+  // their configs enable is refused: caps approve the declared scope and
+  // execution must never be able to widen it past that approval.
+  const split = await buildRun(t, "dual", classifier.url, [
+    { id: "split-1", kind: "classifier-only", reservation: ["laya"] },
+    { id: "split-2", kind: "classifier-only", reservation: ["jev"] },
+    { id: "split-3", kind: "classifier-only", reservation: ["laya"] },
+    { id: "split-4", kind: "classifier-only", reservation: ["jev"] }
+  ]);
+  await assert.rejects(() => claimAcceptance(split.manifestPath, split.sha256), /must cover/);
+
+  // A manifest whose reservations match its configs executes within the
+  // declared scope: every reserved record carries the case's own backends,
+  // not the suite-wide set — and the run needs no hosted key at all.
+  const narrow = await buildRun(t, "dual", classifier.url, [
+    { id: "narrow-1", kind: "classifier-only", reservation: ["laya"], jevEnabled: false },
+    { id: "narrow-2", kind: "worker-readonly", reservation: ["laya"], jevEnabled: false }
+  ]);
+  assert.equal(await executeAcceptance(narrow.manifestPath, narrow.sha256, { env: workerEnv(fakeBin, "ok-readonly") }), 0);
+  const reserved = (await readEvidence(narrow.runRoot)).filter(line => line.phase === "reserved");
+  assert.deepEqual(reserved.map(line => line.backends), [["laya"], ["laya"]],
+    "each case reserves exactly its declared backends");
+});
+
+test("a swapped git identity stops the round before anything is claimed", async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  // The production CLI inspects the git work tree at run time, so git is
+  // spawned after prepare: a swapped git on PATH would ride the approval
+  // unless the frozen identity is re-verified at the execute gate.
+  const run = await buildRun(t, "laya", classifier.url, [{ id: "git-pinned", kind: "worker-readonly" }]);
+  const manifest = JSON.parse(await readFile(run.manifestPath, "utf8")) as Record<string, unknown>;
+  ((manifest.baseline as Record<string, unknown>).tools as Record<string, unknown>).git = "git version 0.0.0-swapped";
+  const bytes = JSON.stringify(manifest, null, 2) + "\n";
+  await writeFile(run.manifestPath, bytes);
+  const sha = sha256hex(Buffer.from(bytes, "utf8"));
+  assert.equal(await executeAcceptance(run.manifestPath, sha, { env: workerEnv(fakeBin, "ok-readonly") }), 1,
+    "a swapped git identity fails the run");
+  assert.equal(classifier.state.requests, 0, "the gate makes zero calls");
+  await assert.rejects(() => stat(join(run.runRoot, "evidence", "evidence.jsonl")), { code: "ENOENT" },
+    "nothing is claimed when the git identity drifted");
+});
+
+test("host snapshot drift between prepare and claim rejects", async t => {
+  const classifier = await startClassifierFixture(t);
+  // The manifest records the host project config state at prepare; a claim in
+  // a drifted environment (or against a forged snapshot) must not proceed.
+  const run = await buildRun(t, "laya", classifier.url, [{ id: "host-pinned", kind: "worker-readonly" }]);
+  const manifest = JSON.parse(await readFile(run.manifestPath, "utf8")) as Record<string, unknown>;
+  manifest.hostSnapshot = { exists: true, sha256: "0".repeat(64) };
+  const bytes = JSON.stringify(manifest, null, 2) + "\n";
+  await writeFile(run.manifestPath, bytes);
+  await assert.rejects(() => claimAcceptance(run.manifestPath, sha256hex(Buffer.from(bytes, "utf8"))), /host snapshot/);
+});
+
+test("consumer instruction files are frozen with the case", async t => {
+  const classifier = await startClassifierFixture(t);
+
+  // AGENTS.md and the installed skill files steer the worker exactly like
+  // input.json does: instruction drift after approval must fail claim, not
+  // ride along into execution.
+  const run = await buildRun(t, "laya", classifier.url, [{ id: "instructed", kind: "worker-readonly" }]);
+  const root = join(run.runRoot, "consumers", "instructed");
+  await writeFile(join(root, "AGENTS.md"), "# swapped instructions\n");
+  await assert.rejects(() => claimAcceptance(run.manifestPath, run.sha256), /frozen bytes/,
+    "a swapped AGENTS.md must not claim");
+  await writeFile(join(root, "AGENTS.md"), "# consumer instructions\n");
+  await writeFile(join(root, ".agents", "skills", "turnhelm-routing", "SKILL.md"), "# swapped skill\n");
+  await assert.rejects(() => claimAcceptance(run.manifestPath, run.sha256), /frozen bytes/,
+    "a swapped skill file must not claim");
+});
+
 test("dual first case must be a genuine laya-first selection", async t => {
   const classifier = await startClassifierFixture(t);
   const fakeBin = await writeFakeCodex(t);
@@ -1371,15 +1556,35 @@ test("dual first case must be a genuine laya-first selection", async t => {
   assert.equal((leadVerified.checks as Record<string, unknown>)["laya-first"], true,
     "the lead dual case passes only when laya alone was attempted and selected");
 
-  // A failed selection on the lead case records the laya-first fact as false.
-  classifier.scripted.push(JSON.stringify({
-    answers: { route: { type: "choice", choice: "turbo", confidence: 0.9 } },
-    usage: { truncated: false, state_tokens_dropped: 0 }
-  }));
-  const bad = await buildRun(t, "dual", classifier.url, [{ id: "lead-bad", kind: "worker-readonly" }]);
+  // A lead receipt that does not show exactly one laya selection fails the
+  // lead fact offline: a seeded duplicate receipt degrades the observation
+  // without ever routing a laya failure into the real hosted jev fallback.
+  const corpus = JSON.parse(await readFile(CORPUS_PATH, "utf8")) as { workerReadonlyTask: string };
+  const taskBytes = Buffer.from(corpus.workerReadonlyTask, "utf8");
+  const seedLine = JSON.stringify({
+    type: "turnhelm.route", ts: "2026-10-11T00:00:00.000Z",
+    taskSha256: sha256hex(taskBytes), taskBytes: taskBytes.length, status: "selected",
+    routingMs: 5, attempts: [{ backend: "laya", outcome: "success", durationMs: 5 }],
+    backend: "laya", profileId: "fast", model: "gpt-6-luna", effort: "low"
+  });
+  const bad = await buildRun(t, "dual", classifier.url, [{ id: "lead-bad", kind: "worker-readonly", journalSeed: [seedLine] }]);
   assert.equal(await executeAcceptance(bad.manifestPath, bad.sha256, { env: dualEnv }), 1);
   const badVerified = (await readEvidence(bad.runRoot)).find(line => line.phase === "verified" && line.caseId === "lead-bad");
   assert.ok(badVerified);
   assert.equal((badVerified.checks as Record<string, unknown>)["laya-first"], false,
     "a lead case that never made a valid laya selection is not laya-first");
+
+  // The offline suite never attempts the hosted jev backend: any jev attempt
+  // in a routing journal means the real api.typesafe.ai origin was dialed.
+  // (The transport cannot be intercepted — systemone destructures the
+  // node:https request binding at import time — so the journal is the
+  // authoritative offline proof.)
+  for (const [root, ids] of [[run.runRoot, ["lead", "second"]], [bad.runRoot, ["lead-bad"]]] as const) {
+    for (const id of ids) {
+      const journal = await readFile(join(root, "consumers", id, ".turnhelm", "routes.jsonl"), "utf8");
+      assert.ok(!journal.includes("\"backend\":\"jev\""),
+        `case ${id} must not attempt the hosted jev backend from the offline suite`);
+    }
+  }
 });
+

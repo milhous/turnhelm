@@ -97,6 +97,19 @@ const SUITE_CAPS: Readonly<Record<LiveSuite, Readonly<{ worker: number; laya: nu
   dual: { worker: 2, laya: 2, jev: 2 }
 };
 
+// The per-case frozen file set: the worker input plus the consumer
+// instruction files initProject installs (the config is frozen separately by
+// its canonical bytes). The instructions steer the worker as much as the
+// input does, so drifting them after approval is the same attack.
+const WORKER_FROZEN_FILES = ["AGENTS.md", ".agents/skills/turnhelm-routing/SKILL.md",
+  ".agents/skills/turnhelm-routing/agents/openai.yaml", "input.json"] as const;
+
+const frozenFileHashes = async (root: string): Promise<Record<string, string>> => {
+  const hashes: Record<string, string> = {};
+  for (const file of WORKER_FROZEN_FILES) hashes[file] = sha256hex(await readFile(join(root, file)));
+  return hashes;
+};
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 const isHex = (value: unknown, length: number): value is string =>
@@ -226,9 +239,13 @@ const parseManifest = (value: unknown): AcceptanceManifest => {
       if (Object.keys(raw.inputHashes).length !== 0) throw fail("classifier-only case must not hash inputs");
     } else {
       const keys = Object.keys(raw.inputHashes);
-      if (keys.length !== 1 || !keys.includes("input.json")) throw fail("worker case inputHashes must cover exactly input.json");
-      if (!isHex(raw.inputHashes["input.json"], 64)) throw fail("worker case input.json hash is malformed");
-      inputHashes["input.json"] = raw.inputHashes["input.json"] as string;
+      if (keys.length !== WORKER_FROZEN_FILES.length || !WORKER_FROZEN_FILES.every(file => keys.includes(file))) {
+        throw fail("worker case inputHashes must cover exactly the frozen case files");
+      }
+      for (const file of WORKER_FROZEN_FILES) {
+        if (!isHex(raw.inputHashes[file], 64)) throw fail("worker case " + file + " hash is malformed");
+        inputHashes[file] = raw.inputHashes[file] as string;
+      }
     }
 
     if (!Array.isArray(raw.allowedChanges)) throw fail("case allowedChanges must be an array");
@@ -271,6 +288,12 @@ const parseManifest = (value: unknown): AcceptanceManifest => {
       if (backend === "jev" && !config.backends.jev.enabled) throw fail("case reservation claims an ineligible jev backend");
       backends.push(backend);
     }
+    // The reservation is the approved spend scope, so the config may not
+    // enable a backend the reservation does not declare — otherwise a crafted
+    // manifest could pass caps on a narrow declaration and still route the
+    // suite-wide set at execution time.
+    if (config.backends.laya.enabled && !backends.includes("laya")) throw fail("case reservation must cover the enabled laya backend");
+    if (config.backends.jev.enabled && !backends.includes("jev")) throw fail("case reservation must cover the enabled jev backend");
 
     return { id, kind, root, identity, task, taskHash, taskBytes, config, inputHashes, allowedChanges: wanted, oracle, reservation: { worker: reservedWorker, backends } };
   });
@@ -330,9 +353,10 @@ const runGit = async (cwd: string, args: readonly string[]): Promise<string> => 
 };
 
 // Locate an executable by scanning PATH directly: prepare may spawn nothing
-// but git, and `which` is a subprocess.
-const findOnPath = async (name: string): Promise<string> => {
-  for (const dir of (process.env.PATH ?? "").split(":")) {
+// but git, and `which` is a subprocess. The path list is a parameter so the
+// execute gate can resolve against the environment it will run in.
+export const findOnPath = async (name: string, pathValue: string = process.env.PATH ?? ""): Promise<string> => {
+  for (const dir of pathValue.split(":")) {
     if (!dir) continue;
     try {
       const info = await stat(join(dir, name));
@@ -403,7 +427,7 @@ export async function prepareAcceptance(suite: LiveSuite): Promise<{ manifestPat
       taskHash: sha256hex(taskBytes),
       taskBytes: taskBytes.length,
       config,
-      inputHashes: { "input.json": sha256hex(input) },
+      inputHashes: await frozenFileHashes(root),
       allowedChanges: kind === "worker-write" ? ["out/summary.json"] : [],
       oracle: kind === "worker-write"
         ? { kind: "summary-file", expected }
@@ -515,11 +539,26 @@ export async function claimAcceptance(manifestPath: string, approvedSha256: stri
   const manifest = parseManifest(JSON.parse(bytes.toString("utf8")));
 
   // The claiming runtime must be the toolchain the manifest froze. Only
-  // node/execPath are re-verified: nothing after prepare ever spawns git, so
-  // the recorded git fields are inert past this point by construction.
+  // node/execPath are re-verified here because claim spawns nothing; git is
+  // spawned at execute time (the production CLI inspects the work tree), so
+  // its frozen identity is re-verified at the execute gate, against the
+  // environment the cases will actually run in.
   if (process.version !== manifest.baseline.tools.node || process.execPath !== manifest.baseline.tools.execPath) {
     throw new Error("acceptance tools drifted from the manifest");
   }
+
+  // The host project config is snapshotted at prepare so the approval pins
+  // the environment it was granted in; a claim elsewhere (or against a forged
+  // snapshot) must not proceed. An unreadable file counts as absent-present
+  // drift — the comparison fails closed.
+  let hostNow: Buffer | null = null;
+  try {
+    hostNow = await readFile(join(REPO_ROOT, ".turnhelm", "config.json"));
+  } catch { /* an absent host config is a recorded state, not an error */ }
+  const hostMatches = manifest.hostSnapshot.exists
+    ? hostNow !== null && manifest.hostSnapshot.sha256 === sha256hex(hostNow)
+    : hostNow === null;
+  if (!hostMatches) throw new Error("acceptance host snapshot drifted from the manifest");
 
   const manifestReal = await realpath(manifestPath);
   const runRoot = dirname(manifestReal);
@@ -574,20 +613,9 @@ export async function claimAcceptance(manifestPath: string, approvedSha256: stri
   }
 
   for (const item of manifest.cases) {
-    if (item.kind === "classifier-only") continue;
-    if (await realpath(item.root) !== item.root) throw new Error("acceptance case root mismatch: " + item.id);
-    const info = await stat(item.root);
-    if (info.dev !== item.identity.dev || info.ino !== item.identity.ino) {
-      throw new Error("acceptance case root mismatch: " + item.id);
-    }
-    const config = await readProjectFile(item.root, ".turnhelm/config.json", 65536);
-    if (config === undefined || !config.equals(canonicalConfigBytes(item.config))) {
-      throw new Error("acceptance case file is not the frozen bytes: " + item.id);
-    }
-    const input = await readProjectFile(item.root, "input.json", 65536);
-    if (input === undefined || sha256hex(input) !== item.inputHashes["input.json"]) {
-      throw new Error("acceptance case file is not the frozen bytes: " + item.id);
-    }
+    // The same per-case freeze check execute re-runs before each case: claim
+    // and execute must never disagree about which files are frozen.
+    await verifyCaseFrozen(item);
   }
 
   const evidenceDir = join(runRoot, "evidence");
@@ -723,6 +751,17 @@ export function superviseCli(
   options: Readonly<{ env: NodeJS.ProcessEnv; cwd?: string; signal?: AbortSignal; timeoutMs?: number; termGraceMs?: number; postTermMs?: number }>
 ): Promise<CliSupervision> {
   return new Promise(resolve => {
+    if (options.signal?.aborted) {
+      // The operator aborted before the invocation: nothing is spawned, so
+      // no spend can happen and there is nothing to clean up.
+      resolve({
+        exitCode: null, signal: null, durationMs: 0,
+        stdout: Buffer.alloc(0), stderr: Buffer.alloc(0),
+        outputOverflow: false, timedOut: false, aborted: true,
+        termSent: false, cliClosed: false
+      });
+      return;
+    }
     const started = performance.now();
     const child = spawn(file, args, {
       shell: false,
@@ -786,7 +825,16 @@ export function superviseCli(
           // cliClosed false: cleanup stays unverified instead of hanging the
           // run forever (spec §5).
           postTermTimer = setTimeout(() => {
-            if (!resolved) finish(false);
+            if (!resolved) {
+              // Abandonment: this end of the pipes and the child reference are
+              // released so the owning process can exit with its recorded
+              // verdict even while a descendant still holds the pipe open.
+              // Nothing outside the owned child is signalled.
+              child.stdout?.destroy();
+              child.stderr?.destroy();
+              child.unref();
+              finish(false);
+            }
           }, options.postTermMs ?? TERM_GRACE_MS);
         }
       }, options.termGraceMs ?? TERM_GRACE_MS);
@@ -851,9 +899,11 @@ const verifyCaseFrozen = async (item: AcceptanceCase): Promise<void> => {
   if (config === undefined || !config.equals(canonicalConfigBytes(item.config))) {
     throw new Error("acceptance case file is not the frozen bytes: " + item.id);
   }
-  const input = await readProjectFile(item.root, "input.json", 65536);
-  if (input === undefined || sha256hex(input) !== item.inputHashes["input.json"]) {
-    throw new Error("acceptance case file is not the frozen bytes: " + item.id);
+  for (const [file, expected] of Object.entries(item.inputHashes)) {
+    const bytes = await readProjectFile(item.root, file, 65536);
+    if (bytes === undefined || sha256hex(bytes) !== expected) {
+      throw new Error("acceptance case file is not the frozen bytes: " + item.id);
+    }
   }
 };
 
@@ -880,8 +930,14 @@ const hashTree = async (root: string): Promise<Map<string, string> | null> => {
       if (entry.isDirectory()) {
         if (!(await walk(join(root, relative), relative + "/"))) return false;
       } else if (entry.isFile()) {
-        const bytes = await readFile(join(root, relative)).catch(() => null);
-        if (bytes === null || bytes.length > TREE_MAX_FILE_BYTES) return false;
+        // Size is checked via stat before the read: an oversize (or racing)
+        // file must never be loaded whole just to be rejected. The residual
+        // stat→read race matches the journal cap's, both fail closed.
+        const path = join(root, relative);
+        const info = await stat(path).catch(() => null);
+        if (info === null || !info.isFile() || info.size > TREE_MAX_FILE_BYTES) return false;
+        const bytes = await readFile(path).catch(() => null);
+        if (bytes === null) return false;
         files.set(relative, sha256hex(bytes));
       } else {
         return false; // a symlink/FIFO inside the consumer tree is unexpected
@@ -958,12 +1014,21 @@ export async function executeAcceptance(
   } catch {
     return 1;
   }
-  const wanted: readonly AcceptanceBackend[] =
-    preview.suite === "laya" ? ["laya"] : preview.suite === "jev" ? ["jev"] : ["laya", "jev"];
+  // Eligibility is demanded per case over its declared reservation — the
+  // approved scope — not over a suite-wide set.
   for (const item of preview.cases) {
     const eligible = eligibleBackends(item.config, env);
-    if (!wanted.every(backend => eligible.includes(backend))) return 1;
+    if (!item.reservation.backends.every(backend => eligible.includes(backend))) return 1;
   }
+
+  // The production CLI the cases run inspects the git work tree at execute
+  // time, so git IS spawned after prepare: the frozen git identity is
+  // re-verified against the environment execution will use, or a swapped git
+  // on PATH would ride the approval. Nothing is claimed on mismatch.
+  if (await findOnPath("git", env.PATH ?? "") !== preview.baseline.tools.gitPath) return 1;
+  const gitVersion = await execute(preview.baseline.tools.gitPath, ["--version"],
+    { env, encoding: "utf8", timeout: 30000 }).then(out => out.stdout.trim()).catch(() => null);
+  if (gitVersion !== preview.baseline.tools.git) return 1;
 
   let run: ClaimedRun;
   try {
@@ -1040,10 +1105,18 @@ export async function executeAcceptance(
           await verifyRepoFrozen(run.manifest);
           await verifyCaseFrozen(item);
           const eligible = eligibleBackends(item.config, env);
-          if (!wanted.every(backend => eligible.includes(backend))) throw new Error("eligible set drifted");
+          if (!item.reservation.backends.every(backend => eligible.includes(backend))) throw new Error("eligible set drifted");
         } catch {
           await appendEvidence(run, { phase: "stopped", caseId: item.id, reason: "drift" }).catch(() => {});
           return 1;
+        }
+
+        // A signal that landed during the frozen re-verification stops the
+        // round before the reservation: nothing is approved after the
+        // operator asked to stop.
+        if (abort?.aborted) {
+          await appendEvidence(run, { phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
+          return 130;
         }
 
         try {
@@ -1051,7 +1124,7 @@ export async function executeAcceptance(
             phase: "reserved",
             caseId: item.id,
             worker: item.kind === "classifier-only" ? 0 : 1,
-            backends: wanted
+            backends: item.reservation.backends
           });
         } catch {
           return 1;
@@ -1076,6 +1149,11 @@ export async function executeAcceptance(
             phase: "observed", caseId: item.id, backend, profileId, rootMatches: "unknown",
             exitCode: null, durationMs, attempts: attemptsMade
           };
+          try {
+            await appendEvidence(run, observation);
+          } catch {
+            return 1;
+          }
           if (routing.status === "cancelled") {
             // The operator's abort reached routing: stop on the signal, never
             // grade a cancelled route as a verdict failure.
@@ -1092,6 +1170,12 @@ export async function executeAcceptance(
           }
         } else {
           const treeBefore = await hashTree(item.root);
+          // Same gate after the pre-spawn tree snapshot: a signal during the
+          // snapshot stops the round without invoking the worker.
+          if (abort?.aborted) {
+            await appendEvidence(run, { phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
+            return 130;
+          }
           const supervision = await superviseCli(
             process.execPath,
             [CLI_PATH, "run", "--project", item.root,
@@ -1136,6 +1220,15 @@ export async function executeAcceptance(
             exitCode: supervision.exitCode, durationMs: supervision.durationMs, attempts
           };
 
+          // The observation is persisted before any fallible verification read
+          // (frozen-file reads, oracle reads): a worker artifact that makes
+          // verification throw must fail the case, not discard the observation.
+          try {
+            await appendEvidence(run, observation);
+          } catch {
+            return 1;
+          }
+
           if (!supervision.cliClosed) {
             // The owned CLI child never closed: the round stops with cleanup
             // unverified (spec §5) rather than attributing an outcome.
@@ -1147,52 +1240,59 @@ export async function executeAcceptance(
             stopExitCode = stopReason === "signal" ? 130 : 1;
             checks = {};
           } else {
-            const frozenPair = profileId !== "unknown" ? item.config.profiles[profileId as keyof typeof item.config.profiles] : undefined;
-            const inputNow = await readProjectFile(item.root, "input.json", 65536);
-            const inputUnchanged = inputNow !== undefined && sha256hex(inputNow) === item.inputHashes["input.json"];
-            const configNow = await readProjectFile(item.root, ".turnhelm/config.json", 65536);
-            const configUnchanged = configNow !== undefined && configNow.equals(canonicalConfigBytes(item.config));
-            const gitClean = treeDiffClean(treeBefore, await hashTree(item.root), item.allowedChanges);
-            const stdoutText = decodeBounded(supervision.stdout);
-            const worker = receiptFrame !== null && typeof receiptFrame.worker === "object" && receiptFrame.worker !== null
-              ? receiptFrame.worker as Record<string, unknown> : null;
-            let oracleOk = false;
-            if (item.oracle.kind === "stdout-json") {
-              const lines = (stdoutText ?? "").trimEnd().split("\n");
-              oracleOk = jsonEquals(lines.at(-1) ?? null, item.oracle.expected);
-            } else if (item.oracle.kind === "summary-file") {
-              const summary = await readProjectFile(item.root, "out/summary.json", 65536);
-              oracleOk = summary !== undefined && jsonEquals(decodeBounded(summary), item.oracle.expected);
+            try {
+              const frozenPair = profileId !== "unknown" ? item.config.profiles[profileId as keyof typeof item.config.profiles] : undefined;
+              let inputsUnchanged = true;
+              for (const [file, expected] of Object.entries(item.inputHashes)) {
+                const bytes = await readProjectFile(item.root, file, 65536);
+                if (bytes === undefined || sha256hex(bytes) !== expected) inputsUnchanged = false;
+              }
+              const inputUnchanged = inputsUnchanged;
+              const configNow = await readProjectFile(item.root, ".turnhelm/config.json", 65536);
+              const configUnchanged = configNow !== undefined && configNow.equals(canonicalConfigBytes(item.config));
+              const gitClean = treeDiffClean(treeBefore, await hashTree(item.root), item.allowedChanges);
+              const stdoutText = decodeBounded(supervision.stdout);
+              const worker = receiptFrame !== null && typeof receiptFrame.worker === "object" && receiptFrame.worker !== null
+                ? receiptFrame.worker as Record<string, unknown> : null;
+              let oracleOk = false;
+              if (item.oracle.kind === "stdout-json") {
+                const lines = (stdoutText ?? "").trimEnd().split("\n");
+                oracleOk = jsonEquals(lines.at(-1) ?? null, item.oracle.expected);
+              } else if (item.oracle.kind === "summary-file") {
+                const summary = await readProjectFile(item.root, "out/summary.json", 65536);
+                oracleOk = summary !== undefined && jsonEquals(decodeBounded(summary), item.oracle.expected);
+              }
+              checks = {
+                "receipt-unique": journalUsable && receiptLine !== null,
+                "receipt-selected": receiptLine?.status === "selected",
+                "receipt-pair": frozenPair !== undefined
+                  && receiptLine?.model === frozenPair.model && receiptLine?.effort === frozenPair.effort,
+                "receipt-task": receiptLine?.taskSha256 === item.taskHash && receiptLine?.taskBytes === item.taskBytes,
+                "receipt-root": rootOk,
+                "exit-zero": supervision.exitCode === 0,
+                "worker-completed": worker?.status === "completed",
+                "input-unchanged": inputUnchanged,
+                "config-unchanged": configUnchanged,
+                "git-clean": gitClean,
+                "attempts-made": attempts >= 1,
+                // The lead dual case is a laya-first fact (spec §4): one attempt
+                // that selected laya. A natural laya failure falling back to Jev
+                // is not a laya-first success.
+                ...(run.manifest.suite === "dual" && item === run.manifest.cases[0]
+                  ? { "laya-first": backend === "laya" && attempts === 1 }
+                  : {}),
+                ...(item.oracle.kind === "classifier-valid" ? {} : { oracle: oracleOk })
+              };
+            } catch {
+              // A verification read refused the tree (e.g. a symlink planted
+              // where a frozen file must be): the observation is already on
+              // disk, so the case fails as unverifiable instead of throwing
+              // the round away.
+              checks = { verifiable: false };
             }
-            checks = {
-              "receipt-unique": journalUsable && receiptLine !== null,
-              "receipt-selected": receiptLine?.status === "selected",
-              "receipt-pair": frozenPair !== undefined
-                && receiptLine?.model === frozenPair.model && receiptLine?.effort === frozenPair.effort,
-              "receipt-task": receiptLine?.taskSha256 === item.taskHash && receiptLine?.taskBytes === item.taskBytes,
-              "receipt-root": rootOk,
-              "exit-zero": supervision.exitCode === 0,
-              "worker-completed": worker?.status === "completed",
-              "input-unchanged": inputUnchanged,
-              "config-unchanged": configUnchanged,
-              "git-clean": gitClean,
-              "attempts-made": attempts >= 1,
-              // The lead dual case is a laya-first fact (spec §4): one attempt
-              // that selected laya. A natural laya failure falling back to Jev
-              // is not a laya-first success.
-              ...(run.manifest.suite === "dual" && item === run.manifest.cases[0]
-                ? { "laya-first": backend === "laya" && attempts === 1 }
-                : {}),
-              ...(item.oracle.kind === "classifier-valid" ? {} : { oracle: oracleOk })
-            };
           }
         }
 
-        try {
-          await appendEvidence(run, observation);
-        } catch {
-          return 1;
-        }
         if (stopReason !== null) {
           await appendEvidence(run, { phase: "stopped", caseId: item.id, reason: stopReason }).catch(() => {});
           return stopExitCode;

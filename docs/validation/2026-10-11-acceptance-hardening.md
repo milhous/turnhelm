@@ -6,6 +6,7 @@
 
 - **PASS：AH-01…08 工程项。** 有限顺序执行 harness（prepare/claim/evidence/execute）、严格 live 入口、类型化失败契约、pack/文档/离线门全部落地并有故障敏感离线回归。
 - **EXECUTED：AH-09 付费 dual 轮（2026-10-11 09:18，另行授权后执行）。** 首例真实链路 PASS，第二例按设计失败止损（FAIL）；该轮同时暴露并已定位修复一个 harness 缺陷（fail-stop 出口码丢失，见 §5）。
+- **ACCEPT WITH FIXES → 已全部修复：gpt-6-astra 整分支验收（§7）。** 9 条发现（1 Critical + 7 Important + 1 Minor）经核实后单轮 TDD 修复，406/406。
 - 本记录不改写 [Node 24 工程验收](2026-10-10-node24-capability-acceptance.md)及更早历史证据。
 
 ## 1. 交付面
@@ -59,6 +60,19 @@
 - **轮次异常（已定位修复）**：该轮进程 exit 0，而失败止损语法规定 exit 1。根因：dual fixture 的 `net.Server` 连接处理只写 503 + `end()` 不读；真实 CLI 发送带 body 的请求，未读字节把服务端 socket 永久停在 paused 态，`closeAllConnections?.()` 在 `net.Server` 上是 no-op（v24.11.0 验证为 undefined），裸 `server.close(cb)` 的回调永不触发 → `executeAcceptance` 的 promise 永不 settle → 入口 `.then` 不执行 → `process.exitCode` 未设置，事件循环排空后静默 exit 0（另一时序则表现为挂起）。已离线确定性复现（对 fixture 端口 POST body 的 peer 子进程），修复为：追踪 fixture 连接并在 close 前逐一 destroy（Task 1 对 direct-transport fixture 的同一惯例），回归测试 "a dead-peer fixture client cannot wedge the fail-stop exit" RED（exit 0，与付费轮同签名）→ GREEN（exit 1），全套件 394/394。该 manifest 已消费，不复放；重验需新 prepare + 新批准。
 - 证据：runRoot `…/turnhelm-live-dual-EbeJJk/`（evidence.jsonl 9 条、两例 routes.jsonl journal），0600，不含原始 stdout/stderr/env。
 
+### AH-09 重验轮（2026-10-11 10:49–10:51，§5 修复与 §6 minors 收口之后）
+
+授权链：用户 “全权授权，继续解决已知问题和待办事项，然后使用 codex astra 进行验收”（对本轮的明确预告包含在新 dual 轮并记录新 manifest sha256）。新 `--prepare dual` 于 `c42f3f4`（baseline 现钉住 `dist/test/live.integration.js`；tools 钉住 node v24.11.0/execPath 并在 claim 复验），sha256 `62b389e0…ca3ea1`。
+
+| 案例 | 判定 | 预留/实际 | 耗时 | 关键事实 |
+| --- | --- | --- | --- | --- |
+| dual-laya-first（readonly） | **PASS**（13/13 检查全真，含 laya-first） | worker 1 / laya 1 次 | 71726 ms | 真实 Laya 分类（8765，553 ms，balanced/gpt-6.1-sol/medium，confidence 0.095，单次尝试选中 laya）+ 真实 codex 只读 worker，exitCode 0 |
+| dual-jev-write（write） | **FAIL**（receipt-selected/pair、exit-zero、worker-completed、oracle 为假）→ 整轮止损 | worker 1 / laya 1 次（本地 503）+ jev 1 次客户端尝试 | 342 ms | 冻结端口 503 fixture（类型化 `{kind:"http",httpStatus:503}`，2 ms）→ 托管 Jev 回退 266 ms 后 `ETIMEDOUT`（与 §5 首轮 264 ms 同签名，AH-07 契约第二次 live 观测）；CLI exitCode 1，无 worker、无 out/summary.json |
+
+- **轮次 exit 1**：fail-stop 出口语法首次在 live 成立（§5 修复的 live 证明）。
+- 消耗：1 次真实 Laya 分类 + 1 次本地 503 + 1 次托管 Jev 客户端尝试（ETIMEDOUT，计客户端尝试）+ 1 次 codex 只读 worker；caps 全程未超。
+- Jev 失败仍按 Task 5 仅作观察记录（两轮独立同签名，不做归因探测）；证据：runRoot `…/turnhelm-live-dual-UKm6ON/`，manifest 已消费不复放。
+
 ## 6. Deferred minors 收口（2026-10-11，用户全权授权后逐条 TDD）
 
 复审遗留的 6 条 minor（第 7 条 closeAllConnections 已由 §5 的修复关闭）全部收口，每条先 RED 后 GREEN；`pnpm test` 399/399，`pnpm run test:coverage` exit 0（行/分支/函数 95.11% / 90.14% / 94.82%）。
@@ -69,6 +83,24 @@
 | classifier-only 不转发 abort | "aborting a classifier-only route stops the round as a signal" | 信号直达路由：观察记录落盘后以 `stopped(signal)` exit 130 停轮，绝不给被取消的路由打分 |
 | routes.jsonl 无界读取 | "an oversized journal is not a usable receipt" | 读取前 stat 限 1 MiB；超限 journal 视为不可用 receipt（`receipt-unique` false），杜绝无界载入 |
 | claim 后 caps/case 对象可变 | "claimed manifests are immutable in memory" | 解析后的整个 manifest 图 deepFreeze |
-| baseline 漏 dist/test/live.integration.js、tools 不复验 | "tool drift between prepare and claim rejects" + prepare 形状断言 | prepare 基线钉住被执行的 live 入口；claim 时 node 版本或 execPath 漂移即拒（先于任何 evidence claim）；git 字段仅记录——prepare 之后无任何 git spawn，复验无意义 |
+| baseline 漏 dist/test/live.integration.js、tools 不复验 | "tool drift between prepare and claim rejects" + prepare 形状断言 | prepare 基线钉住被执行的 live 入口；claim 时 node 版本或 execPath 漂移即拒（先于任何 evidence claim）；git 身份改在 execute 门按执行环境复验（见 §7 第 9 条） |
 | README 表头误导 | —（文档） | "Actual Turnhelm worker" → "Worker invocations" |
+
+## 7. Astra 整分支验收与修复轮（2026-10-11 11:05–11:55）
+
+gpt-6-astra 整分支评审（diff e240130..c42f3f4，4 commits）：**ACCEPT WITH FIXES**（1 Critical + 7 Important + 1 Minor）。9 条全部先逐条对照代码核实为真，随后单轮 TDD 修复（每条先看 RED 再 GREEN；按流程不再分发二次评审）。裁决与逐条记录见 SDD ledger。
+
+| # | 级别 | 缺陷 | 回归测试 | 修复 |
+| --- | --- | --- | --- | --- |
+| 1 | Critical | caps 按声明的 reservation 校验，执行却按套件级集合预留（批准范围与实际花费范围脱节） | "declared reservations bound what execution reserves" | parseManifest 要求 reservation ⊇ config 启用后端；pre-claim 门槛、中途 drift 复查、reserved 记录全部按 `item.reservation.backends` |
+| 2 | Important | 超时落定不约束进程退出：后代继承管道不关 → 入口挂起或静默 exit 0 | "an abandoned round still exits with the operator's signal code" | postTerm 弃置：destroy owned pipe ends + `child.unref()`，裁决照常落盘、入口按 130 有界退出 |
+| 3 | Important | 校验读抛错会把已落盘的观察一并丢弃 | "a verification error cannot discard the observation" | observed 构造后立即 append（两分支同）；校验读拒绝 → `checks {verifiable:false}`，空检查集不可能空洞通过 |
+| 4 | Important | hashTree 先整文件读入再判长度（超限文件被整个载入后才被拒） | —（防御性资源界，无行为 RED，见 ledger 裁决） | stat 先行、上限 1 MiB，两种次序同样 fail-closed |
+| 5 | Important | 消费者指令文件（AGENTS.md 与 .agents 两个 skill 文件）未随 case 冻结 | "consumer instruction files are frozen with the case" | inputHashes 钉四文件（指令×3 + input.json），parse/prepare/claim/execute 四点一致；claim 的重复检查块折叠进 `verifyCaseFrozen`（两份拷贝已实际漂移过一次） |
+| 6 | Important | hostSnapshot 只解析从不比对 | "host snapshot drift between prepare and claim rejects" | claim 时按 exists+sha256 与仓库根 `.turnhelm/config.json` 比对，不可读按漂移计（fail-closed） |
+| 7 | Important | 预检期间的操作者取消仍会预留并拉起子进程 | "an already-aborted signal never spawns the child" | superviseCli 预 spawn 守卫（aborted 则零 spawn）；execute 在冻结校验后、预留前两次复查信号 |
+| 8 | Important | 离线 dual 负例真实拨号 hosted api.typesafe.ai（修复前 live 证实 797 ms 一次拨号） | "dual first case must be a genuine laya-first selection"（重构） | 负例改为种子重复 receipt；以 routes.jsonl 无 jev 尝试作为离线纯净证明——具名 ESM 导入绑定使同进程 https mock 天然拦截不到（实测证实），journal 是权威离线证据 |
+| 9 | Minor | “prepare 之后无 git spawn”注释错误（生产 CLI 运行时检查 git 工作树）且 git 身份从未复验 | "a swapped git identity stops the round before anything is claimed" | execute 门按执行 env 的 PATH 解析 git 并比对 gitPath + `git --version` 输出（claim 前拒，零调用零 evidence）；claim 注释改正；buildRun 记录真实 git 值 |
+
+轮后门槛（实际 Node 24.11.0）：`pnpm test` 406/406（fail/cancel/skip 0）；`pnpm run test:coverage` exit 0（行/分支/函数 94.95%/89.85%/94.82%，阈值 ≥80）；`pnpm audit --audit-level high` 无已知漏洞。
 
