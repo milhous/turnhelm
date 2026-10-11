@@ -15,9 +15,9 @@ jobs:
       - name: Tag next semver from conventional commits
         id: version
         uses: mathieudutour/github-tag-action@fcfbdceb3093f6d85a3b194740f8c6cec632f4e2 # v6.1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DEFAULT_BUMP: patch
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          default_bump: patch
       - name: Publish GitHub release
         if: steps.version.outputs.new_tag != ''
         uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1.21.0
