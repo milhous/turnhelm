@@ -970,6 +970,7 @@ export async function executeAcceptance(
       }
     }
     let fixtureServer: net.Server | null = null;
+    const fixtureConnections = new Set<net.Socket>();
     if (fixtureCase !== null) {
       const port = Number(new URL(fixtureCase.config.backends.laya.url).port);
       fixtureServer = net.createServer();
@@ -983,7 +984,14 @@ export async function executeAcceptance(
           });
         });
         // Every request gets the same fixed 503; nothing about the request is kept.
+        // Connections are tracked so teardown can destroy them: a client that
+        // sends a body the fixture never reads parks its server-side socket
+        // (unread receive data, no reader), which would otherwise leave
+        // server.close()'s callback forever unfired and the round's exit code
+        // unset — node then drains and exits 0 (or hangs).
         fixtureServer.on("connection", socket => {
+          fixtureConnections.add(socket);
+          socket.once("close", () => fixtureConnections.delete(socket));
           socket.write("HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
           socket.end();
         });
@@ -1162,7 +1170,7 @@ export async function executeAcceptance(
       return 0;
     } finally {
       if (fixtureServer !== null) {
-        (fixtureServer as net.Server & { closeAllConnections?: () => void }).closeAllConnections?.();
+        for (const socket of fixtureConnections) socket.destroy();
         await new Promise<void>(resolve => fixtureServer!.close(() => resolve()));
       }
     }

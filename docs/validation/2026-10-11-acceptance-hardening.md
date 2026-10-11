@@ -5,7 +5,7 @@
 ## 结论
 
 - **PASS：AH-01…08 工程项。** 有限顺序执行 harness（prepare/claim/evidence/execute）、严格 live 入口、类型化失败契约、pack/文档/离线门全部落地并有故障敏感离线回归。
-- **NOT EXECUTED：AH-09 付费验证。** 未做任何真实分类/worker 调用；需另行授权后按固定套件执行，与本工程交付分开。
+- **EXECUTED：AH-09 付费 dual 轮（2026-10-11 09:18，另行授权后执行）。** 首例真实链路 PASS，第二例按设计失败止损（FAIL）；该轮同时暴露并已定位修复一个 harness 缺陷（fail-stop 出口码丢失，见 §5）。
 - 本记录不改写 [Node 24 工程验收](2026-10-10-node24-capability-acceptance.md)及更早历史证据。
 
 ## 1. 交付面
@@ -26,7 +26,7 @@
 | `pnpm run test:coverage` | exit 0；386/386；行/分支/函数 95.11% / 90.08% / 94.82%（各 ≥80%） |
 | `pnpm audit --audit-level high` | exit 0；`No known vulnerabilities found` |
 
-## 3. AH-01…08 的故障敏感负例（全部离线，25 个 live-acceptance 测试 + 既有套件）
+## 3. AH-01…08 的故障敏感负例（全部离线，26 个 live-acceptance 测试 + 既有套件，末项为 AH-09 轮后补回的 teardown 回归）
 
 - **AH-01**：无参/缺 hash/未知 suite/多余参数/双分隔符 → exit 2；套件所需 eligible 集缺失 → 零调用且 evidence ENOENT；已 claim 的 manifest 二次执行拒绝；空/截断/带 stopped 尾的 evidence 不重放；crafted manifest 内部自洽但 caps 超冻结套件上限、任务 hash 不在冻结 corpus、oracle 期望非 corpus 事实、worker root 位于冻结 consumers 目录之外 → claim 拒绝。
 - **AH-02**：canonical 同目录别名（同 dev/ino）通过；manifest 自身 symlink、跨 runRoot、消费者 root 替换（新 inode）、config symlink/FIFO、输入/配置字节漂移全部拒绝；生产 projectPath 语义未改。
@@ -40,7 +40,21 @@
 ## 4. 未验证与边界
 
 - 未执行任何真实 Laya/Jev/Codex 调用；分类质量、六档行为、NAT/JEV/CAL/META 场景仍按原规格证据门槛，不以本报告关闭。
-- dual 第二例的 503→Jev 回退腿与该例 `LAYA_API_KEY` 删除的效果离线不可证（Jev 端点硬编码为真实 hosted 地址，任何真实拨号都违反离线约束）；离线覆盖止于端口冲突零付费停止与首例 laya-first，回退腿归 AH-09 付费轮验证。
+- dual 第二例的 503→Jev 回退腿与该例 `LAYA_API_KEY` 删除的效果离线不可证（Jev 端点硬编码为真实 hosted 地址，任何真实拨号都违反离线约束）；离线覆盖止于端口冲突零付费停止与首例 laya-first，回退腿已于 AH-09 付费轮 live 观测（见 §5）。
 - 取消清理仅证明 owned CLI 子进程的 SIGINT/TERM 归属；其后代进程的清理性质为 unknown，未做进程组外扫描；全树 hash 对比排除 `.git`（git 自身会在快照间改写 index），worker 篡改 `.git` 内部为已知未覆盖上限。
 - evidence 只含有限固定字段；金额无法从 usage 推断，报告不含原始 stdout/stderr/env。
 - Task 1 新导出使 `systemone.test.ts` 模块面 pin 过期（Task 1 门未含该文件），本轮已更新为含 `ClassifierRequestError`/`classifierFailure` 的准确面并全绿。
+
+## 5. AH-09 付费 dual 轮记录（2026-10-11 09:18–09:20）
+
+授权链：用户 "commit, push, 授权跑流程" → 套件选择 dual → `--prepare dual` 冻结 manifest（sha256 `b60907f2…a49b56`，人工批准后 `--execute`）。baseline head `9b7915c`；caps `{worker:2, laya:2, jev:2}`，每例先预留后调用。
+
+| 案例 | 判定 | 预留/实际 | 耗时 | 关键事实 |
+| --- | --- | --- | --- | --- |
+| dual-laya-first（readonly） | **PASS**（13/13 检查全真，含 laya-first） | worker 1 / laya 1 次 | 72114 ms | 真实 Laya 分类（8765，balanced/gpt-6.1-sol/medium，confidence 0.095，单次尝试选中 laya）+ 真实 codex 只读 worker，exitCode 0，stdout oracle 命中 |
+| dual-jev-write（write） | **FAIL**（receipt-selected/pair、exit-zero、worker-completed、oracle 为假）→ 整轮止损 | worker 1 / laya 1 次 + jev 1 次客户端尝试 | 341 ms | 冻结端口 fixture 返回 503 → 回退托管 Jev：客户端尝试 264 ms 后 `ETIMEDOUT`（AH-07 类型化契约 `{kind:"request",httpStatus:null,code:"ETIMEDOUT"}` 首次在 live 观测）；CLI exitCode 1，无 worker、无 out/summary.json，fail-closed |
+
+- 首次 live 证明离线不可证的 503→Jev 回退腿与该例删除 `LAYA_API_KEY` 的效果；Jev 失败按 Task 5 仅作观察记录（不做归因探测）。
+- 消耗：1 次真实 Laya 分类 + 1 次本地 503 + 1 次托管 Jev 客户端尝试（ETIMEDOUT，计客户端尝试、非服务端已接收证明）+ 1 次 codex 只读 worker。caps 全程未超。
+- **轮次异常（已定位修复）**：该轮进程 exit 0，而失败止损语法规定 exit 1。根因：dual fixture 的 `net.Server` 连接处理只写 503 + `end()` 不读；真实 CLI 发送带 body 的请求，未读字节把服务端 socket 永久停在 paused 态，`closeAllConnections?.()` 在 `net.Server` 上是 no-op（v24.11.0 验证为 undefined），裸 `server.close(cb)` 的回调永不触发 → `executeAcceptance` 的 promise 永不 settle → 入口 `.then` 不执行 → `process.exitCode` 未设置，事件循环排空后静默 exit 0（另一时序则表现为挂起）。已离线确定性复现（对 fixture 端口 POST body 的 peer 子进程），修复为：追踪 fixture 连接并在 close 前逐一 destroy（Task 1 对 direct-transport fixture 的同一惯例），回归测试 "a dead-peer fixture client cannot wedge the fail-stop exit" RED（exit 0，与付费轮同签名）→ GREEN（exit 1），全套件 394/394。该 manifest 已消费，不复放；重验需新 prepare + 新批准。
+- 证据：runRoot `…/turnhelm-live-dual-EbeJJk/`（evidence.jsonl 9 条、两例 routes.jsonl journal），0600，不含原始 stdout/stderr/env。

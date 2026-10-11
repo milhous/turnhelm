@@ -1159,6 +1159,59 @@ test("dual fixture port conflict stops before any paid call", async t => {
     "no case ever ran");
 });
 
+test("a dead-peer fixture client cannot wedge the fail-stop exit", async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+
+  // A free port for the 503 fixture, reserved then released.
+  const probe = http.createServer();
+  await new Promise<void>(resolve => probe.listen(0, "127.0.0.1", resolve));
+  const fixturePort = (probe.address() as AddressInfo).port;
+  await new Promise<void>(resolve => probe.close(() => resolve()));
+
+  // The lead case fails its worker verdict against the classifier fixture, so
+  // the round stops before the fixture case ever runs: zero hosted dials, the
+  // fixture server is still bound and torn down on the fail-stop path.
+  const run = await buildRun(t, "dual", classifier.url, [
+    { id: "lead", kind: "worker-readonly" },
+    { id: "fixture", kind: "worker-write", fixtureUrl: `http://127.0.0.1:${fixturePort}` }
+  ]);
+  const entry = spawn(process.execPath, [ENTRY_PATH, "--execute", run.manifestPath, "--approve", run.sha256], {
+    env: {
+      ...workerEnv(fakeBin, "fail"),
+      TURNHELM_ALLOW_HOSTED_JEV: "1",
+      TYPESAFE_API_KEY: "fixture-only"
+    },
+    stdio: "ignore"
+  });
+  t.after(() => { entry.kill("SIGKILL"); });
+
+  // A separate process plays the CLI's client shape: a POST with a body the
+  // fixture never reads, then the process dies. The unread request bytes park
+  // the fixture's server-side socket forever, which must not stop the round
+  // from exiting with its verdict.
+  const peer = spawn(process.execPath, ["-e", `
+    const http = require("node:http");
+    const poll = () => {
+      const req = http.request({ host: "127.0.0.1", port: ${fixturePort}, method: "POST", path: "/v1/systemone" }, res => {
+        res.resume();
+        res.on("end", () => setTimeout(() => process.exit(0), 100));
+      });
+      req.on("error", () => setTimeout(poll, 25));
+      req.end(JSON.stringify({ state: "x", questions: {} }));
+    };
+    poll();
+  `], { stdio: "ignore" });
+  t.after(() => { peer.kill("SIGKILL"); });
+
+  const code = await new Promise<number | null>(resolve => {
+    const bound = setTimeout(() => resolve(null), 15_000);
+    entry.once("exit", exitCode => { clearTimeout(bound); resolve(exitCode); });
+  });
+  assert.notEqual(code, null, "teardown wedged: the fail-stop round must still exit, not hang or drain silently");
+  assert.equal(code, 1, "a fail verdict still exits 1");
+});
+
 test("crafted manifests cannot widen scope beyond the frozen suite", async t => {
   const classifier = await startClassifierFixture(t);
 
