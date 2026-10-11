@@ -13,6 +13,7 @@ import { basename, dirname, join, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { parseProjectConfig } from "../src/config.js";
+import { readProjectFile } from "../src/project.js";
 import {
   appendEvidence, claimAcceptance, executeAcceptance, findOnPath, prepareAcceptance, superviseCli,
   type AcceptanceManifest, type ClaimedRun, type SafeEvidence
@@ -863,9 +864,10 @@ const buildRun = async (
   const srcFiles = (await readdir(join(REPO_ROOT, "src"))).filter(name => name.endsWith(".ts")).sort();
   const distFiles = (await readdir(join(REPO_ROOT, "dist", "src"))).filter(name => name.endsWith(".js")).sort();
   const runInfo = await stat(runRoot);
-  // The crafted manifest snapshots the host config the way prepare would,
-  // from the real file state — not a hardcoded absent marker.
-  const hostBytes = await readFile(join(REPO_ROOT, ".turnhelm", "config.json")).catch(() => null);
+  // The crafted manifest snapshots the host config through the same production
+  // project-path semantics prepare uses: only ENOENT reads as absent, and an
+  // unreadable or otherwise refused host stops here instead of masking as absent.
+  const hostBytes = await readProjectFile(REPO_ROOT, ".turnhelm/config.json", 65536);
   const manifest = {
     version: 2,
     suite,
@@ -881,7 +883,7 @@ const buildRun = async (
       }
     },
     runRoot: { canonical: await realpath(runRoot), dev: runInfo.dev, ino: runInfo.ino },
-    hostSnapshot: hostBytes === null
+    hostSnapshot: hostBytes === undefined
       ? { exists: false, sha256: null }
       : { exists: true, sha256: sha256hex(hostBytes) },
     caps: {
@@ -1678,8 +1680,8 @@ test("host snapshot drift between prepare and claim rejects", async t => {
   // a drifted environment (or against a forged snapshot) must not proceed.
   const run = await buildRun(t, "laya", classifier.url, [{ id: "host-pinned", kind: "worker-readonly" }]);
   const crafted = JSON.parse(await readFile(run.manifestPath, "utf8")) as { hostSnapshot: unknown };
-  const hostReality = await readFile(join(REPO_ROOT, ".turnhelm", "config.json")).catch(() => null);
-  assert.deepEqual(crafted.hostSnapshot, hostReality === null
+  const hostReality = await readProjectFile(REPO_ROOT, ".turnhelm/config.json", 65536);
+  assert.deepEqual(crafted.hostSnapshot, hostReality === undefined
     ? { exists: false, sha256: null }
     : { exists: true, sha256: sha256hex(hostReality) },
     "crafted manifests snapshot the real host config state, not a hardcoded one");
@@ -1688,6 +1690,23 @@ test("host snapshot drift between prepare and claim rejects", async t => {
   const bytes = JSON.stringify(manifest, null, 2) + "\n";
   await writeFile(run.manifestPath, bytes);
   await assert.rejects(() => claimAcceptance(run.manifestPath, sha256hex(Buffer.from(bytes, "utf8"))), /host snapshot/);
+
+  // The absent-state pin above is trivial while this host carries no config,
+  // so plant one (only when really absent) and pin the present state too.
+  if (hostReality === undefined) {
+    const planted = Buffer.from("{\"version\":1}\n", "utf8");
+    const hostDirExisted = await stat(join(REPO_ROOT, ".turnhelm")).then(() => true, () => false);
+    await mkdir(join(REPO_ROOT, ".turnhelm"), { recursive: true });
+    await writeFile(HOST_PATH, planted);
+    t.after(async () => {
+      await rm(HOST_PATH, { force: true });
+      if (!hostDirExisted) await rm(join(REPO_ROOT, ".turnhelm"), { recursive: true, force: true });
+    });
+    const present = await buildRun(t, "laya", classifier.url, [{ id: "host-present", kind: "worker-readonly" }]);
+    const presentCrafted = JSON.parse(await readFile(present.manifestPath, "utf8")) as { hostSnapshot: unknown };
+    assert.deepEqual(presentCrafted.hostSnapshot, { exists: true, sha256: sha256hex(planted) },
+      "a present host config is snapshotted byte-for-byte, never as absent");
+  }
 });
 
 test("consumer instruction files are frozen with the case", async t => {
@@ -2850,7 +2869,9 @@ test("RR05 terminal boundary is fail closed", async t => {
   const signalEntry = async (signal: "SIGINT" | "SIGTERM"): Promise<number | null> => {
     // Kill only once the fixture has actually received the first classify
     // request (whose scripted answer hangs): the signal then lands mid-wait
-    // deterministically, not after a guessed delay.
+    // deterministically, not after a guessed delay. The readiness wait races
+    // child exit and a deadline so an early-exited or wedged child fails the
+    // assertions promptly instead of parking the test forever.
     let requestLanded: () => void = () => {};
     const classified = new Promise<void>(resolve => { requestLanded = resolve; });
     const hangClassifier = await startClassifierFixture(t, count => {
@@ -2861,8 +2882,20 @@ test("RR05 terminal boundary is fail closed", async t => {
     const child = spawn(process.execPath,
       [ENTRY_PATH, "--execute", run.manifestPath, "--approve", run.sha256],
       { env: { PATH: process.env.PATH ?? "" }, stdio: ["ignore", "ignore", "pipe"] });
+    t.after(() => { child.kill("SIGKILL"); });
     const exited = new Promise<number | null>(resolve => child.once("exit", code => resolve(code)));
-    await classified;
+    const stall = new Promise<never>((_, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("signal entry child neither classified nor exited within 30s")), 30_000);
+      timer.unref();
+    });
+    await Promise.race([
+      classified,
+      exited.then(code => {
+        throw new Error("signal entry child exited before the first classify request (code " + code + ")");
+      }),
+      stall
+    ]);
     child.kill(signal);
     return await exited;
   };
