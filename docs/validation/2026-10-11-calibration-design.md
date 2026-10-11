@@ -17,15 +17,16 @@ Two open findings demand a predeclared, replayable calibration:
 
 Cause investigation (2026-10-11, 70 free local classifies, raw results in
 the appendix): on the local typed-decisions backend, every tested stimulus
-produced the identical choice and confidence across its 5 repeats, which
-rules out run-to-run noise for these inputs. Across the tested variants,
-language, keyword presence, and length did not explain the divergence:
-near-paraphrases of the same instruction flip the choice (`heading-en`
-frozen text → `frontier`; "Rename README's title to Turnhelm and touch
-nothing else" → `fast`). Working hypothesis, not an observed mechanism: the
-frozen heading-en text sits near a decision boundary, so micro-phrasing
-moves the selection. Reported confidence is uniformly low (0.01–0.12) and
-shows no separation between stable and flipping stimuli.
+produced the identical choice and confidence across its 5 repeats (observed
+repeat-stability), and choice tracked micro-phrasing: near-paraphrases of
+the same instruction selected different profiles (`heading-en` frozen text
+→ `frontier`; "Rename README's title to Turnhelm and touch nothing else" →
+`fast`). These data do not isolate a cause — language, keyword presence,
+and length vary together across the tested variants, so no factor is
+excluded. Working hypothesis, not an observed mechanism: the frozen
+heading-en text sits near a decision boundary, so micro-phrasing moves the
+selection. Reported confidence is uniformly low (0.01–0.12) and does not
+separate the frozen text from its paraphrases.
 
 ## Stimuli
 
