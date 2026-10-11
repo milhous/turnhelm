@@ -1782,6 +1782,34 @@ fs.openSync = function (path, ...rest) {
   const target = redirect(path);
   return originalOpenSync.call(this, target === null ? path : target, ...rest);
 };
+// Optional: write the watch marker the moment the completed evidence record
+// is appended, so the post-completed terminal recheck reads drifted bytes.
+// FileHandle is not reachable from CJS, so the instance's own appendFile is
+// wrapped from the fsPromises.open call that created it.
+const flipOn = process.env.TURNHELM_TEST_FLIP_ON_COMPLETED;
+if (flipOn !== undefined) {
+  const originalOpenHandle = fsp.open;
+  fsp.open = function (...args) {
+    return originalOpenHandle.apply(this, args).then(handle => {
+      if (handle !== null && typeof handle === "object" && typeof handle.appendFile === "function") {
+        const boundAppend = handle.appendFile.bind(handle);
+        let flipped = false;
+        Object.defineProperty(handle, "appendFile", {
+          configurable: true,
+          writable: true,
+          value: function (data, ...rest) {
+            if (!flipped && String(data).includes('"phase":"completed"')) {
+              flipped = true;
+              try { fs.writeFileSync(flipOn, "flip"); } catch { /* the test dir owns it */ }
+            }
+            return boundAppend(data, ...rest);
+          }
+        });
+      }
+      return handle;
+    });
+  };
+}
 require("node:module").syncBuiltinESMExports();
 `;
 
@@ -1982,7 +2010,20 @@ test("RR02 calibration forgery refuses before calls", async t => {
     }],
     ["blank-task", c => {
       (c.calibrationTasks as Record<string, unknown>[])[0].task = "   ";
-    }]
+    }],
+    ["cross-split-pair-id", c => {
+      for (const task of c.calibrationTasks as Record<string, unknown>[]) {
+        if (task.pairId === "decoy") task.pairId = "heading";
+        if (task.pairId === "auth") task.pairId = "race";
+      }
+    }],
+    ["three-member-pair", c => {
+      (c.calibrationTasks as Record<string, unknown>[])[1].pairId = "race";
+    }],
+    ["blank-worker-task", c => { c.workerReadonlyTask = "   "; }],
+    ["nul-worker-task", c => { c.workerWriteTask = "sum the values\0"; }],
+    ["continuation-worker-task", c => { c.workerReadonlyTask = "continue"; }],
+    ["oversize-worker-task", c => { c.workerWriteTask = "x".repeat(9000); }]
   ];
   for (const [name, mutate] of corpusVariants) {
     const path = join(variantDirectory, name + ".json");
@@ -2420,6 +2461,50 @@ test("RR05 terminal boundary is fail closed", async t => {
   assert.equal(abortEvidence.at(-1)?.phase, "stopped");
   assert.equal(abortEvidence.at(-1)?.reason, "signal");
 
+  // The completed append itself fails: the eleven durable verified records
+  // and the whole completed roster before it still add up to evidence-io, and
+  // no completed line ever lands.
+  inBand(classifier);
+  const failingCompletedAppend = t.mock.method(fileHandlePrototype, "appendFile",
+    async function (this: FileHandle, data: Buffer) {
+      if (data.includes('"phase":"completed"')) throw new Error("injected completed append failure");
+      return originalAppend.call(this, data);
+    });
+  const appendFailure = await buildCalibrationRun(t, "calibration-dev", classifier.url);
+  assert.equal(await executeAcceptance(appendFailure.manifestPath, appendFailure.sha256, { env }), 1,
+    "a completed record that never appended is not a completion");
+  failingCompletedAppend.mock.restore();
+  const appendFailureEvidence = await readEvidence(appendFailure.runRoot);
+  assert.ok(!appendFailureEvidence.some(line => line.phase === "completed"),
+    "the completed line never landed");
+  assert.equal(appendFailureEvidence.filter(line => line.phase === "verified").length, 12);
+  assert.equal(appendFailureEvidence.at(-1)?.reason, "evidence-io");
+
+  // The operator aborts while the twelfth verified record is appended: the
+  // post-loop abort check stops the round before any completed fact exists.
+  inBand(classifier);
+  const verifiedController = new AbortController();
+  let verifiedAppends = 0;
+  const abortingVerified = t.mock.method(fileHandlePrototype, "appendFile",
+    async function (this: FileHandle, data: Buffer) {
+      const result = originalAppend.call(this, data);
+      if (data.includes('"phase":"verified"')) {
+        verifiedAppends += 1;
+        if (verifiedAppends === 12) verifiedController.abort();
+      }
+      return result;
+    });
+  const lastVerified = await buildCalibrationRun(t, "calibration-dev", classifier.url);
+  assert.equal(await executeAcceptance(lastVerified.manifestPath, lastVerified.sha256,
+    { env, signal: verifiedController.signal }), 130,
+    "an abort discovered after the last verified case is a signal stop");
+  abortingVerified.mock.restore();
+  const lastVerifiedEvidence = await readEvidence(lastVerified.runRoot);
+  assert.equal(lastVerifiedEvidence.filter(line => line.phase === "verified").length, 12);
+  assert.ok(!lastVerifiedEvidence.some(line => line.phase === "completed"),
+    "no completed fact is written after the abort");
+  assert.equal(lastVerifiedEvidence.at(-1)?.reason, "signal");
+
   // The evidence FD fails to close after a durable completed record: a close
   // failure is not a completion either. FileHandle attaches close as an own
   // constructor property that prototype accessors cannot intercept, so the
@@ -2514,10 +2599,44 @@ test("RR05 terminal boundary is fail closed", async t => {
   assert.ok(!workerAbortEvidence.some(line => line.phase === "stopped"),
     "after the close no stop record can be appended");
 
+  // The same closed-FD abort boundary holds for calibration: the exit code
+  // alone carries the operator's signal after the close, stop-less, even with
+  // the completed record already durable.
+  inBand(classifier);
+  const calibController = new AbortController();
+  let calibCloseWrapped = false;
+  const calibAbortTracking = t.mock.method(fileHandlePrototype, "appendFile",
+    async function (this: FileHandle, data: Buffer) {
+      const result = originalAppend.call(this, data);
+      if (!calibCloseWrapped) {
+        calibCloseWrapped = true;
+        const descriptor = Object.getOwnPropertyDescriptor(this, "close");
+        if (descriptor !== undefined) {
+          const originalCloseFn = descriptor.value as () => Promise<void>;
+          Object.defineProperty(this, "close", {
+            configurable: true,
+            writable: true,
+            value: async (): Promise<void> => { await originalCloseFn(); calibController.abort(); }
+          });
+        }
+      }
+      return result;
+    });
+  const calibAborted = await buildCalibrationRun(t, "calibration-dev", classifier.url);
+  assert.equal(await executeAcceptance(calibAborted.manifestPath, calibAborted.sha256,
+    { env, signal: calibController.signal }), 130,
+    "an operator abort landing at the closed FD still sets the signal exit code");
+  calibAbortTracking.mock.restore();
+  const calibAbortEvidence = await readEvidence(calibAborted.runRoot);
+  assert.equal(calibAbortEvidence.at(-1)?.phase, "completed");
+  assert.ok(!calibAbortEvidence.some(line => line.phase === "stopped"),
+    "after the close no stop record can be appended");
+
   // Late host-config and frozen-corpus drift, flipped on the 12th classify, are
   // caught by the terminal recheck: no completed fact, a drift stop, exit 1.
   let driftRuns = 0;
-  const driftChild = async (path: string, before: string, after: string): Promise<{
+  const driftChild = async (path: string, before: string, after: string,
+    flipAt: "request-12" | "completed" = "request-12"): Promise<{
     code: number; runRoot: string; requests: number;
   }> => {
     driftRuns += 1;
@@ -2525,7 +2644,7 @@ test("RR05 terminal boundary is fail closed", async t => {
     const requests = { count: 0 };
     const driftClassifier = await startClassifierFixture(t, count => {
       requests.count = count;
-      if (count === 12) writeFileSync(markerFile, "flip");
+      if (flipAt === "request-12" && count === 12) writeFileSync(markerFile, "flip");
     });
     inBand(driftClassifier);
     const directory = await mkdtemp(join(tmpdir(), "turnhelm-driftchild-"));
@@ -2544,7 +2663,8 @@ test("RR05 terminal boundary is fail closed", async t => {
           TURNHELM_TEST_REDIRECTS: JSON.stringify({
             read: { [path]: { watch: markerFile, marker: "flip", before, after } }
           }),
-          TURNHELM_FIXTURE_URL: driftClassifier.url
+          TURNHELM_FIXTURE_URL: driftClassifier.url,
+          ...(flipAt === "completed" ? { TURNHELM_TEST_FLIP_ON_COMPLETED: markerFile } : {})
         }
       });
     const line = String(run.stdout).split("\n").find(candidate => candidate.startsWith("DRIFT_RESULT "));
@@ -2588,6 +2708,19 @@ test("RR05 terminal boundary is fail closed", async t => {
   assert.equal(sourceDrift.code, 1, "a drifted source file is not a completion");
   assert.ok(!(await readEvidence(sourceDrift.runRoot)).some(line => line.phase === "completed"));
   assert.equal((await readEvidence(sourceDrift.runRoot)).at(-1)?.reason, "drift");
+
+  // A drift that lands only while the completed record is appended is caught
+  // by the second terminal recheck: the completed line may already be visible,
+  // yet the round is a drift stop, exit 1 — never 0 or 3.
+  const postCompletedDrift = await driftChild(HOST_PATH, hostA, hostB, "completed");
+  assert.equal(postCompletedDrift.code, 1,
+    "a host config that drifts at the completed append is not a completion");
+  assert.equal(postCompletedDrift.requests, 12);
+  const postCompletedEvidence = await readEvidence(postCompletedDrift.runRoot);
+  assert.equal(postCompletedEvidence.filter(line => line.phase === "verified").length, 12);
+  assert.ok(postCompletedEvidence.some(line => line.phase === "completed"),
+    "the completed line may already be visible");
+  assert.equal(postCompletedEvidence.at(-1)?.reason, "drift");
 
   // The real entry maps the two-dimensional outcomes onto exit codes; only
   // completed plus its matching exit code reads as finished.

@@ -406,6 +406,8 @@ const parseCorpus = (value: unknown): FrozenCorpus => {
   if (typeof value.workerWriteTask !== "string" || value.workerWriteTask.length === 0) {
     throw corpusFail("workerWriteTask must be a nonempty string");
   }
+  validateTask(value.workerReadonlyTask);
+  validateTask(value.workerWriteTask);
   if (!isRecord(value.workerFixtureInput) || !Array.isArray(value.workerFixtureInput.values)) {
     throw corpusFail("workerFixtureInput values must be an array");
   }
@@ -472,6 +474,29 @@ const parseCorpus = (value: unknown): FrozenCorpus => {
         || pair[0].allowedProfiles.some((profile, index) => profile !== pair[1].allowedProfiles[index])) {
         throw corpusFail("each pair must freeze the same allowed-profile band");
       }
+    }
+  }
+  // Pair identity is global, not per-split: a pairId reused across splits, or a
+  // pair with more or fewer than its two members anywhere in the corpus, is a
+  // forgery even when every split looks well-formed on its own.
+  const pairGroups = new Map<string, typeof tasks>();
+  for (const task of tasks) {
+    const members = pairGroups.get(task.pairId) ?? [];
+    members.push(task);
+    pairGroups.set(task.pairId, members);
+  }
+  if (pairGroups.size !== 4) throw corpusFail("calibrationTasks must freeze exactly four distinct task pairs");
+  for (const [pairId, members] of pairGroups) {
+    if (members.length !== 2) throw corpusFail("pair " + JSON.stringify(pairId) + " must freeze exactly two tasks");
+    if (members[0].split !== members[1].split) {
+      throw corpusFail("pair " + JSON.stringify(pairId) + " must stay within one split");
+    }
+    if (members[0].language === members[1].language) {
+      throw corpusFail("pair " + JSON.stringify(pairId) + " must freeze one en and one zh task");
+    }
+    if (members[0].allowedProfiles.length !== members[1].allowedProfiles.length
+      || members[0].allowedProfiles.some((profile, index) => profile !== members[1].allowedProfiles[index])) {
+      throw corpusFail("pair " + JSON.stringify(pairId) + " must freeze the same allowed-profile band");
     }
   }
   return deepFreeze({

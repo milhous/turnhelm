@@ -322,9 +322,11 @@ receipt data degrades to fixed `invalid`/`unknown` markers. Exit codes: `2`
 usage, `1` failure or incomplete, `0` complete pass, `3` a complete
 calibration roster containing a band-policy mismatch, `130`/`143` on interrupt.
 In the calibration suites a legal-but-out-of-band selection is recorded as a
-policy mismatch and the roster continues to its full 12 calls — only routing
-failures stop early — while worker suites stop at the first failing case. A
-visible `completed` journal record alone is not proof of completion: a failed
+policy mismatch and the roster continues to its full 12 calls — only that band
+mismatch continues; engineering, boundary, cancellation, and evidence-I/O
+failures still stop the round early — while worker suites stop at the first
+failing case. A visible `completed` journal record alone is not proof of
+completion: a failed
 terminal sync, close, or drift recheck after it still fails the run.
 Cancellation signals only the owned CLI child (SIGINT, then SIGTERM after a
 fixed grace); descendants it leaves behind are not scanned or killed, and a
