@@ -863,6 +863,9 @@ const buildRun = async (
   const srcFiles = (await readdir(join(REPO_ROOT, "src"))).filter(name => name.endsWith(".ts")).sort();
   const distFiles = (await readdir(join(REPO_ROOT, "dist", "src"))).filter(name => name.endsWith(".js")).sort();
   const runInfo = await stat(runRoot);
+  // The crafted manifest snapshots the host config the way prepare would,
+  // from the real file state — not a hardcoded absent marker.
+  const hostBytes = await readFile(join(REPO_ROOT, ".turnhelm", "config.json")).catch(() => null);
   const manifest = {
     version: 2,
     suite,
@@ -878,7 +881,9 @@ const buildRun = async (
       }
     },
     runRoot: { canonical: await realpath(runRoot), dev: runInfo.dev, ino: runInfo.ino },
-    hostSnapshot: { exists: false, sha256: null },
+    hostSnapshot: hostBytes === null
+      ? { exists: false, sha256: null }
+      : { exists: true, sha256: sha256hex(hostBytes) },
     caps: {
       worker: cases.length,
       laya: cases.filter(entry => backendsFor(entry).includes("laya")).length,
@@ -1672,6 +1677,12 @@ test("host snapshot drift between prepare and claim rejects", async t => {
   // The manifest records the host project config state at prepare; a claim in
   // a drifted environment (or against a forged snapshot) must not proceed.
   const run = await buildRun(t, "laya", classifier.url, [{ id: "host-pinned", kind: "worker-readonly" }]);
+  const crafted = JSON.parse(await readFile(run.manifestPath, "utf8")) as { hostSnapshot: unknown };
+  const hostReality = await readFile(join(REPO_ROOT, ".turnhelm", "config.json")).catch(() => null);
+  assert.deepEqual(crafted.hostSnapshot, hostReality === null
+    ? { exists: false, sha256: null }
+    : { exists: true, sha256: sha256hex(hostReality) },
+    "crafted manifests snapshot the real host config state, not a hardcoded one");
   const manifest = JSON.parse(await readFile(run.manifestPath, "utf8")) as Record<string, unknown>;
   manifest.hostSnapshot = { exists: true, sha256: "0".repeat(64) };
   const bytes = JSON.stringify(manifest, null, 2) + "\n";
@@ -1810,6 +1821,20 @@ if (flipOn !== undefined) {
     });
   };
 }
+// Children under this preload (prepare probes, drift probes) may dial the
+// owned classifier fixture over plain http, but nothing they do has a
+// legitimate https or fetch transport — both refuse, loudly.
+const trappedHttps = require("node:https");
+for (const api of ["request", "get"]) {
+  trappedHttps[api] = function () {
+    throw new Error("redirect-preload child made an https call via node:https." + api);
+  };
+}
+if (typeof globalThis.fetch === "function") {
+  globalThis.fetch = function () {
+    throw new Error("redirect-preload child made a fetch call");
+  };
+}
 require("node:module").syncBuiltinESMExports();
 `;
 
@@ -1847,6 +1872,63 @@ const runPrepareProbe = async (
     "the probe child must report: " + String((run as { stderr?: string }).stderr ?? ""));
   return { ok: line.startsWith("PROBE_OK"), line };
 };
+
+test("the redirect preload traps https and fetch but leaves plain http alone", async t => {
+  // Prepare probes and drift children run under REDIRECT_PRELOAD; they may
+  // dial the owned classifier fixture over plain http, but nothing they do has
+  // a legitimate https or fetch transport — those must refuse, loudly.
+  const directory = await mkdtemp(join(tmpdir(), "turnhelm-rptrap-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const preload = join(directory, "redirect-preload.cjs");
+  const childScript = join(directory, "trap-probe.mjs");
+  await writeFile(preload, REDIRECT_PRELOAD);
+  await writeFile(childScript, `
+    const http = await import("node:http");
+    const https = await import("node:https");
+    const hits = { count: 0 };
+    const server = http.createServer((req, res) => {
+      hits.count += 1;
+      req.resume();
+      res.writeHead(200);
+      res.end();
+    });
+    await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+    const port = server.address().port;
+    const outcome = { httpsMessage: null, fetchMessage: null, httpOk: false };
+    try {
+      const req = https.request({ host: "127.0.0.1", port, path: "/x", method: "GET" });
+      req.on("error", () => {});
+      req.end();
+    } catch (error) {
+      outcome.httpsMessage = String(error && error.message);
+    }
+    try {
+      await fetch("http://127.0.0.1:" + port + "/y");
+    } catch (error) {
+      outcome.fetchMessage = String(error && error.message);
+    }
+    outcome.httpOk = await new Promise(resolve => {
+      http.get({ host: "127.0.0.1", port, path: "/z" }, res => {
+        res.resume();
+        res.on("end", () => resolve(true));
+      }).on("error", () => resolve(false));
+    });
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(() => resolve()));
+    process.stdout.write("TRAP_RESULT " + JSON.stringify({ ...outcome, serverHits: hits.count }) + "\\n");
+  `);
+  const run = await execute(process.execPath, ["--require", preload, childScript],
+    { encoding: "utf8", timeout: 30000, env: { ...process.env, TURNHELM_TEST_REDIRECTS: '{"read":{}}' } });
+  const line = String(run.stdout).split("\n").find(candidate => candidate.startsWith("TRAP_RESULT "));
+  assert.ok(line, "the trap probe must report");
+  const result = JSON.parse(line.slice("TRAP_RESULT ".length)) as {
+    httpsMessage: string | null; fetchMessage: string | null; httpOk: boolean; serverHits: number;
+  };
+  assert.match(String(result.httpsMessage), /https call/, "https is trapped inside redirect-preload children");
+  assert.match(String(result.fetchMessage), /fetch call/, "fetch is trapped inside redirect-preload children");
+  assert.equal(result.httpOk, true, "plain http (the owned classifier fixture) still works");
+  assert.equal(result.serverHits, 1, "only the http control ever reaches the server");
+});
 
 // A v2 corpus shaped exactly as the spec requires, with the worker parts the
 // worker suites still use; mutations build the malformed variants.
@@ -1922,6 +2004,8 @@ test("RR02 calibration forgery refuses before calls", async t => {
 
   // Every forgery below is rewritten and re-hashed, so the approved SHA is
   // correct for the tampered bytes: only the grammar/claim binding may refuse.
+  // Each entry also names the exact claim gate that must refuse it, so a
+  // deleted check cannot hide behind a neighboring gate's rejection.
   const casesOf = (manifest: Record<string, unknown>) => manifest.cases as Record<string, unknown>[];
   const firstCase = (manifest: Record<string, unknown>) => casesOf(manifest)[0];
   const oracleOf = (manifest: Record<string, unknown>) => firstCase(manifest).oracle as Record<string, unknown>;
@@ -1934,45 +2018,47 @@ test("RR02 calibration forgery refuses before calls", async t => {
   t.after(() => rm(dirname(layaPrepared.manifestPath), { recursive: true, force: true }));
   const layaOriginal = JSON.parse(await readFile(layaPrepared.manifestPath, "utf8"));
 
-  const forgeries: readonly (readonly [string, (manifest: Record<string, unknown>) => void])[] = [
-    ["v1-manifest", m => { m.version = 1; }],
-    ["unknown-manifest-key", m => { m.extra = 1; }],
-    ["unknown-oracle-key", m => { oracleOf(m).band = ["fast"]; }],
-    ["wrong-language", m => { oracleOf(m).language = "fr"; }],
-    ["wrong-trial", m => { oracleOf(m).trial = 4; }],
-    ["duplicate-band-profile", m => { oracleOf(m).allowedProfiles = ["fast", "fast"]; }],
-    ["empty-band", m => { oracleOf(m).allowedProfiles = []; }],
-    ["cross-split-case", m => { casesOf(m)[0] = structuredClone(holdoutOriginal.cases[0]); }],
-    ["wrong-case-id", m => { firstCase(m).id = "heading-en-trial-9"; }],
+  const forgeries: readonly (readonly [string, (manifest: Record<string, unknown>) => void, RegExp])[] = [
+    ["v1-manifest", m => { m.version = 1; }, /manifest version must be 2/],
+    ["unknown-manifest-key", m => { m.extra = 1; }, /unknown field "extra"/],
+    ["unknown-oracle-key", m => { oracleOf(m).band = ["fast"]; }, /unknown field "band"/],
+    ["wrong-language", m => { oracleOf(m).language = "fr"; }, /language must be en or zh/],
+    ["wrong-trial", m => { oracleOf(m).trial = 4; }, /trial must be 1, 2, or 3/],
+    ["duplicate-band-profile", m => { oracleOf(m).allowedProfiles = ["fast", "fast"]; }, /allowedProfiles must be unique/],
+    ["empty-band", m => { oracleOf(m).allowedProfiles = []; }, /allowedProfiles must be a nonempty array/],
+    ["cross-split-case", m => { casesOf(m)[0] = structuredClone(holdoutOriginal.cases[0]); }, /split must match the suite/],
+    ["wrong-case-id", m => { firstCase(m).id = "heading-en-trial-9"; }, /not the frozen roster id/],
     ["wrong-task", m => {
       const item = firstCase(m);
       item.task = "tampered classifier task text";
       item.taskBytes = Buffer.byteLength(item.task as string, "utf8");
       item.taskHash = sha256hex(Buffer.from(item.task as string, "utf8"));
-    }],
-    ["wrong-pair-id", m => { oracleOf(m).pairId = "race"; }],
-    ["band-swap", m => { oracleOf(m).allowedProfiles = ["deep", "frontier", "frontier_xhigh"]; }],
-    ["deleted-trial", m => { casesOf(m).pop(); (m.caps as Record<string, number>).laya = 11; }],
-    ["duplicated-trial", m => { casesOf(m).push(structuredClone(casesOf(m)[0])); }],
+    }, /not the frozen corpus task/],
+    ["wrong-pair-id", m => { oracleOf(m).pairId = "race"; }, /not the corpus fact/],
+    ["band-swap", m => { oracleOf(m).allowedProfiles = ["deep", "frontier", "frontier_xhigh"]; }, /not the corpus fact/],
+    ["deleted-trial", m => { casesOf(m).pop(); (m.caps as Record<string, number>).laya = 11; }, /calibration roster is incomplete/],
+    ["duplicated-trial", m => { casesOf(m).push(structuredClone(casesOf(m)[0])); }, /is duplicated/],
     ["reordered-trial", m => {
       const all = casesOf(m);
       [all[0], all[4]] = [all[4], all[0]];
-    }],
-    ["rebound-profiles", m => { configOf(m).profiles.fast = { ...configOf(m).profiles.balanced }; }],
-    ["changed-timeout", m => { configOf(m).routingTimeoutMs = 20000; }],
-    ["jev-enabled", m => { configOf(m).backends.jev.enabled = true; }],
+    }, /not the frozen roster id/],
+    ["rebound-profiles", m => { configOf(m).profiles.fast = { ...configOf(m).profiles.balanced }; }, /profiles drifted from the template/],
+    ["changed-timeout", m => { configOf(m).routingTimeoutMs = 20000; }, /config drifted from the template/],
+    ["jev-enabled", m => { configOf(m).backends.jev.enabled = true; }, /must cover the enabled jev backend/],
     ["worker-case-in-calibration", m => {
       casesOf(m)[0] = structuredClone(layaOriginal.cases[0]);
       m.caps = { worker: 1, laya: 12, jev: 0 };
-    }],
-    ["underreported-caps", m => { (m.caps as Record<string, number>).laya = 11; }]
+    }, /must not carry worker cases/],
+    ["underreported-caps", m => { (m.caps as Record<string, number>).laya = 11; }, /caps must match the case reservations/]
   ];
-  for (const [name, mutate] of forgeries) {
+  for (const [name, mutate, gate] of forgeries) {
     const manifest = structuredClone(devOriginal);
     mutate(manifest);
     const bytes = JSON.stringify(manifest, null, 2) + "\n";
     await writeFile(devPrepared.manifestPath, bytes, { mode: 0o600 });
     const sha = sha256hex(Buffer.from(bytes, "utf8"));
+    await assert.rejects(() => claimAcceptance(devPrepared.manifestPath, sha), gate,
+      name + " must be refused by its named claim gate");
     assert.equal(await executeAcceptance(devPrepared.manifestPath, sha, { env: fixtureEnv }), 1,
       name + " is refused before the first classifier call");
     assert.equal(classifier.state.requests, 0, name + " makes zero classifier requests");
@@ -2762,13 +2848,21 @@ test("RR05 terminal boundary is fail closed", async t => {
   assert.equal(await runEntryCode(["--execute", entryFailure.manifestPath, "--approve", entryFailure.sha256]), 1);
 
   const signalEntry = async (signal: "SIGINT" | "SIGTERM"): Promise<number | null> => {
-    classifier.scripted.push("hang");
-    const run = await buildCalibrationRun(t, "calibration-dev", classifier.url);
+    // Kill only once the fixture has actually received the first classify
+    // request (whose scripted answer hangs): the signal then lands mid-wait
+    // deterministically, not after a guessed delay.
+    let requestLanded: () => void = () => {};
+    const classified = new Promise<void>(resolve => { requestLanded = resolve; });
+    const hangClassifier = await startClassifierFixture(t, count => {
+      if (count === 1) requestLanded();
+    });
+    hangClassifier.scripted.push("hang");
+    const run = await buildCalibrationRun(t, "calibration-dev", hangClassifier.url);
     const child = spawn(process.execPath,
       [ENTRY_PATH, "--execute", run.manifestPath, "--approve", run.sha256],
       { env: { PATH: process.env.PATH ?? "" }, stdio: ["ignore", "ignore", "pipe"] });
     const exited = new Promise<number | null>(resolve => child.once("exit", code => resolve(code)));
-    await new Promise(resolve => setTimeout(resolve, 900));
+    await classified;
     child.kill(signal);
     return await exited;
   };
