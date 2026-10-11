@@ -54,6 +54,39 @@ const PLANNED = [
 
 const FORBIDDEN_PREFIXES = ["src/", "test/", "examples/", "docs/", "dist/test/", ".superpowers/"];
 
+// The live acceptance harness never ships: its runner, its test-only harness
+// module, and the frozen corpus are repo-local verification surfaces.
+const LIVE_HARNESS_PATHS = [
+  "package/dist/test/live.integration.js",
+  "package/dist/test/live-acceptance.js",
+  "package/test/fixtures/live-acceptance.json"
+];
+
+const packViolations = (listed: readonly string[]): string[] => {
+  const violations = LIVE_HARNESS_PATHS.filter(path => listed.includes(path));
+  for (const prefix of FORBIDDEN_PREFIXES) {
+    if (listed.some(path => path.startsWith("package/" + prefix))) violations.push(prefix);
+  }
+  return violations;
+};
+
+test("pack exclusion rules reject synthetic live-harness leaks", () => {
+  // Fabricated listings prove each named harness path is refused on its own.
+  for (const leaked of LIVE_HARNESS_PATHS) {
+    assert.ok(packViolations(["package/package.json", leaked]).includes(leaked),
+      leaked + " must be named as a violation");
+  }
+  assert.deepEqual(packViolations(["package/package.json", "package/.superpowers/sdd/plan/progress.md"]),
+    [".superpowers/"], "the prefix rules still reject private workspace files");
+  // A clean listing names nothing.
+  assert.deepEqual(packViolations([
+    "package/package.json",
+    "package/dist/src/cli.js",
+    "package/assets/config.json",
+    "package/.agents/skills/turnhelm-routing/SKILL.md"
+  ]), []);
+});
+
 test("the packed distribution installs offline and serves the project entry end to end",
   { timeout: 300_000 }, async t => {
     const scratch = await mkdtemp(join(tmpdir(), "turnhelm-package-"));
@@ -88,10 +121,15 @@ test("the packed distribution installs offline and serves the project entry end 
       assert.equal(listed.some(path => path.startsWith("package/" + prefix)), false,
         "tarball must not ship " + prefix);
     }
+    assert.deepEqual(packViolations(listed), [],
+      "tarball must not ship the live runner, harness, or corpus");
     const readme = (await execute("tar", ["-xOzf", tarball, "package/README.md"])).stdout;
     for (const retired of ["turnhelm route", "turnhelm codex", "profileMode", "fallbackProfile",
       "examples/config.json", "2000 UTF-16"]) {
       assert.ok(!readme.includes(retired), "packed README must not advertise retired path: " + retired);
+    }
+    for (const fragment of ["Node.js `>=24.0.0`", "Node 22.8 support has been dropped", "`24.x >=24.5.0`"]) {
+      assert.ok(readme.includes(fragment), "packed README must state the current Node requirement: " + fragment);
     }
 
     // 3. Install offline into an unrelated temporary Git project whose root
@@ -110,7 +148,13 @@ test("the packed distribution installs offline and serves the project entry end 
     assert.equal(configAsset.version, 1);
     assert.deepEqual(Object.keys(configAsset.profiles).sort(),
       ["balanced", "deep", "fast", "frontier", "frontier_max", "frontier_xhigh"]);
-    await readFile(join(installed, ".agents", "skills", "turnhelm-routing", "SKILL.md"), "utf8");
+    const installedPackage = JSON.parse(await readFile(join(installed, "package.json"), "utf8")) as { engines: { node: string } };
+    assert.equal(installedPackage.engines.node, ">=24.0.0",
+      "the installed package must declare the Node 24 floor");
+    const installedSkill = await readFile(join(installed, ".agents", "skills", "turnhelm-routing", "SKILL.md"), "utf8");
+    for (const fragment of ["Node >=24.0.0", "22.8 support dropped", "24.x >=24.5.0"]) {
+      assert.ok(installedSkill.includes(fragment), "packed skill must state the current Node requirement: " + fragment);
+    }
     assert.equal((await readdir(join(installed, "dist", "src"))).includes("cli.js"), true);
     const bin = join(consumer, "node_modules", ".bin", "turnhelm");
     await readFile(bin); // pnpm created the bin link.
@@ -153,6 +197,7 @@ test("the packed distribution installs offline and serves the project entry end 
       assert.ok(status.has(id), "doctor must report the " + id + " check");
     }
     assert.equal(status.get("root"), "pass");
+    assert.equal(status.get("node"), "pass", "the installed doctor must pass the node check on the actual runtime");
     assert.equal(status.get("codex"), "pass");
     assert.equal(status.get("config"), "pass");
     assert.equal(result.code, 0);

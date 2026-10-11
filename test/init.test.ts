@@ -342,6 +342,7 @@ test("existing mode and CRLF style are preserved despite umask", async (t) => {
 
 test("mode edit between inspection and apply is refused as a race", async (t) => {
   const root = await tempProject(t, { agents: "# Team rules\n\n" });
+  await chmod(join(root, "AGENTS.md"), 0o644);
   const templates = await readTemplates();
   const changes = await inspectInstallation(root, templates);
   await chmod(join(root, "AGENTS.md"), 0o600);

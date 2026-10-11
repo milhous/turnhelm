@@ -1,5 +1,9 @@
 # Turnhelm Task Entry Implementation Plan
 
+> Historical execution plan: the original budget examples below predate the
+> 2026-10-09 Laya-share amendment. Use the current specification and README for
+> the three-quarter remaining-budget policy; do not restore the one-second cap.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build project-scoped init/doctor/run and ordinary automatic selection of all six model/effort presets through bounded Laya-to-authorized-Jev classification.

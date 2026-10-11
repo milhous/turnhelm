@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import { parseProjectConfig, PROFILE_IDS } from "../src/config.js";
-import { eligibleBackends, requestTaskChoice, type RequestSpec, type TaskBackend } from "../src/systemone.js";
+import { ClassifierRequestError, classifierFailure, eligibleBackends, requestTaskChoice,
+  type RequestSpec, type TaskBackend } from "../src/systemone.js";
 import { routeTask } from "../src/route.js";
 import { decisionReply, fakeEnv, fixtureConfig } from "./fixtures.js";
 
@@ -136,6 +137,66 @@ test("the shipped sole-Laya budget admits a 5.5s CPU inference response", async 
   assert.equal(r.decision.attempts[0].outcome, "success");
 });
 
+for (const durationMs of [3100, 5500]) {
+  test(`dual-backend routing admits a ${durationMs}ms CPU Laya reply without contacting Jev`, async t => {
+    let now = 0;
+    t.mock.method(performance, "now", () => now);
+    const calls: TaskBackend[] = [];
+    const r = await routeTask("Review the complete documentation and routing requirement", jevEnabled(), {
+      env: fakeEnv, request: async spec => {
+        calls.push(spec.backend);
+        if (spec.backend === "laya") now += durationMs;
+        return decisionReply("frontier");
+      }
+    });
+    assert.ok(r.status === "selected");
+    assert.equal(r.decision.backend, "laya");
+    assert.equal(r.decision.profileId, "frontier");
+    assert.deepEqual(calls, ["laya"]);
+    assert.deepEqual(r.decision.attempts, [{ backend: "laya", outcome: "success", durationMs }]);
+  });
+}
+
+test("dual-backend budget reserves a quarter of the remaining deadline for Jev", async t => {
+  let now = 0;
+  let clockReads = 0;
+  t.mock.method(performance, "now", () => clockReads++ === 0 ? 0 : now);
+  const budgets: number[] = [];
+  const signals: AbortController[] = [];
+  t.mock.method(AbortSignal, "timeout", (ms: number) => {
+    budgets.push(ms);
+    const controller = new AbortController();
+    signals.push(controller);
+    return controller.signal;
+  });
+  for (const [total, setup, laya, jev] of [
+    [100, 0, 75, 25], [10000, 0, 7500, 2500], [10001, 0, 7500, 2501],
+    [30000, 0, 22500, 7500], [10000, 1000, 6750, 2250], [100, 1, 74, 25]
+  ]) {
+    now = setup;
+    clockReads = 0;
+    budgets.length = signals.length = 0;
+    const base = jevEnabled();
+    const config = parseProjectConfig({ ...base, routingTimeoutMs: total });
+    const r = await routeTask("Preserve the shared deadline while failing over", config, {
+      env: fakeEnv, request: async spec => {
+        if (spec.backend === "laya") {
+          now += laya;
+          signals[0].abort();
+          throw new Error("simulated local deadline");
+        }
+        now += jev - 1;
+        return decisionReply("deep");
+      }
+    });
+    assert.ok(r.status === "selected");
+    assert.equal(r.decision.backend, "jev");
+    assert.deepEqual(budgets, [laya, jev]);
+    assert.deepEqual(r.decision.attempts.map(a => [a.backend, a.outcome]), [["laya", "timeout"], ["jev", "success"]]);
+    assert.equal(r.decision.routingMs, total - 1);
+  }
+});
+
 test("reported Laya truncation fails closed instead of selecting a profile", async () => {
   for (const usage of [
     { input_tokens: 1024, output_tokens: 0, state_tokens: 1543, state_tokens_dropped: 668, truncated: true, truncated_questions: ["route"] },
@@ -233,10 +294,16 @@ const stalledRequest = (spec: RequestSpec, guardMs: number = STALLED_GUARD_MS): 
     spec.signal.addEventListener("abort", settle, { once: true });
   });
 
-test("a Laya timeout leaves Jev only the remaining total budget", async () => {
+test("a Laya timeout leaves Jev only the remaining total budget", async t => {
   const base = fixtureConfig();
   const c = parseProjectConfig({ ...base, routingTimeoutMs: 400, backends: { ...base.backends, jev: { enabled: true } } });
   const delays: number[] = [];
+  const budgets: number[] = [];
+  const timeout = AbortSignal.timeout.bind(AbortSignal);
+  t.mock.method(AbortSignal, "timeout", (ms: number) => {
+    budgets.push(ms);
+    return timeout(ms);
+  });
   const stalled = async (spec: RequestSpec) => {
     const began = performance.now();
     try {
@@ -249,8 +316,10 @@ test("a Laya timeout leaves Jev only the remaining total budget", async () => {
   const r = await routeTask("Prove the invariants", c, { env: fakeEnv, request: stalled });
   assert.ok(r.status === "failed");
   assert.deepEqual(r.attempts.map(a => a.outcome), ["timeout", "timeout"]);
-  assert.ok(delays[0] >= 80 && delays[0] < 350, "laya share capped near min(1000, total/4)");
-  assert.ok(delays[1] >= 280 && delays[1] < 1500, "jev receives the total remainder, not another laya share");
+  assert.ok(budgets[0] > 0 && budgets[0] <= 300, "Laya uses at most three quarters of the remaining deadline");
+  assert.ok(budgets[1] > 0 && budgets[1] <= 100, "Jev receives only the shared deadline's remainder");
+  assert.ok(delays[0] >= 280 && delays[0] < 1500, "the real Laya deadline expires before failover");
+  assert.ok(delays[1] >= 0 && delays[1] < 1500, "the remaining Jev deadline also settles");
 });
 
 test("a final failure retains both attempts with their outcomes", async () => {
@@ -378,8 +447,8 @@ test("an elapsed-budget Laya failure keeps its share and still fails over", asyn
     request: async s => {
       calls.push(s.backend);
       if (s.backend === "laya") {
-        const until = performance.now() + 150;
-        while (performance.now() < until) { /* block past the min(1000, total/4) share */ }
+        const until = performance.now() + 320;
+        while (performance.now() < until) { /* block past the three-quarter Laya share */ }
         throw new Error("TEST_PRIVATE_SENTINEL");
       }
       return decisionReply("deep");
@@ -438,7 +507,7 @@ test("rejects invalid or inherited choices at the route level", async () => {
 
 test("accepts only own-property choice replies", async () => {
   for (const id of PROFILE_IDS) {
-    assert.equal(await call(decisionReply(id)), id);
+    assert.equal((await call(decisionReply(id))).profileId, id);
   }
 });
 
@@ -454,10 +523,10 @@ test("declared Laya truncation metadata must contain its own valid flags", async
 });
 
 test("a complete Laya usage report allows the full-task choice", async () => {
-  assert.equal(await call({
+  assert.equal((await call({
     answers: { route: { type: "choice", choice: "frontier" } },
     usage: { input_tokens: 1692, output_tokens: 0, state_tokens: 1543, state_tokens_dropped: 0, truncated: false, truncated_questions: [] }
-  }), "frontier");
+  })).profileId, "frontier");
 });
 
 test("the Laya request carries the task, model, six criteria and credentials", async () => {
@@ -503,4 +572,78 @@ test("an optional Laya credential is omitted when absent", async () => {
 test("hosted Jev requires a nonblank key", async () => {
   await assert.rejects(() => call(decisionReply(), "jev", {}), /TYPESAFE_API_KEY/);
   await assert.rejects(() => call(decisionReply(), "jev", { TYPESAFE_API_KEY: "  " }), /TYPESAFE_API_KEY/);
+});
+
+test("late cancellation and deadline override a successful reply", async () => {
+  // A reply landing after caller cancellation is aborted evidence.
+  {
+    const ac = new AbortController();
+    const r = await routeTask("Fix cache invalidation", fixtureConfig(), {
+      env: fakeEnv, signal: ac.signal,
+      request: async () => { ac.abort(); return decisionReply("fast"); }
+    });
+    assert.ok(r.status === "cancelled");
+    const [attempt] = r.attempts;
+    assert.ok(attempt.outcome === "cancelled");
+    assert.deepEqual(attempt.failure, { kind: "aborted", httpStatus: null, code: null });
+    assert.ok(Object.isFrozen(attempt.failure));
+  }
+  // A reply landing past its deadline is timeout evidence.
+  {
+    const c = parseProjectConfig({ ...JSON.parse(JSON.stringify(fixtureConfig())), routingTimeoutMs: 100 });
+    const r = await routeTask("Prove the invariants", c, {
+      env: fakeEnv,
+      request: async () => {
+        const until = performance.now() + 150;
+        while (performance.now() < until) { /* block so deadline timers cannot fire */ }
+        return decisionReply("fast");
+      }
+    });
+    assert.ok(r.status === "failed");
+    const [attempt] = r.attempts;
+    assert.ok(attempt.outcome === "timeout");
+    assert.deepEqual(attempt.failure, { kind: "timeout", httpStatus: null, code: null });
+  }
+  // Success carries no failure field at all.
+  {
+    const r = await routeTask("Prove the invariants", fixtureConfig(), {
+      env: fakeEnv, request: async () => decisionReply("fast")
+    });
+    assert.ok(r.status === "selected");
+    assert.equal("failure" in r.decision.attempts[0], false);
+    assert.deepEqual(Object.keys(r.decision.attempts[0]).sort(), ["backend", "durationMs", "outcome"]);
+  }
+  // A choice-validation failure is invalid-choice and allows a null status.
+  {
+    const r = await routeTask("Fix cache invalidation", fixtureConfig(), {
+      env: fakeEnv, request: async () => ({ answers: { route: "fast" } })
+    });
+    assert.ok(r.status === "failed");
+    const [attempt] = r.attempts;
+    assert.ok(attempt.outcome === "failed");
+    assert.deepEqual(attempt.failure, { kind: "invalid-choice", httpStatus: null, code: null });
+  }
+  // Untyped exceptions project to unknown without copying any text.
+  {
+    const r = await routeTask("Fix cache invalidation", fixtureConfig(), {
+      env: fakeEnv, request: async () => { throw new Error("TEST_PRIVATE_SENTINEL"); }
+    });
+    assert.ok(r.status === "failed");
+    const [attempt] = r.attempts;
+    assert.ok(attempt.outcome === "failed");
+    assert.deepEqual(attempt.failure, { kind: "unknown", httpStatus: null, code: null });
+    assert.equal(JSON.stringify(r.attempts).includes("TEST_PRIVATE_SENTINEL"), false);
+    assert.deepEqual(classifierFailure(new Error("TEST_PRIVATE_SENTINEL")), { kind: "unknown", httpStatus: null, code: null });
+  }
+  // A typed transport error keeps its frozen projection through routing.
+  {
+    const typed = new ClassifierRequestError({ kind: "http", httpStatus: 451, code: null }, "classifier HTTP 451");
+    const r = await routeTask("Fix cache invalidation", fixtureConfig(), {
+      env: fakeEnv, request: async () => { throw typed; }
+    });
+    assert.ok(r.status === "failed");
+    const [attempt] = r.attempts;
+    assert.ok(attempt.outcome === "failed");
+    assert.equal(attempt.failure, typed.failure);
+  }
 });

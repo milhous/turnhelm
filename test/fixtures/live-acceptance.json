@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "classifierOnlyTasks": [
+    {
+      "id": "classifier-en-local-edit",
+      "task": "Rename the README heading to Turnhelm; change only that line."
+    },
+    {
+      "id": "classifier-zh-local-edit",
+      "task": "把 README 的标题改成 Turnhelm，只改这一行。"
+    },
+    {
+      "id": "classifier-en-investigation",
+      "task": "Investigate a worker/database race, fix it, and add regression tests."
+    },
+    {
+      "id": "classifier-zh-investigation",
+      "task": "审查认证流程中的权限提升和令牌泄漏风险，并给出证据。"
+    }
+  ],
+  "workerReadonlyTask": "Read the file input.json at the repository root. It holds a JSON object with a values array. Count the values and add them up, then reply with exactly one JSON object of the form {\"count\":<count>,\"sum\":<sum>} on stdout and nothing else. Do not create, modify, or delete any file.",
+  "workerWriteTask": "Read the file input.json at the repository root. It holds a JSON object with a values array. Count the values and add them up, then write exactly one JSON object of the form {\"count\":<count>,\"sum\":<sum>} to the file out/summary.json, creating the out directory if needed. Do not create, modify, or delete any other file.",
+  "workerFixtureInput": { "values": [2, 3, 5, 7] }
+}

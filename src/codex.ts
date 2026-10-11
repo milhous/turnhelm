@@ -23,6 +23,10 @@ export function subprocessEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv
   delete copy.TYPESAFE_API_KEY;
   delete copy.TURNHELM_ALLOW_HOSTED_JEV;
   delete copy.TURNHELM_CONFIG;
+  // Coverage instrumentation belongs to this process, not to the external worker
+  // binary; forwarding it lets test-spawned children write into the shared
+  // coverage directory where a killed child leaves a truncated file behind.
+  delete copy.NODE_V8_COVERAGE;
   return copy;
 }
 

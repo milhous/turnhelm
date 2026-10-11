@@ -1,68 +1,86 @@
-import test from "node:test";
-import assert from "node:assert/strict";
-import { parseProjectConfig, readProjectConfig } from "../src/config.js";
-import { routeTask } from "../src/route.js";
+// Live acceptance entry: strict argument grammar over the test-only harness.
+// prepare is offline; execute spends only what the claimed manifest reserves.
+// Exit codes: 2 illegal input, 1 failure or incomplete run, 0 complete pass,
+// 130/143 on SIGINT/SIGTERM. Exactly one forwarding separator is tolerated.
+import { executeAcceptance, prepareAcceptance, type LiveSuite } from "./live-acceptance.js";
 
-// This file is intentionally excluded from `pnpm test`; `pnpm run test:live`
-// is an explicit real-service gate. It never probes or qualifies models:
-// routeTask's selected backend and profile IDs are the only routing outcomes,
-// and usage totals stay unverified. Compile-only for offline verification.
+class UsageError extends Error {}
 
-const cases = [
-  ["What is this repository called? Do not change files.", "fast"],
-  ["这个项目叫什么？只回答，不改文件。", "fast"],
-  ["Rename the README heading to Turnhelm; change only that line.", "fast"],
-  ["把 README 的标题改成 Turnhelm，只改这一行。", "fast"],
-  ["Investigate a worker/database race, fix it, and add regression tests.", "deep"],
-  ["审查认证流程中的权限提升和令牌泄漏风险，并给出证据。", "frontier_max"]
-] as const;
+const USAGE = "usage: node dist/test/live.integration.js --prepare laya|jev|dual | --execute <manifest.json> --approve <sha256>";
 
-const percentile = (values: number[], p: number) => values.sort((a, b) => a - b)[Math.ceil(values.length * p) - 1];
+type Args =
+  | { command: "prepare"; suite: LiveSuite }
+  | { command: "execute"; manifest: string; approved: string };
 
-for (const backend of ["laya", "jev"] as const) {
-  test("real " + backend + " routes labelled prompts through the isolated backend", async () => {
-    const base = await readProjectConfig(process.cwd());
-    // Gate exactly as production would: the project config must already enable
-    // the requested backend and the environment must already authorize hosted
-    // Jev. This harness never auto-enables a backend or bypasses gating.
-    if (backend === "jev") {
-      if (!base.backends.jev.enabled) {
-        throw new Error("real jev live test requires backends.jev.enabled=true in .turnhelm/config.json");
-      }
-      if (process.env.TURNHELM_ALLOW_HOSTED_JEV !== "1") {
-        throw new Error("real jev live test requires TURNHELM_ALLOW_HOSTED_JEV=1");
-      }
-    } else if (!base.backends.laya.enabled) {
-      throw new Error("real laya live test requires backends.laya.enabled=true in .turnhelm/config.json");
+const HEX64 = /^[0-9a-f]{64}$/;
+
+const parseArgs = (argv: readonly string[]): Args => {
+  const args = argv.slice();
+  if (args[0] === "--") args.shift();
+  if (args.includes("--")) throw new UsageError("only one forwarding separator is allowed");
+  if (args.length === 2 && args[0] === "--prepare") {
+    const suite = args[1];
+    if (suite !== "laya" && suite !== "jev" && suite !== "dual") throw new UsageError("unknown suite");
+    return { command: "prepare", suite };
+  }
+  if (args.length === 4 && args[0] === "--execute" && args[2] === "--approve") {
+    if (!HEX64.test(args[3])) throw new UsageError("the approved hash must be 64 lowercase hex characters");
+    return { command: "execute", manifest: args[1], approved: args[3] };
+  }
+  throw new UsageError("unknown arguments");
+};
+
+const main = async (): Promise<number> => {
+  let args: Args;
+  try {
+    args = parseArgs(process.argv.slice(2));
+  } catch (error) {
+    if (!(error instanceof UsageError)) throw error;
+    console.error(USAGE);
+    return 2;
+  }
+  if (args.command === "prepare") {
+    try {
+      const prepared = await prepareAcceptance(args.suite);
+      process.stdout.write(`manifest ${prepared.manifestPath}\n`);
+      process.stdout.write(`sha256 ${prepared.sha256}\n`);
+      return 0;
+    } catch (error) {
+      console.error("prepare failed: " + (error instanceof Error ? error.message : "unknown failure"));
+      return 1;
     }
-    // Isolate the requested backend for the iteration: the other backend is
-    // disabled, so a printed count can only come from the requested one.
-    const config = parseProjectConfig({
-      version: 1,
-      routingTimeoutMs: base.routingTimeoutMs,
-      backends: backend === "laya"
-        ? { laya: { enabled: true, url: base.backends.laya.url }, jev: { enabled: false } }
-        : { laya: { enabled: false, url: base.backends.laya.url }, jev: { enabled: true } },
-      profiles: { ...base.profiles }
-    });
-    const times: number[] = [];
-    const selected = new Map<string, number>();
-    for (let repeat = 0; repeat < 4; repeat++) {
-      for (const [prompt, expected] of cases) {
-        const start = performance.now();
-        const result = await routeTask(prompt, config, { env: process.env });
-        times.push(performance.now() - start);
-        assert.equal(result.status, "selected");
-        // The requested backend is asserted before that backend's count is printed.
-        assert.equal(result.decision.backend, backend);
-        assert.equal(result.decision.profileId, expected);
-        selected.set(expected, (selected.get(expected) ?? 0) + 1);
-      }
+  }
+  const controller = new AbortController();
+  let received: "SIGINT" | "SIGTERM" | undefined;
+  const onSignal = (signal: NodeJS.Signals): void => {
+    if (received !== undefined) {
+      // A second signal re-raises the default disposition: the operator's
+      // escape hatch from a run that will not wind down.
+      process.off("SIGINT", onSignal);
+      process.off("SIGTERM", onSignal);
+      process.kill(process.pid, signal);
+      return;
     }
-    console.info(backend + " calls=24 selected_profiles="
-      + ["fast", "deep", "frontier_max"].map((id) => id + ":" + (selected.get(id) ?? 0)).join(",")
-      + " p50_ms=" + percentile(times, 0.5).toFixed(1)
-      + " p95_ms=" + percentile(times, 0.95).toFixed(1)
-      + " usage_scope=unverified");
-  });
-}
+    received = signal === "SIGTERM" ? "SIGTERM" : "SIGINT";
+    controller.abort();
+  };
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+  try {
+    const code = await executeAcceptance(args.manifest, args.approved, { signal: controller.signal });
+    return received !== undefined ? (received === "SIGTERM" ? 143 : 130) : code;
+  } catch (error) {
+    console.error("execute failed: " + (error instanceof Error ? error.message : "unknown failure"));
+    return 1;
+  } finally {
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+  }
+};
+
+main().then(code => {
+  process.exitCode = code;
+}).catch(() => {
+  // An unexpected entry-level throw still fails the run, never a rejection dump.
+  process.exitCode = 1;
+});

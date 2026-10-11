@@ -22,7 +22,7 @@ test("the raw legacy request builder stays unexported", () => {
 
 test("the module surface is exactly the project task contract", () => {
   assert.deepEqual(Object.keys(systemone).sort(),
-    ["directChoiceRequest", "eligibleBackends", "requestTaskChoice"]);
+    ["ClassifierRequestError", "classifierFailure", "directChoiceRequest", "eligibleBackends", "requestTaskChoice"]);
 });
 
 test("hosted Jev eligibility requires configuration, authorization, and a key together", () => {

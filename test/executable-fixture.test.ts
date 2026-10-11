@@ -1,6 +1,7 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -108,6 +109,20 @@ ${mode === "failure" ? 'setTimeout(() => process.exit(7), 100);' : 'setInterval(
 `);
     const quote = (value: string): string => "'" + value.replaceAll("'", "'\\''") + "'";
     await writeFile(path, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(payload)}\n`, { mode: 0o700 });
+    let groupSignals = 0;
+    if (mode === "timeout") {
+      const kill = process.kill;
+      t.mock.method(process, "kill", (pid: number, signal?: NodeJS.Signals | number) => {
+        if (pid < 0 && signal === "SIGKILL") {
+          const leader = Number(readFileSync(join(dir, "leader.pid"), "utf8"));
+          assert.ok(Number.isSafeInteger(leader) && leader > 0, "invalid fixture-owned PID");
+          assert.equal(pid, -leader, "signal must target this fixture's owned group");
+          // The first signal really kills the group; a repeat must not mask timeout.
+          if (++groupSignals > 1) throw Object.assign(new Error("repeat owned group signal EPERM"), { code: "EPERM" });
+        }
+        return kill(pid, signal);
+      });
+    }
     const ownedPids: number[] = [];
     t.after(() => {
       for (const pid of ownedPids) {
@@ -141,6 +156,7 @@ ${mode === "failure" ? 'setTimeout(() => process.exit(7), 100);' : 'setInterval(
     assert.ok(Date.now() - started < 13_000, 'preparation must not wait for inherited pipes');
     assert.equal(await exited(Number(await readFile(join(dir, 'leader.pid'), 'utf8'))), true, 'owned leader survived');
     assert.equal(await exited(Number(await readFile(join(dir, 'descendant.pid'), 'utf8'))), true, 'owned descendant survived');
+    if (mode === "timeout") assert.equal(groupSignals, 1, "discharged cleanup must not signal again");
   });
 }
 
