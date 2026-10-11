@@ -214,6 +214,36 @@ test("empty or truncated evidence is never replayed", async t => {
   }
 });
 
+test("claimed manifests are immutable in memory", async t => {
+  const prepared = await prepareJev(t);
+  const run = await claimAcceptance(prepared.manifestPath, prepared.sha256);
+  t.after(() => run.handle.close());
+  const item = run.manifest.cases[0];
+  const oracle = item.oracle as Extract<typeof item.oracle, { kind: "stdout-json" }>;
+  for (const frozen of [run.manifest, run.manifest.caps, run.manifest.baseline, run.manifest.baseline.tools,
+    run.manifest.cases, item, item.identity, item.reservation, item.reservation.backends,
+    item.inputHashes, item.allowedChanges, item.oracle, oracle.expected]) {
+    assert.ok(Object.isFrozen(frozen), "every parsed manifest object is frozen after claim");
+  }
+});
+
+test("tool drift between prepare and claim rejects", async t => {
+  const classifier = await startClassifierFixture(t);
+  const run = await buildRun(t, "laya", classifier.url, [{ id: "tool-drift", kind: "worker-readonly" }]);
+  const recraft = async (mutate: (tools: Record<string, unknown>) => void): Promise<string> => {
+    const manifest = JSON.parse(await readFile(run.manifestPath, "utf8")) as Record<string, unknown>;
+    const tools = (manifest.baseline as Record<string, unknown>).tools as Record<string, unknown>;
+    mutate(tools);
+    const bytes = JSON.stringify(manifest, null, 2) + "\n";
+    await writeFile(run.manifestPath, bytes);
+    return sha256hex(Buffer.from(bytes, "utf8"));
+  };
+  const driftedNode = await recraft(tools => { tools.node = "v0.0.0-not-this-runtime"; });
+  await assert.rejects(() => claimAcceptance(run.manifestPath, driftedNode), /tools drifted/);
+  const driftedExec = await recraft(tools => { tools.execPath = "/nonexistent/node"; });
+  await assert.rejects(() => claimAcceptance(run.manifestPath, driftedExec), /tools drifted/);
+});
+
 test("drift rejects before requests", async t => {
   const requests: string[] = [];
   t.mock.method(http, "request", () => { requests.push("http"); throw new Error("claim must not make requests"); });
@@ -471,6 +501,8 @@ test("prepare is offline and freezes independent consumers", async t => {
     }
     assert.ok(entries.some(entry => entry.path.includes(mustContain)), scope + " hashes the executed files");
   }
+  assert.ok(laya.baseline.dist.some(entry => entry.path === "dist/test/live.integration.js"),
+    "the dist baseline pins the executed live entry itself");
   assert.deepEqual(Object.keys(laya.baseline.tools).sort(), ["execPath", "git", "gitPath", "node"]);
   assert.match(laya.baseline.tools.node, /^v\d+\.\d+\.\d+$/);
   assert.deepEqual(Object.keys(laya.hostSnapshot).sort(), ["exists", "sha256"]);
@@ -766,6 +798,27 @@ test("entry refuses absent approval and unknown args", async t => {
   const prepared = lines[0].slice("manifest ".length);
   await stat(prepared);
   t.after(() => rm(dirname(prepared), { recursive: true, force: true }));
+});
+
+test("a malformed manifest fails bounded without leaking manifest bytes", async t => {
+  const scratch = await mkdtemp(join(tmpdir(), "turnhelm-leak-"));
+  t.after(() => rm(scratch, { recursive: true, force: true }));
+  const malformed = join(scratch, "manifest.json");
+  const bytes = Buffer.from('{"version":1,"suite":"jev"}CANARYTOKEN123', "utf8");
+  await writeFile(malformed, bytes, { mode: 0o600 });
+  const run = await new Promise<{ code: number | null; stderr: string }>(resolve => {
+    execFile(process.execPath, [ENTRY_PATH, "--execute", malformed, "--approve", sha256hex(bytes)],
+      { env: { PATH: process.env.PATH ?? "" }, encoding: "utf8" },
+      (error, _stdout, stderr) => {
+        const code = error !== null && typeof (error as { code?: unknown }).code === "number"
+          ? (error as { code: number }).code
+          : error === null ? 0 : null;
+        resolve({ code, stderr: String(stderr) });
+      });
+  });
+  assert.equal(run.code, 1, "an unparseable manifest is a failed run");
+  assert.equal(run.stderr, "", "no error text reaches stderr: the failure stays bounded");
+  assert.ok(!run.stderr.includes("CANARYTOKEN123"));
 });
 
 test("suite counts are reserved before each attempt", async t => {
@@ -1213,6 +1266,40 @@ test("a dead-peer fixture client cannot wedge the fail-stop exit", async t => {
   });
   assert.notEqual(code, null, "teardown wedged: the fail-stop round must still exit, not hang or drain silently");
   assert.equal(code, 1, "a fail verdict still exits 1");
+});
+
+test("aborting a classifier-only route stops the round as a signal", async t => {
+  const classifier = await startClassifierFixture(t);
+  classifier.scripted.push("hang");
+  const fakeBin = await writeFakeCodex(t);
+  const run = await buildRun(t, "laya", classifier.url, [{ id: "hang-classify", kind: "classifier-only" }]);
+  const controller = new AbortController();
+  const stopping = executeAcceptance(run.manifestPath, run.sha256,
+    { env: workerEnv(fakeBin, "ok-readonly"), signal: controller.signal });
+  await new Promise(resolve => setTimeout(resolve, 300));
+  controller.abort();
+  assert.equal(await stopping, 130, "the operator's signal intent stands for routing too");
+  const evidence = await readEvidence(run.runRoot);
+  assert.deepEqual(evidence.map(line => line.phase), ["prepared", "reserved", "observed", "stopped"],
+    "an aborted route is observed, then stops — never graded");
+  assert.equal(evidence.at(-1)?.reason, "signal");
+  assert.equal(evidence.at(-1)?.caseId, "hang-classify");
+});
+
+test("an oversized journal is not a usable receipt", async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  const filler = JSON.stringify({ pad: "x".repeat(2048) });
+  const run = await buildRun(t, "laya", classifier.url, [{
+    id: "fat-journal", kind: "worker-readonly",
+    journalSeed: Array.from({ length: 600 }, () => filler)
+  }]);
+  const code = await executeAcceptance(run.manifestPath, run.sha256, { env: workerEnv(fakeBin, "ok-readonly") });
+  assert.equal(code, 1, "a journal past the read bound fails the case");
+  const verified = (await readEvidence(run.runRoot)).find(line => line.phase === "verified");
+  assert.ok(verified);
+  assert.equal((verified.checks as Record<string, unknown>)["receipt-unique"], false,
+    "the oversized journal degrades to an unusable receipt instead of being trusted");
 });
 
 test("crafted manifests cannot widen scope beyond the frozen suite", async t => {

@@ -298,7 +298,7 @@ all six model/effort combinations, whole-task cost, or savings.
 
 These checks have different execution and authorization scopes:
 
-| Check | Classifier requests | Actual Turnhelm worker |
+| Check | Classifier requests | Worker invocations |
 | --- | --- | --- |
 | Plain `doctor` | None; offline version/help/config checks | None |
 | `doctor --probe` | One synthetic request per eligible backend, at most two | None |

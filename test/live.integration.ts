@@ -80,4 +80,7 @@ const main = async (): Promise<number> => {
 
 main().then(code => {
   process.exitCode = code;
+}).catch(() => {
+  // An unexpected entry-level throw still fails the run, never a rejection dump.
+  process.exitCode = 1;
 });

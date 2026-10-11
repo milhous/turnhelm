@@ -26,7 +26,7 @@
 | `pnpm run test:coverage` | exit 0；386/386；行/分支/函数 95.11% / 90.08% / 94.82%（各 ≥80%） |
 | `pnpm audit --audit-level high` | exit 0；`No known vulnerabilities found` |
 
-## 3. AH-01…08 的故障敏感负例（全部离线，26 个 live-acceptance 测试 + 既有套件，末项为 AH-09 轮后补回的 teardown 回归）
+## 3. AH-01…08 的故障敏感负例（全部离线，31 个 live-acceptance 测试 + 既有套件，末项为 AH-09 轮后补回的 teardown 回归与 §6 的 5 个 deferred-minors 回归）
 
 - **AH-01**：无参/缺 hash/未知 suite/多余参数/双分隔符 → exit 2；套件所需 eligible 集缺失 → 零调用且 evidence ENOENT；已 claim 的 manifest 二次执行拒绝；空/截断/带 stopped 尾的 evidence 不重放；crafted manifest 内部自洽但 caps 超冻结套件上限、任务 hash 不在冻结 corpus、oracle 期望非 corpus 事实、worker root 位于冻结 consumers 目录之外 → claim 拒绝。
 - **AH-02**：canonical 同目录别名（同 dev/ino）通过；manifest 自身 symlink、跨 runRoot、消费者 root 替换（新 inode）、config symlink/FIFO、输入/配置字节漂移全部拒绝；生产 projectPath 语义未改。
@@ -58,3 +58,17 @@
 - 消耗：1 次真实 Laya 分类 + 1 次本地 503 + 1 次托管 Jev 客户端尝试（ETIMEDOUT，计客户端尝试、非服务端已接收证明）+ 1 次 codex 只读 worker。caps 全程未超。
 - **轮次异常（已定位修复）**：该轮进程 exit 0，而失败止损语法规定 exit 1。根因：dual fixture 的 `net.Server` 连接处理只写 503 + `end()` 不读；真实 CLI 发送带 body 的请求，未读字节把服务端 socket 永久停在 paused 态，`closeAllConnections?.()` 在 `net.Server` 上是 no-op（v24.11.0 验证为 undefined），裸 `server.close(cb)` 的回调永不触发 → `executeAcceptance` 的 promise 永不 settle → 入口 `.then` 不执行 → `process.exitCode` 未设置，事件循环排空后静默 exit 0（另一时序则表现为挂起）。已离线确定性复现（对 fixture 端口 POST body 的 peer 子进程），修复为：追踪 fixture 连接并在 close 前逐一 destroy（Task 1 对 direct-transport fixture 的同一惯例），回归测试 "a dead-peer fixture client cannot wedge the fail-stop exit" RED（exit 0，与付费轮同签名）→ GREEN（exit 1），全套件 394/394。该 manifest 已消费，不复放；重验需新 prepare + 新批准。
 - 证据：runRoot `…/turnhelm-live-dual-EbeJJk/`（evidence.jsonl 9 条、两例 routes.jsonl journal），0600，不含原始 stdout/stderr/env。
+
+## 6. Deferred minors 收口（2026-10-11，用户全权授权后逐条 TDD）
+
+复审遗留的 6 条 minor（第 7 条 closeAllConnections 已由 §5 的修复关闭）全部收口，每条先 RED 后 GREEN；`pnpm test` 399/399，`pnpm run test:coverage` exit 0（行/分支/函数 95.11% / 90.14% / 94.82%）。
+
+| Minor | 回归测试 | 语义 |
+| --- | --- | --- |
+| 畸形 manifest 经 gate 泄漏 parse 错误文本 | "a malformed manifest fails bounded without leaking manifest bytes" | 畸形/非法 manifest 以 exit 1 有界失败，stderr 为空（canary 不落 stderr）；入口 `main().catch` 兜底 exit 1 |
+| classifier-only 不转发 abort | "aborting a classifier-only route stops the round as a signal" | 信号直达路由：观察记录落盘后以 `stopped(signal)` exit 130 停轮，绝不给被取消的路由打分 |
+| routes.jsonl 无界读取 | "an oversized journal is not a usable receipt" | 读取前 stat 限 1 MiB；超限 journal 视为不可用 receipt（`receipt-unique` false），杜绝无界载入 |
+| claim 后 caps/case 对象可变 | "claimed manifests are immutable in memory" | 解析后的整个 manifest 图 deepFreeze |
+| baseline 漏 dist/test/live.integration.js、tools 不复验 | "tool drift between prepare and claim rejects" + prepare 形状断言 | prepare 基线钉住被执行的 live 入口；claim 时 node 版本或 execPath 漂移即拒（先于任何 evidence claim）；git 字段仅记录——prepare 之后无任何 git spawn，复验无意义 |
+| README 表头误导 | —（文档） | "Actual Turnhelm worker" → "Worker invocations" |
+

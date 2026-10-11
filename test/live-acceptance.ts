@@ -120,6 +120,16 @@ const expectCount = (value: unknown, what: string): number => {
   return value;
 };
 
+// A claimed manifest's parsed graph is frozen in memory: nothing downstream
+// of the claim can mutate caps, cases, reservations, or oracle facts.
+const deepFreeze = <T>(value: T): T => {
+  if (value !== null && typeof value === "object") {
+    for (const item of Object.values(value as Record<string, unknown>)) deepFreeze(item);
+    Object.freeze(value);
+  }
+  return value;
+};
+
 const parseManifest = (value: unknown): AcceptanceManifest => {
   if (!isRecord(value)) throw fail("manifest must be an object");
   expectKeys(value, ["version", "suite", "baseline", "runRoot", "hostSnapshot", "caps", "cases"], "manifest");
@@ -275,20 +285,20 @@ const parseManifest = (value: unknown): AcceptanceManifest => {
     throw fail("caps must not exceed the frozen suite caps");
   }
 
-  return Object.freeze({
+  return deepFreeze({
     version: 1,
     suite,
-    baseline: Object.freeze({
+    baseline: {
       head: baseline.head as string,
-      source: Object.freeze(source),
-      dist: Object.freeze(dist),
+      source,
+      dist,
       corpus: baseline.corpus as string,
-      tools: Object.freeze({ ...tools } as AcceptanceManifest["baseline"]["tools"])
-    }),
-    runRoot: Object.freeze({ canonical: runRoot.canonical, dev: runDev, ino: runIno }),
-    hostSnapshot: Object.freeze({ exists: hostSnapshot.exists, sha256: hostSha256 }),
+      tools: { ...tools } as AcceptanceManifest["baseline"]["tools"]
+    },
+    runRoot: { canonical: runRoot.canonical, dev: runDev, ino: runIno },
+    hostSnapshot: { exists: hostSnapshot.exists, sha256: hostSha256 },
     caps,
-    cases: Object.freeze(cases)
+    cases
   }) as AcceptanceManifest;
 };
 
@@ -477,7 +487,9 @@ export async function prepareAcceptance(suite: LiveSuite): Promise<{ manifestPat
     baseline: {
       head: await runGit(REPO_ROOT, ["rev-parse", "HEAD"]),
       source: await Promise.all(sourceFiles.map(name => hashFile("src/" + name))),
-      dist: await Promise.all([...distFiles.map(name => "dist/src/" + name), "dist/test/live-acceptance.js"].map(hashFile)),
+      dist: await Promise.all(
+        [...distFiles.map(name => "dist/src/" + name), "dist/test/live-acceptance.js", "dist/test/live.integration.js"].map(hashFile)
+      ),
       corpus: sha256hex(corpusBytes),
       tools: {
         node: process.version,
@@ -501,6 +513,13 @@ export async function claimAcceptance(manifestPath: string, approvedSha256: stri
   const manifestSha256 = sha256hex(bytes);
   if (manifestSha256 !== approvedSha256) throw new Error("acceptance manifest does not match the approved sha256");
   const manifest = parseManifest(JSON.parse(bytes.toString("utf8")));
+
+  // The claiming runtime must be the toolchain the manifest froze. Only
+  // node/execPath are re-verified: nothing after prepare ever spawns git, so
+  // the recorded git fields are inert past this point by construction.
+  if (process.version !== manifest.baseline.tools.node || process.execPath !== manifest.baseline.tools.execPath) {
+    throw new Error("acceptance tools drifted from the manifest");
+  }
 
   const manifestReal = await realpath(manifestPath);
   const runRoot = dirname(manifestReal);
@@ -931,7 +950,14 @@ export async function executeAcceptance(
   // an incomplete set spends nothing.
   const bytes = await readManifestBytes(manifestPath).catch(() => null);
   if (bytes === null || sha256hex(bytes) !== approvedSha256) return 1;
-  const preview = parseManifest(JSON.parse(bytes.toString("utf8")));
+  // Bounded gate failure: a malformed or invalid manifest is a plain failed
+  // run — its bytes and parse errors never reach stderr.
+  let preview: AcceptanceManifest;
+  try {
+    preview = parseManifest(JSON.parse(bytes.toString("utf8")));
+  } catch {
+    return 1;
+  }
   const wanted: readonly AcceptanceBackend[] =
     preview.suite === "laya" ? ["laya"] : preview.suite === "jev" ? ["jev"] : ["laya", "jev"];
   for (const item of preview.cases) {
@@ -1039,7 +1065,7 @@ export async function executeAcceptance(
 
         if (item.kind === "classifier-only") {
           const startedAt = performance.now();
-          const routing = await routeTask(item.task, item.config, { env: caseEnv });
+          const routing = await routeTask(item.task, item.config, { env: caseEnv, signal: abort });
           const durationMs = Math.round(performance.now() - startedAt);
           const selected = routing.status === "selected";
           const attemptsMade = (selected ? routing.decision.attempts : routing.attempts).length;
@@ -1050,12 +1076,20 @@ export async function executeAcceptance(
             phase: "observed", caseId: item.id, backend, profileId, rootMatches: "unknown",
             exitCode: null, durationMs, attempts: attemptsMade
           };
-          checks = {
-            "route-selected": selected,
-            "profile-legal": profileId !== "unknown",
-            "backend-eligible": selected && eligibleBackends(item.config, env).includes(routing.decision.backend),
-            "attempts-made": attemptsMade >= 1
-          };
+          if (routing.status === "cancelled") {
+            // The operator's abort reached routing: stop on the signal, never
+            // grade a cancelled route as a verdict failure.
+            stopReason = "signal";
+            stopExitCode = 130;
+            checks = {};
+          } else {
+            checks = {
+              "route-selected": selected,
+              "profile-legal": profileId !== "unknown",
+              "backend-eligible": selected && eligibleBackends(item.config, env).includes(routing.decision.backend),
+              "attempts-made": attemptsMade >= 1
+            };
+          }
         } else {
           const treeBefore = await hashTree(item.root);
           const supervision = await superviseCli(
@@ -1065,7 +1099,14 @@ export async function executeAcceptance(
             { env: caseEnv, timeoutMs: CASE_TIMEOUT_MS, signal: abort, termGraceMs: options?.termGraceMs, postTermMs: options?.postTermMs }
           );
 
-          const journalRaw = await readFile(join(item.root, ".turnhelm", "routes.jsonl")).catch(() => null);
+          // A journal past the read bound is not a usable receipt: the bytes
+          // are never loaded, so a rogue oversize write cannot wedge the run.
+          const JOURNAL_CAP_BYTES = 1 << 20;
+          const journalPath = join(item.root, ".turnhelm", "routes.jsonl");
+          const journalInfo = await stat(journalPath).catch(() => null);
+          const journalRaw = journalInfo !== null && journalInfo.isFile() && journalInfo.size <= JOURNAL_CAP_BYTES
+            ? await readFile(journalPath).catch(() => null)
+            : null;
           let journalUsable = journalRaw !== null;
           const journalLines: Record<string, unknown>[] = [];
           if (journalRaw !== null) {
