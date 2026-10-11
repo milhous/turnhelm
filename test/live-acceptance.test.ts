@@ -1690,23 +1690,34 @@ test("host snapshot drift between prepare and claim rejects", async t => {
   const bytes = JSON.stringify(manifest, null, 2) + "\n";
   await writeFile(run.manifestPath, bytes);
   await assert.rejects(() => claimAcceptance(run.manifestPath, sha256hex(Buffer.from(bytes, "utf8"))), /host snapshot/);
+});
 
-  // The absent-state pin above is trivial while this host carries no config,
-  // so plant one (only when really absent) and pin the present state too.
-  if (hostReality === undefined) {
-    const planted = Buffer.from("{\"version\":1}\n", "utf8");
-    const hostDirExisted = await stat(join(REPO_ROOT, ".turnhelm")).then(() => true, () => false);
-    await mkdir(join(REPO_ROOT, ".turnhelm"), { recursive: true });
-    await writeFile(HOST_PATH, planted);
-    t.after(async () => {
-      await rm(HOST_PATH, { force: true });
-      if (!hostDirExisted) await rm(join(REPO_ROOT, ".turnhelm"), { recursive: true, force: true });
+test("host snapshot present state pins through a redirect child", async t => {
+  // The drift test above pins the absent state on this host. The present
+  // state is pinned by re-running that same test in a child whose redirect
+  // preload serves an owned fixture at the host-config path: the checkout is
+  // never written, and buildRun's derivation, the consistency pin, and the
+  // forged-snapshot rejection all execute against a present host end to end.
+  const presentDirectory = await mkdtemp(join(tmpdir(), "turnhelm-host-present-"));
+  t.after(() => rm(presentDirectory, { recursive: true, force: true }));
+  const presentHost = join(presentDirectory, "host.json");
+  await writeFile(presentHost, "{\"version\":1}\n", { mode: 0o600 });
+  const preload = join(presentDirectory, "redirect-preload.cjs");
+  await writeFile(preload, REDIRECT_PRELOAD);
+  await execute(process.execPath,
+    ["--test", "--test-name-pattern",
+      "^host snapshot drift between prepare and claim rejects$",
+      fileURLToPath(import.meta.url)],
+    {
+      encoding: "utf8", timeout: 120000,
+      env: {
+        PATH: process.env.PATH ?? "",
+        TURNHELM_TEST_REDIRECTS: JSON.stringify({ read: { [HOST_PATH]: { to: presentHost } } }),
+        // The test runner spawns a per-file child, which a CLI --require would
+        // never reach; NODE_OPTIONS carries the redirect preload into it.
+        NODE_OPTIONS: "--require " + preload
+      }
     });
-    const present = await buildRun(t, "laya", classifier.url, [{ id: "host-present", kind: "worker-readonly" }]);
-    const presentCrafted = JSON.parse(await readFile(present.manifestPath, "utf8")) as { hostSnapshot: unknown };
-    assert.deepEqual(presentCrafted.hostSnapshot, { exists: true, sha256: sha256hex(planted) },
-      "a present host config is snapshotted byte-for-byte, never as absent");
-  }
 });
 
 test("consumer instruction files are frozen with the case", async t => {
