@@ -1,0 +1,11 @@
+{
+  "purpose": "Verbatim stimulus texts for the 2026-10-11 classifier cause investigation referenced by docs/validation/2026-10-11-calibration-design.md. Data, not configuration: the appendix of that document cites these by id so the English-only policy keeps the prose free of embedded non-English text.",
+  "variants": {
+    "heading-en-v1": "Update the README title line to say Turnhelm; no other lines change.",
+    "heading-en-v2": "Rename README's title to Turnhelm and touch nothing else.",
+    "heading-zh-v1": "把 README 的标题更新为 Turnhelm，其他行都不改。",
+    "heading-zh-v2": "将 README 标题改成 Turnhelm，只动这一行。",
+    "decoy-en-v1": "In the docs page, retitle the section \"Getting started\" to \"Quick start\"; edit only that heading line.",
+    "auth-zh-v1": "评审多租户服务里会话撤销与权限传播的正确性，给出攻击面分析、证据与最小修复计划；不要修改文件。"
+  }
+}

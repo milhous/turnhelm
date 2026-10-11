@@ -16,14 +16,16 @@ Two open findings demand a predeclared, replayable calibration:
   agreement, but no predeclared comparative quality/time/cost oracles.
 
 Cause investigation (2026-10-11, 70 free local classifies, raw results in
-the appendix): the typed-decisions classifier is
-deterministic per stimulus — every stimulus produced the identical choice
-and confidence across 5 repeats. The mismatch is not noise, not language,
-not keyword, not length: near-paraphrases of the same instruction flip the
-choice (`heading-en` frozen text → `frontier`; "Rename README's title to
-Turnhelm and touch nothing else" → `fast`). The frozen heading-en text sits
-near a decision boundary; micro-phrasing moves the argmax. Reported
-confidence is uniformly low (0.01–0.12) and carries no separation.
+the appendix): on the local typed-decisions backend, every tested stimulus
+produced the identical choice and confidence across its 5 repeats, which
+rules out run-to-run noise for these inputs. Across the tested variants,
+language, keyword presence, and length did not explain the divergence:
+near-paraphrases of the same instruction flip the choice (`heading-en`
+frozen text → `frontier`; "Rename README's title to Turnhelm and touch
+nothing else" → `fast`). Working hypothesis, not an observed mechanism: the
+frozen heading-en text sits near a decision boundary, so micro-phrasing
+moves the selection. Reported confidence is uniformly low (0.01–0.12) and
+shows no separation between stable and flipping stimuli.
 
 ## Stimuli
 
@@ -79,9 +81,10 @@ Bands judge what the task's *result* requires, never keyword presence:
 
 - Band agreement on 24 classifier calls is routing-policy evidence only,
   not general accuracy, quality, or savings.
-- The local deterministic classifier's boundary sensitivity means a single
-  frozen text's band placement is a property of that text; changing the
-  text invalidates the calibration rather than fixing it.
+- The local classifier's paraphrase sensitivity (see Motivation; mechanism
+  unverified) means a single frozen text's band placement is a property of
+  that text; changing the text invalidates the calibration rather than
+  fixing it.
 - Language parity is judged per pair (en vs zh of the same pairId), not
   across pairs.
 
@@ -108,16 +111,13 @@ repeats, so one line per stimulus; `ms` from the first repeat):
 {"id":"auth-zh-v1","choice":"frontier","confidence":0.0095,"ms":122}
 ```
 
-Variant texts: `heading-en-v1` "Update the README title line to say
-Turnhelm; no other lines change." / `heading-en-v2` "Rename README's title
-to Turnhelm and touch nothing else." / `heading-zh-v1` "把 README 的标题更新为
-Turnhelm，其他行都不改。" / `heading-zh-v2` "将 README 标题改成 Turnhelm，只动这一行。"
-/ `decoy-en-v1` "In the docs page, retitle the section \"Getting started\"
-to \"Quick start\"; edit only that heading line." / `auth-zh-v1`
-"评审多租户服务里会话撤销与权限传播的正确性，给出攻击面分析、证据与最小修复计划；不要修改文件。"
+Variant texts are frozen verbatim as data — including the CJK stimulus
+texts — in `2026-10-11-calibration-variants.json` next to this document:
+`heading-en-v1`/`-v2`, `heading-zh-v1`/`-v2`, `decoy-en-v1`, `auth-zh-v1`.
 
-Executed baseline (acceptance entry, local Laya, journals retained at
-prepare time): calibration-dev exit 3 `policy-mismatch` — heading-en x3
+Executed baseline (acceptance entry, local Laya; evidence journals retained
+from execution — prepare claims no journal, claim creates it):
+calibration-dev exit 3 `policy-mismatch` — heading-en x3
 `frontier` (mismatch), heading-zh x3 `balanced`, race-en/zh x3 `frontier`
 (all match); calibration-holdout exit 0 `pass` — decoy-en x3 `balanced`,
 decoy-zh x3 `fast`, auth-en/zh x3 `frontier` (all match).
