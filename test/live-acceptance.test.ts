@@ -732,6 +732,13 @@ process.stdin.setEncoding("utf8");
 process.stdin.on("data", chunk => { task += chunk; });
 process.stdin.on("end", () => {
   const mode = process.env.TURNHELM_TEST_WORKER || "ok-readonly";
+  // TH-2: record real exec invocations only. Preflight probes (--version,
+  // exec --help) exit before stdin ends, so placing this here keeps probes
+  // out of the spawn count.
+  if (process.env.TURNHELM_TEST_INVOCATIONS) {
+    fs.appendFileSync(process.env.TURNHELM_TEST_INVOCATIONS,
+      JSON.stringify({ argv: process.argv.length }) + "\\n");
+  }
   const emit = event => process.stdout.write(JSON.stringify(event) + "\\n");
   const answer = JSON.stringify({ count: 4, sum: 17 });
   if (mode === "fail") process.exit(3);
@@ -939,10 +946,22 @@ const readEvidence = async (runRoot: string): Promise<Record<string, unknown>[]>
   (await readFile(join(runRoot, "evidence", "evidence.jsonl"), "utf8"))
     .trim().split("\n").map(line => JSON.parse(line) as Record<string, unknown>);
 
-const workerEnv = (fakeBin: string, mode: string): NodeJS.ProcessEnv => ({
+const workerEnv = (fakeBin: string, mode: string, invocations?: string): NodeJS.ProcessEnv => ({
   PATH: fakeBin + ":" + (process.env.PATH ?? ""),
-  TURNHELM_TEST_WORKER: mode
+  TURNHELM_TEST_WORKER: mode,
+  ...(invocations !== undefined ? { TURNHELM_TEST_INVOCATIONS: invocations } : {})
 });
+
+// The worker's self-recorded invocation log: absent means zero spawns, so a
+// run that never reached an exec leaves no file to count.
+const countInvocations = async (log: string): Promise<number> => {
+  try {
+    return (await readFile(log, "utf8")).trim().split("\n").filter(line => line !== "").length;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw error;
+  }
+};
 
 // A hand-built manifest that passes claim's strict parser and file checks while
 // pointing every laya case at the owned classifier fixture.
@@ -1625,14 +1644,13 @@ test("an absent summary fails its oracle and continues the write roster", async 
     { id: "absent-write", kind: "worker-write" },
     { id: "correct-write", kind: "worker-write" }
   ]);
+  const invocations = join(run.runRoot, "fake-worker-invocations.log");
   assert.equal(await executeAcceptance(run.manifestPath, run.sha256,
-    { env: workerEnv(fakeBin, "absent-then-correct") }), 4);
+    { env: workerEnv(fakeBin, "absent-then-correct", invocations) }), 4);
   const evidence = await readEvidence(run.runRoot);
-  assert.deepEqual(evidence.filter(line => line.phase === "reserved"),
-    [
-      { phase: "reserved", caseId: "absent-write", worker: 1, backends: ["laya"] },
-      { phase: "reserved", caseId: "correct-write", worker: 1, backends: ["laya"] }
-    ], "both write cases spawn their worker");
+  // TH-2: the spawn count is the worker's own recorded invocations, not the
+  // reserved records — a runner that reserves but never spawns must not pass.
+  assert.equal(await countInvocations(invocations), 2, "both write cases actually spawn their worker");
   assert.ok(!evidence.some(line => line.phase === "stopped"));
   assert.deepEqual(evidence.filter(line => line.phase === "verified").map(line => line.verdict),
     ["fail", "pass"]);
@@ -1643,6 +1661,16 @@ test("an absent summary fails its oracle and continues the write roster", async 
   assert.equal((evidence.find(line => line.phase === "verified" && line.caseId === "correct-write")
     ?.checks as Record<string, unknown>).oracle, true);
   assert.deepEqual(evidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 1 });
+
+  // A claim that refuses before the loop spends nothing: drifted frozen bytes
+  // stop the run at the claim with zero recorded worker invocations.
+  const zero = await buildRun(t, "laya", classifier.url, [{ id: "never-spawned", kind: "worker-readonly" }]);
+  const zeroLog = join(zero.runRoot, "fake-worker-invocations.log");
+  const zeroRoot = (await loadManifest(zero.manifestPath)).cases[0].root;
+  await writeFile(join(zeroRoot, "input.json"), JSON.stringify({ values: [1] }));
+  assert.equal(await executeAcceptance(zero.manifestPath, zero.sha256,
+    { env: workerEnv(fakeBin, "ok-readonly", zeroLog) }), 1);
+  assert.equal(await countInvocations(zeroLog), 0, "a refused claim spawns no worker");
 });
 
 test("integrity failures still stop even beside a failing oracle", async t => {
