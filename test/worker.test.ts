@@ -88,6 +88,7 @@ type WorkerScenario = {
   trackFrameConcat?: boolean;
   trackKills?: boolean;
   settlementGuardMs?: number;
+  ackMessageDecode?: boolean;
 };
 
 type Recorded = {
@@ -241,7 +242,17 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
                 ? "// Accepted write whose completion callback never arrives."
               : `setTimeout(() => { pending -= 1; callback(); }, ${scenario.drainDelayMs ?? 30});`}
       }
-    });` : "output = process.stdout;"}
+    })` : "output = process.stdout;"}
+    ${scenario.ackMessageDecode ? `
+    // Parent-observed decode sync point: the forwarded agent message is
+    // written synchronously inside dispatch, so this sink's write proves the
+    // frame already decoded.
+    output = new Writable({
+      write(_chunk, _encoding, callback) {
+        writeFileSync(${JSON.stringify(join(directory, "decode-ack"))}, String(Date.now()));
+        callback();
+      }
+    });` : ""}
     ${scenario.tail?.target === "diag" ? "diagSink = tailSink;" : ""}
     ${scenario.diag === "stall" ? `
     diagSink = new Writable({
@@ -833,19 +844,34 @@ finish(() => {
 });
 
 test("a settlement gap after decode quiescence makes lastEventAgeMs positive", { timeout: 30_000 }, async t => {
-  // The gap is constructed after the decode loop drains, never before it:
-  // both frames flush and decode on arrival (the output sink is unblocked),
-  // then the child holds stdout open with no further writes before exiting,
-  // so settlement lands a measurable span after the last decode.
-  const { recorded } = await runWorker(t, {
+  // The gap must start after the parent DECODED the frames, not after the
+  // child emitted them: a descheduled parent decodes everything at close and
+  // the age collapses to zero (the bare emit-then-sleep construction reports
+  // exactly 0 under that schedule). The child therefore refuses to exit
+  // until the parent's output sink observes the forwarded message — written
+  // synchronously inside dispatch — and only then runs the hold-open gap.
+  const { recorded, directory } = await runWorker(t, {
+    ackMessageDecode: true,
     script: `
 finish(() => {
   emit({ type: "item.completed", item: { type: "agent_message", text: "gap" } });
   emit({ type: "turn.completed", usage: { input_tokens: 1 } });
-  setTimeout(() => process.exit(0), 50);
+  const ack = path.join(here, "decode-ack");
+  const poll = deadline => {
+    if (fs.existsSync(ack)) {
+      fs.writeFileSync(path.join(here, "gap-started"), String(Date.now()));
+      setTimeout(() => process.exit(0), 50);
+    } else if (Date.now() < deadline) setTimeout(() => poll(deadline), 10);
+    else process.exit(0); // broken protocol: the assertions below fail fast
+  };
+  poll(Date.now() + 10000);
 });
 `
   });
+  const ackAt = Number(await readFile(join(directory, "decode-ack"), "utf8"));
+  const gapAt = Number(await readFile(join(directory, "gap-started"), "utf8"));
+  assert.ok(Number.isFinite(ackAt) && Number.isFinite(gapAt) && gapAt >= ackAt,
+    "the parent decoded before the gap began: ack " + ackAt + ", gap " + gapAt);
   assert.equal(recorded.status, "completed");
   assert.equal(recorded.progressEvents, 2, "both frames decode before the gap");
   assert.ok(recorded.lastEventAgeMs !== undefined && recorded.lastEventAgeMs > 0,
