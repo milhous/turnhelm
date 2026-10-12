@@ -1370,16 +1370,18 @@ const lastJsonLine = (text: string): Record<string, unknown> | null => {
 // The whole payload is parsed once: exactly the two expected own keys with
 // safe-integer values. Prose, fences, a second object, extra or missing keys,
 // and non-integers all fail — only legal JSON whitespace/format/order varies.
+const payloadEquals = (value: unknown, expected: Readonly<{ count: number; sum: number }>): boolean => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (keys.length !== 2 || !("count" in record) || !("sum" in record)) return false;
+  return Number.isSafeInteger(record.count) && Number.isSafeInteger(record.sum)
+    && record.count === expected.count && record.sum === expected.sum;
+};
 const jsonEquals = (raw: string | null, expected: Readonly<{ count: number; sum: number }>): boolean => {
   if (raw === null) return false;
   try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return false;
-    const record = parsed as Record<string, unknown>;
-    const keys = Object.keys(record);
-    if (keys.length !== 2 || !("count" in record) || !("sum" in record)) return false;
-    return Number.isSafeInteger(record.count) && Number.isSafeInteger(record.sum)
-      && record.count === expected.count && record.sum === expected.sum;
+    return payloadEquals(JSON.parse(raw) as unknown, expected);
   } catch {
     return false;
   }
@@ -1397,9 +1399,23 @@ const inertTrailerLine = (line: string): boolean => {
   try { JSON.parse(line); return false; } catch { return true; }
 };
 
-const envelope = (text: string, expected: Readonly<{ count: number; sum: number }>): boolean => {
+// VH-5: the payload-agnostic envelope fact — line 1 must parse as a JSON
+// value, and every remaining line must be inert. The value is returned
+// unvalidated; each consumer applies its own predicate to it.
+export function envelopePayload(text: string): { value: unknown } | null {
   const lines = text.split("\n");
-  return jsonEquals(lines[0], expected) && lines.slice(1).every(inertTrailerLine);
+  let value: unknown;
+  try {
+    value = JSON.parse(lines[0]) as unknown;
+  } catch {
+    return null;
+  }
+  return lines.slice(1).every(inertTrailerLine) ? { value } : null;
+}
+
+const envelope = (text: string, expected: Readonly<{ count: number; sum: number }>): boolean => {
+  const payload = envelopePayload(text);
+  return payload !== null && payloadEquals(payload.value, expected);
 };
 
 // stdout oracle: the exact whole payload, or that payload plus inert prose.

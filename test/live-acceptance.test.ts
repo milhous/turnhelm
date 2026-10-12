@@ -15,7 +15,7 @@ import { promisify } from "node:util";
 import { parseProjectConfig } from "../src/config.js";
 import { readProjectFile } from "../src/project.js";
 import {
-  appendEvidence, claimAcceptance, executeAcceptance, findOnPath, prepareAcceptance, superviseCli,
+  appendEvidence, claimAcceptance, envelopePayload, executeAcceptance, findOnPath, prepareAcceptance, superviseCli,
   type AcceptanceManifest, type ClaimedRun, type SafeEvidence
 } from "./live-acceptance.js";
 
@@ -1477,6 +1477,21 @@ test("workerProgress evidence is all-or-nothing on events and per-field on age",
   await appendEvidence(run, { ...base, caseId: "heading-en-trial-1" } as unknown as SafeEvidence);
   const last = JSON.parse((await readFile(run.evidencePath, "utf8")).trim().split("\n").at(-1)!);
   assert.ok(!("workerProgress" in last), "no progress projection is invented where none was observed");
+});
+
+test("envelopePayload extracts the line-1 value behind inert trailers only", () => {
+  // A same-line object pair is not an envelope: line 1 must parse alone.
+  assert.equal(envelopePayload('{"count":0,"sum":0} {"count":8,"sum":8}'), null);
+  // An array wrapper wraps the payload in brackets, so line 1 is "[".
+  assert.equal(envelopePayload('[\n{"count":4,"sum":17}\n]'), null);
+  assert.equal(envelopePayload("not json at all"), null);
+  // The line-1 value is returned unvalidated, whatever shape it takes.
+  assert.deepEqual(envelopePayload('{"a":true,"b":false,"c":true}\nDone.'),
+    { value: { a: true, b: false, c: true } });
+  assert.deepEqual(envelopePayload("42"), { value: 42 });
+  // The inert-trailer rule binds regardless of the payload's shape.
+  assert.equal(envelopePayload('{"a":true}\n{"b":false}'), null);
+  assert.equal(envelopePayload('{"a":true}\n```'), null);
 });
 
 test("oracle-only failures continue the roster to a failed completion", async t => {
