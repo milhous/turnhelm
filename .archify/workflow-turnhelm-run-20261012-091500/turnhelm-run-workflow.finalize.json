@@ -5,16 +5,16 @@
   "status": "pass",
   "type": "workflow",
   "quality": "showcase",
-  "startedAt": "2026-10-12T01:13:05.039Z",
+  "startedAt": "2026-10-12T01:20:22.781Z",
   "specification": {
     "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261012-091500/candidate.json",
-    "sha256": "c88d2d2e729ee693229476b8541026b21b8c00e2f8b86fbdca9b2810272b4c04",
-    "bytes": 8271
+    "sha256": "71220e9752c70960db1e731f0e46dcd2ed65306b8a15c65a758f3ef2ea954181",
+    "bytes": 8396
   },
   "artifact": {
     "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261012-091500/turnhelm-run-workflow.html",
-    "sha256": "b6e22cbaf2b2e447a15e2d970ae09a89dae96dd6e301b8a2d473f6a767d96441",
-    "bytes": 764585
+    "sha256": "231f07a1be2c66f1cf02ea9b120924410b64518e4e2d00d2865d259b813476a0",
+    "bytes": 764679
   },
   "stages": {
     "validate": {
@@ -40,8 +40,8 @@
         "ok": true,
         "command": "validate",
         "specification": {
-          "sha256": "c88d2d2e729ee693229476b8541026b21b8c00e2f8b86fbdca9b2810272b4c04",
-          "bytes": 8271
+          "sha256": "71220e9752c70960db1e731f0e46dcd2ed65306b8a15c65a758f3ef2ea954181",
+          "bytes": 8396
         },
         "validation": {
           "checksPassed": 9,
@@ -56,7 +56,7 @@
     "deliver": {
       "status": "pass",
       "exitCode": 0,
-      "durationMs": 408,
+      "durationMs": 617,
       "command": [
         "/opt/homebrew/Cellar/node/26.5.0/bin/node",
         "/Users/zhangxiao/.agents/skills/archify/bin/archify.mjs",
@@ -72,19 +72,19 @@
       ],
       "receipt": {
         "schemaVersion": 1,
-        "receiptId": "eb498fa2-7fe0-46b8-9131-c3ff92142116",
+        "receiptId": "9b140bf0-8ec0-4227-b276-aef0cd4787af",
         "ok": true,
         "command": "deliver",
         "type": "workflow",
         "input": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261012-091500/candidate.json",
         "output": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261012-091500/turnhelm-run-workflow.html",
         "specification": {
-          "sha256": "c88d2d2e729ee693229476b8541026b21b8c00e2f8b86fbdca9b2810272b4c04",
-          "bytes": 8271
+          "sha256": "71220e9752c70960db1e731f0e46dcd2ed65306b8a15c65a758f3ef2ea954181",
+          "bytes": 8396
         },
         "artifact": {
-          "sha256": "b6e22cbaf2b2e447a15e2d970ae09a89dae96dd6e301b8a2d473f6a767d96441",
-          "bytes": 764585
+          "sha256": "231f07a1be2c66f1cf02ea9b120924410b64518e4e2d00d2865d259b813476a0",
+          "bytes": 764679
         },
         "validation": {
           "checksPassed": 9,
@@ -98,7 +98,7 @@
           "verified": true,
           "repository": "git@github.com:milhous/turnhelm",
           "revision": "6a2f8dcf1b5c3a7e6a157a4b895930f120297b4a",
-          "references": 12,
+          "references": 13,
           "linkMode": "local-only"
         },
         "update": {
@@ -117,7 +117,7 @@
     "check": {
       "status": "pass",
       "exitCode": 0,
-      "durationMs": 135,
+      "durationMs": 189,
       "command": [
         "/opt/homebrew/Cellar/node/26.5.0/bin/node",
         "/Users/zhangxiao/.agents/skills/archify/bin/archify.mjs",
@@ -129,8 +129,8 @@
         "ok": true,
         "file": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261012-091500/turnhelm-run-workflow.html",
         "artifact": {
-          "sha256": "b6e22cbaf2b2e447a15e2d970ae09a89dae96dd6e301b8a2d473f6a767d96441",
-          "bytes": 764585
+          "sha256": "231f07a1be2c66f1cf02ea9b120924410b64518e4e2d00d2865d259b813476a0",
+          "bytes": 764679
         },
         "checks": [
           {
@@ -200,7 +200,7 @@
             "minLabelRouteClearance": 47.2,
             "desktopReadabilityIssues": 0,
             "viewportHeightIssues": 0,
-            "minProjectedNodeTextPx": 6.970414201183432,
+            "minProjectedNodeTextPx": 6.695266272189349,
             "maxBends": 2,
             "routesOverSuggestedBends": 0,
             "maxStretch": 1.361,
@@ -251,22 +251,22 @@
             "hardFloorMet": true,
             "minimumOwner": {
               "kind": "node",
-              "id": "intake"
+              "id": "receipt"
             },
-            "minimumSourceTextPx": 7.6,
-            "minimumProjectedTextPx": 6.970414201183432,
+            "minimumSourceTextPx": 7.3,
+            "minimumProjectedTextPx": 6.695266272189349,
             "semanticTextCount": 28
           },
           "issues": []
         },
         "provenance": "current",
-        "deliveryReceiptId": "eb498fa2-7fe0-46b8-9131-c3ff92142116"
+        "deliveryReceiptId": "9b140bf0-8ec0-4227-b276-aef0cd4787af"
       }
     },
     "browser-check": {
       "status": "pass",
       "exitCode": 0,
-      "durationMs": 1069,
+      "durationMs": 1231,
       "command": [
         "/opt/homebrew/Cellar/node/26.5.0/bin/node",
         "/Users/zhangxiao/.agents/skills/archify/bin/archify.mjs",
@@ -284,11 +284,11 @@
         "status": "pass",
         "visualReview": "not-requested",
         "provenance": "current",
-        "deliveryReceiptId": "eb498fa2-7fe0-46b8-9131-c3ff92142116",
+        "deliveryReceiptId": "9b140bf0-8ec0-4227-b276-aef0cd4787af",
         "artifact": {
           "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261012-091500/turnhelm-run-workflow.html",
-          "sha256": "b6e22cbaf2b2e447a15e2d970ae09a89dae96dd6e301b8a2d473f6a767d96441",
-          "bytes": 764585
+          "sha256": "231f07a1be2c66f1cf02ea9b120924410b64518e4e2d00d2865d259b813476a0",
+          "bytes": 764679
         },
         "state": {
           "detail": "read",
@@ -381,14 +381,14 @@
                   "spaceBelowNodesPx": 13
                 }
               ],
-              "minimumProjectedNodeTextPx": 7.6,
-              "minimumProjectedNonEdgeTextPx": 7.6,
+              "minimumProjectedNodeTextPx": 7.3,
+              "minimumProjectedNonEdgeTextPx": 7.3,
               "minimumProjectedEdgeTextPx": 8,
-              "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+              "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
               "minimumProjectedNodeTextDetail": "context",
               "minimumProjectedNodeTextOwner": {
                 "kind": "node",
-                "id": "intake"
+                "id": "receipt"
               },
               "minimumRequiredNodeTextPx": 6,
               "readabilityOk": true,
@@ -482,14 +482,14 @@
                   "spaceBelowNodesPx": 13
                 }
               ],
-              "minimumProjectedNodeTextPx": 7.6,
-              "minimumProjectedNonEdgeTextPx": 7.6,
+              "minimumProjectedNodeTextPx": 7.3,
+              "minimumProjectedNonEdgeTextPx": 7.3,
               "minimumProjectedEdgeTextPx": 8,
-              "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+              "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
               "minimumProjectedNodeTextDetail": "context",
               "minimumProjectedNodeTextOwner": {
                 "kind": "node",
-                "id": "intake"
+                "id": "receipt"
               },
               "minimumRequiredNodeTextPx": 6,
               "readabilityOk": true,
@@ -583,14 +583,14 @@
                   "spaceBelowNodesPx": 15
                 }
               ],
-              "minimumProjectedNodeTextPx": 7.6,
-              "minimumProjectedNonEdgeTextPx": 7.6,
+              "minimumProjectedNodeTextPx": 7.3,
+              "minimumProjectedNonEdgeTextPx": 7.3,
               "minimumProjectedEdgeTextPx": 8,
-              "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+              "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
               "minimumProjectedNodeTextDetail": "context",
               "minimumProjectedNodeTextOwner": {
                 "kind": "node",
-                "id": "intake"
+                "id": "receipt"
               },
               "minimumRequiredNodeTextPx": 6,
               "readabilityOk": true,
@@ -684,14 +684,14 @@
                   "spaceBelowNodesPx": 18
                 }
               ],
-              "minimumProjectedNodeTextPx": 7.6,
-              "minimumProjectedNonEdgeTextPx": 7.6,
+              "minimumProjectedNodeTextPx": 7.3,
+              "minimumProjectedNonEdgeTextPx": 7.3,
               "minimumProjectedEdgeTextPx": 8,
-              "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+              "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
               "minimumProjectedNodeTextDetail": "context",
               "minimumProjectedNodeTextOwner": {
                 "kind": "node",
-                "id": "intake"
+                "id": "receipt"
               },
               "minimumRequiredNodeTextPx": 6,
               "readabilityOk": true,
@@ -838,14 +838,14 @@
                   "spaceBelowNodesPx": 13
                 }
               ],
-              "minimumProjectedNodeTextPx": 7.6,
-              "minimumProjectedNonEdgeTextPx": 7.6,
+              "minimumProjectedNodeTextPx": 7.3,
+              "minimumProjectedNonEdgeTextPx": 7.3,
               "minimumProjectedEdgeTextPx": 8,
-              "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+              "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
               "minimumProjectedNodeTextDetail": "context",
               "minimumProjectedNodeTextOwner": {
                 "kind": "node",
-                "id": "intake"
+                "id": "receipt"
               },
               "minimumRequiredNodeTextPx": 6,
               "readabilityOk": true,
@@ -939,14 +939,14 @@
                   "spaceBelowNodesPx": 13
                 }
               ],
-              "minimumProjectedNodeTextPx": 7.6,
-              "minimumProjectedNonEdgeTextPx": 7.6,
+              "minimumProjectedNodeTextPx": 7.3,
+              "minimumProjectedNonEdgeTextPx": 7.3,
               "minimumProjectedEdgeTextPx": 8,
-              "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+              "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
               "minimumProjectedNodeTextDetail": "context",
               "minimumProjectedNodeTextOwner": {
                 "kind": "node",
-                "id": "intake"
+                "id": "receipt"
               },
               "minimumRequiredNodeTextPx": 6,
               "readabilityOk": true,
@@ -1040,14 +1040,14 @@
                   "spaceBelowNodesPx": 15
                 }
               ],
-              "minimumProjectedNodeTextPx": 7.6,
-              "minimumProjectedNonEdgeTextPx": 7.6,
+              "minimumProjectedNodeTextPx": 7.3,
+              "minimumProjectedNonEdgeTextPx": 7.3,
               "minimumProjectedEdgeTextPx": 8,
-              "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+              "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
               "minimumProjectedNodeTextDetail": "context",
               "minimumProjectedNodeTextOwner": {
                 "kind": "node",
-                "id": "intake"
+                "id": "receipt"
               },
               "minimumRequiredNodeTextPx": 6,
               "readabilityOk": true,
@@ -1141,14 +1141,14 @@
                   "spaceBelowNodesPx": 18
                 }
               ],
-              "minimumProjectedNodeTextPx": 7.6,
-              "minimumProjectedNonEdgeTextPx": 7.6,
+              "minimumProjectedNodeTextPx": 7.3,
+              "minimumProjectedNonEdgeTextPx": 7.3,
               "minimumProjectedEdgeTextPx": 8,
-              "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+              "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
               "minimumProjectedNodeTextDetail": "context",
               "minimumProjectedNodeTextOwner": {
                 "kind": "node",
-                "id": "intake"
+                "id": "receipt"
               },
               "minimumRequiredNodeTextPx": 6,
               "readabilityOk": true,
@@ -1247,14 +1247,14 @@
                   "spaceBelowNodesPx": 13
                 }
               ],
-              "minimumProjectedNodeTextPx": 7.6,
-              "minimumProjectedNonEdgeTextPx": 7.6,
+              "minimumProjectedNodeTextPx": 7.3,
+              "minimumProjectedNonEdgeTextPx": 7.3,
               "minimumProjectedEdgeTextPx": 8,
-              "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+              "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
               "minimumProjectedNodeTextDetail": "context",
               "minimumProjectedNodeTextOwner": {
                 "kind": "node",
-                "id": "intake"
+                "id": "receipt"
               },
               "minimumRequiredNodeTextPx": 6,
               "readabilityOk": true,
@@ -1348,14 +1348,14 @@
                   "spaceBelowNodesPx": 13
                 }
               ],
-              "minimumProjectedNodeTextPx": 7.6,
-              "minimumProjectedNonEdgeTextPx": 7.6,
+              "minimumProjectedNodeTextPx": 7.3,
+              "minimumProjectedNonEdgeTextPx": 7.3,
               "minimumProjectedEdgeTextPx": 8,
-              "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+              "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
               "minimumProjectedNodeTextDetail": "context",
               "minimumProjectedNodeTextOwner": {
                 "kind": "node",
-                "id": "intake"
+                "id": "receipt"
               },
               "minimumRequiredNodeTextPx": 6,
               "readabilityOk": true,
@@ -1449,14 +1449,14 @@
                   "spaceBelowNodesPx": 15
                 }
               ],
-              "minimumProjectedNodeTextPx": 7.6,
-              "minimumProjectedNonEdgeTextPx": 7.6,
+              "minimumProjectedNodeTextPx": 7.3,
+              "minimumProjectedNonEdgeTextPx": 7.3,
               "minimumProjectedEdgeTextPx": 8,
-              "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+              "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
               "minimumProjectedNodeTextDetail": "context",
               "minimumProjectedNodeTextOwner": {
                 "kind": "node",
-                "id": "intake"
+                "id": "receipt"
               },
               "minimumRequiredNodeTextPx": 6,
               "readabilityOk": true,
@@ -1550,14 +1550,14 @@
                   "spaceBelowNodesPx": 18
                 }
               ],
-              "minimumProjectedNodeTextPx": 7.6,
-              "minimumProjectedNonEdgeTextPx": 7.6,
+              "minimumProjectedNodeTextPx": 7.3,
+              "minimumProjectedNonEdgeTextPx": 7.3,
               "minimumProjectedEdgeTextPx": 8,
-              "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+              "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
               "minimumProjectedNodeTextDetail": "context",
               "minimumProjectedNodeTextOwner": {
                 "kind": "node",
-                "id": "intake"
+                "id": "receipt"
               },
               "minimumRequiredNodeTextPx": 6,
               "readabilityOk": true,
@@ -1594,8 +1594,8 @@
     "browserCheckReceipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261012-091500/turnhelm-run-workflow.browser-check.json"
   },
   "visualReview": "not-requested",
-  "finishedAt": "2026-10-12T01:13:06.775Z",
-  "durationMs": 1735,
+  "finishedAt": "2026-10-12T01:20:25.015Z",
+  "durationMs": 2233,
   "update": {
     "status": "current",
     "installedVersion": "3.0.1",

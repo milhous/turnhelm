@@ -6,11 +6,11 @@
   "status": "pass",
   "visualReview": "pending",
   "provenance": "current",
-  "deliveryReceiptId": "eb498fa2-7fe0-46b8-9131-c3ff92142116",
+  "deliveryReceiptId": "9b140bf0-8ec0-4227-b276-aef0cd4787af",
   "artifact": {
     "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261012-091500/turnhelm-run-workflow.html",
-    "sha256": "b6e22cbaf2b2e447a15e2d970ae09a89dae96dd6e301b8a2d473f6a767d96441",
-    "bytes": 764585
+    "sha256": "231f07a1be2c66f1cf02ea9b120924410b64518e4e2d00d2865d259b813476a0",
+    "bytes": 764679
   },
   "state": {
     "detail": "read",
@@ -103,14 +103,14 @@
             "spaceBelowNodesPx": 13
           }
         ],
-        "minimumProjectedNodeTextPx": 7.6,
-        "minimumProjectedNonEdgeTextPx": 7.6,
+        "minimumProjectedNodeTextPx": 7.3,
+        "minimumProjectedNonEdgeTextPx": 7.3,
         "minimumProjectedEdgeTextPx": 8,
-        "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+        "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
         "minimumProjectedNodeTextDetail": "context",
         "minimumProjectedNodeTextOwner": {
           "kind": "node",
-          "id": "intake"
+          "id": "receipt"
         },
         "minimumRequiredNodeTextPx": 6,
         "readabilityOk": true,
@@ -204,14 +204,14 @@
             "spaceBelowNodesPx": 13
           }
         ],
-        "minimumProjectedNodeTextPx": 7.6,
-        "minimumProjectedNonEdgeTextPx": 7.6,
+        "minimumProjectedNodeTextPx": 7.3,
+        "minimumProjectedNonEdgeTextPx": 7.3,
         "minimumProjectedEdgeTextPx": 8,
-        "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+        "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
         "minimumProjectedNodeTextDetail": "context",
         "minimumProjectedNodeTextOwner": {
           "kind": "node",
-          "id": "intake"
+          "id": "receipt"
         },
         "minimumRequiredNodeTextPx": 6,
         "readabilityOk": true,
@@ -305,14 +305,14 @@
             "spaceBelowNodesPx": 15
           }
         ],
-        "minimumProjectedNodeTextPx": 7.6,
-        "minimumProjectedNonEdgeTextPx": 7.6,
+        "minimumProjectedNodeTextPx": 7.3,
+        "minimumProjectedNonEdgeTextPx": 7.3,
         "minimumProjectedEdgeTextPx": 8,
-        "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+        "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
         "minimumProjectedNodeTextDetail": "context",
         "minimumProjectedNodeTextOwner": {
           "kind": "node",
-          "id": "intake"
+          "id": "receipt"
         },
         "minimumRequiredNodeTextPx": 6,
         "readabilityOk": true,
@@ -406,14 +406,14 @@
             "spaceBelowNodesPx": 18
           }
         ],
-        "minimumProjectedNodeTextPx": 7.6,
-        "minimumProjectedNonEdgeTextPx": 7.6,
+        "minimumProjectedNodeTextPx": 7.3,
+        "minimumProjectedNonEdgeTextPx": 7.3,
         "minimumProjectedEdgeTextPx": 8,
-        "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+        "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
         "minimumProjectedNodeTextDetail": "context",
         "minimumProjectedNodeTextOwner": {
           "kind": "node",
-          "id": "intake"
+          "id": "receipt"
         },
         "minimumRequiredNodeTextPx": 6,
         "readabilityOk": true,
@@ -560,14 +560,14 @@
             "spaceBelowNodesPx": 13
           }
         ],
-        "minimumProjectedNodeTextPx": 7.6,
-        "minimumProjectedNonEdgeTextPx": 7.6,
+        "minimumProjectedNodeTextPx": 7.3,
+        "minimumProjectedNonEdgeTextPx": 7.3,
         "minimumProjectedEdgeTextPx": 8,
-        "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+        "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
         "minimumProjectedNodeTextDetail": "context",
         "minimumProjectedNodeTextOwner": {
           "kind": "node",
-          "id": "intake"
+          "id": "receipt"
         },
         "minimumRequiredNodeTextPx": 6,
         "readabilityOk": true,
@@ -661,14 +661,14 @@
             "spaceBelowNodesPx": 13
           }
         ],
-        "minimumProjectedNodeTextPx": 7.6,
-        "minimumProjectedNonEdgeTextPx": 7.6,
+        "minimumProjectedNodeTextPx": 7.3,
+        "minimumProjectedNonEdgeTextPx": 7.3,
         "minimumProjectedEdgeTextPx": 8,
-        "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+        "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
         "minimumProjectedNodeTextDetail": "context",
         "minimumProjectedNodeTextOwner": {
           "kind": "node",
-          "id": "intake"
+          "id": "receipt"
         },
         "minimumRequiredNodeTextPx": 6,
         "readabilityOk": true,
@@ -762,14 +762,14 @@
             "spaceBelowNodesPx": 15
           }
         ],
-        "minimumProjectedNodeTextPx": 7.6,
-        "minimumProjectedNonEdgeTextPx": 7.6,
+        "minimumProjectedNodeTextPx": 7.3,
+        "minimumProjectedNonEdgeTextPx": 7.3,
         "minimumProjectedEdgeTextPx": 8,
-        "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+        "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
         "minimumProjectedNodeTextDetail": "context",
         "minimumProjectedNodeTextOwner": {
           "kind": "node",
-          "id": "intake"
+          "id": "receipt"
         },
         "minimumRequiredNodeTextPx": 6,
         "readabilityOk": true,
@@ -863,14 +863,14 @@
             "spaceBelowNodesPx": 18
           }
         ],
-        "minimumProjectedNodeTextPx": 7.6,
-        "minimumProjectedNonEdgeTextPx": 7.6,
+        "minimumProjectedNodeTextPx": 7.3,
+        "minimumProjectedNonEdgeTextPx": 7.3,
         "minimumProjectedEdgeTextPx": 8,
-        "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+        "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
         "minimumProjectedNodeTextDetail": "context",
         "minimumProjectedNodeTextOwner": {
           "kind": "node",
-          "id": "intake"
+          "id": "receipt"
         },
         "minimumRequiredNodeTextPx": 6,
         "readabilityOk": true,
@@ -969,14 +969,14 @@
             "spaceBelowNodesPx": 13
           }
         ],
-        "minimumProjectedNodeTextPx": 7.6,
-        "minimumProjectedNonEdgeTextPx": 7.6,
+        "minimumProjectedNodeTextPx": 7.3,
+        "minimumProjectedNonEdgeTextPx": 7.3,
         "minimumProjectedEdgeTextPx": 8,
-        "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+        "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
         "minimumProjectedNodeTextDetail": "context",
         "minimumProjectedNodeTextOwner": {
           "kind": "node",
-          "id": "intake"
+          "id": "receipt"
         },
         "minimumRequiredNodeTextPx": 6,
         "readabilityOk": true,
@@ -1070,14 +1070,14 @@
             "spaceBelowNodesPx": 13
           }
         ],
-        "minimumProjectedNodeTextPx": 7.6,
-        "minimumProjectedNonEdgeTextPx": 7.6,
+        "minimumProjectedNodeTextPx": 7.3,
+        "minimumProjectedNonEdgeTextPx": 7.3,
         "minimumProjectedEdgeTextPx": 8,
-        "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+        "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
         "minimumProjectedNodeTextDetail": "context",
         "minimumProjectedNodeTextOwner": {
           "kind": "node",
-          "id": "intake"
+          "id": "receipt"
         },
         "minimumRequiredNodeTextPx": 6,
         "readabilityOk": true,
@@ -1171,14 +1171,14 @@
             "spaceBelowNodesPx": 15
           }
         ],
-        "minimumProjectedNodeTextPx": 7.6,
-        "minimumProjectedNonEdgeTextPx": 7.6,
+        "minimumProjectedNodeTextPx": 7.3,
+        "minimumProjectedNonEdgeTextPx": 7.3,
         "minimumProjectedEdgeTextPx": 8,
-        "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+        "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
         "minimumProjectedNodeTextDetail": "context",
         "minimumProjectedNodeTextOwner": {
           "kind": "node",
-          "id": "intake"
+          "id": "receipt"
         },
         "minimumRequiredNodeTextPx": 6,
         "readabilityOk": true,
@@ -1272,14 +1272,14 @@
             "spaceBelowNodesPx": 18
           }
         ],
-        "minimumProjectedNodeTextPx": 7.6,
-        "minimumProjectedNonEdgeTextPx": 7.6,
+        "minimumProjectedNodeTextPx": 7.3,
+        "minimumProjectedNonEdgeTextPx": 7.3,
         "minimumProjectedEdgeTextPx": 8,
-        "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+        "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
         "minimumProjectedNodeTextDetail": "context",
         "minimumProjectedNodeTextOwner": {
           "kind": "node",
-          "id": "intake"
+          "id": "receipt"
         },
         "minimumRequiredNodeTextPx": 6,
         "readabilityOk": true,
@@ -1378,14 +1378,14 @@
             "spaceBelowNodesPx": 13
           }
         ],
-        "minimumProjectedNodeTextPx": 7.6,
-        "minimumProjectedNonEdgeTextPx": 7.6,
+        "minimumProjectedNodeTextPx": 7.3,
+        "minimumProjectedNonEdgeTextPx": 7.3,
         "minimumProjectedEdgeTextPx": 8,
-        "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+        "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
         "minimumProjectedNodeTextDetail": "context",
         "minimumProjectedNodeTextOwner": {
           "kind": "node",
-          "id": "intake"
+          "id": "receipt"
         },
         "minimumRequiredNodeTextPx": 6,
         "readabilityOk": true,
@@ -1480,14 +1480,14 @@
             "spaceBelowNodesPx": 13
           }
         ],
-        "minimumProjectedNodeTextPx": 7.6,
-        "minimumProjectedNonEdgeTextPx": 7.6,
+        "minimumProjectedNodeTextPx": 7.3,
+        "minimumProjectedNonEdgeTextPx": 7.3,
         "minimumProjectedEdgeTextPx": 8,
-        "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+        "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
         "minimumProjectedNodeTextDetail": "context",
         "minimumProjectedNodeTextOwner": {
           "kind": "node",
-          "id": "intake"
+          "id": "receipt"
         },
         "minimumRequiredNodeTextPx": 6,
         "readabilityOk": true,
@@ -1582,14 +1582,14 @@
             "spaceBelowNodesPx": 18
           }
         ],
-        "minimumProjectedNodeTextPx": 7.6,
-        "minimumProjectedNonEdgeTextPx": 7.6,
+        "minimumProjectedNodeTextPx": 7.3,
+        "minimumProjectedNonEdgeTextPx": 7.3,
         "minimumProjectedEdgeTextPx": 8,
-        "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+        "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
         "minimumProjectedNodeTextDetail": "context",
         "minimumProjectedNodeTextOwner": {
           "kind": "node",
-          "id": "intake"
+          "id": "receipt"
         },
         "minimumRequiredNodeTextPx": 6,
         "readabilityOk": true,
@@ -1684,14 +1684,14 @@
             "spaceBelowNodesPx": 18
           }
         ],
-        "minimumProjectedNodeTextPx": 7.6,
-        "minimumProjectedNonEdgeTextPx": 7.6,
+        "minimumProjectedNodeTextPx": 7.3,
+        "minimumProjectedNonEdgeTextPx": 7.3,
         "minimumProjectedEdgeTextPx": 8,
-        "minimumProjectedNodeText": "≤8192 B · config · Codex ≥0.160",
+        "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
         "minimumProjectedNodeTextDetail": "context",
         "minimumProjectedNodeTextOwner": {
           "kind": "node",
-          "id": "intake"
+          "id": "receipt"
         },
         "minimumRequiredNodeTextPx": 6,
         "readabilityOk": true,
@@ -1722,23 +1722,23 @@
         "file": "turnhelm-run-workflow.visual-check.html"
       },
       {
-        "sha256": "9ab5405fd0bebe63dcaeb9ad6fa518f475e8c6913ca51047cc4d8efa9ce70ff2",
-        "bytes": 139187,
+        "sha256": "614d0811137f1be345bcf3e906a00ddde198bcae4387ef784edcdb8ca106a8cf",
+        "bytes": 139466,
         "file": "turnhelm-run-workflow.visual-check.1440x900.light.png"
       },
       {
-        "sha256": "5ef7bce8f2eef306c8fe55c5ee11a772fe7d42a63295ec4ce4b9a166773887f7",
-        "bytes": 148838,
+        "sha256": "7d880a10e773f151cbd2fd5840fe843da2e94b9991d1f1f16140af17e756a19a",
+        "bytes": 149078,
         "file": "turnhelm-run-workflow.visual-check.1440x900.dark.png"
       },
       {
-        "sha256": "f99e64e9909e00f9dc6aefe9b4acc7ddc6816285cafefef41f53ec4a1507ebb1",
-        "bytes": 209431,
+        "sha256": "d163984197f56755fb302ba3a2049b021cad50a2872eb5cabe8906d7dc660d82",
+        "bytes": 209935,
         "file": "turnhelm-run-workflow.visual-check.2048x1320.light.png"
       },
       {
-        "sha256": "a41da8cf88ed6727d63c8c6c90f3c3a4e422277e8c44273d37d8d12b242e5591",
-        "bytes": 227106,
+        "sha256": "016823c285ff1e75843db5bb02a171085dce1848aa23f7450e63543e8a2f4e39",
+        "bytes": 227672,
         "file": "turnhelm-run-workflow.visual-check.2048x1320.dark.png"
       }
     ]

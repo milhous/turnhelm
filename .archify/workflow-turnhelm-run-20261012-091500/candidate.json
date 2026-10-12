@@ -125,7 +125,7 @@
       "sources": [
         {
           "path": "src/task.ts",
-          "line": 21,
+          "line": 23,
           "label": "byte limit"
         },
         {
@@ -215,7 +215,7 @@
       "col": 5,
       "type": "backend",
       "label": "Receipt + Exit",
-      "sublabel": "one receipt · 0/1/130/143",
+      "sublabel": "one receipt · 0/1/130/143/worker",
       "icon": "flag",
       "sources": [
         {
@@ -223,6 +223,11 @@
           "line": 204,
           "end_line": 205,
           "label": "single receipt"
+        },
+        {
+          "path": "src/cli.ts",
+          "line": 85,
+          "label": "worker exit preserved"
         }
       ],
       "width": 150
@@ -259,7 +264,7 @@
       "sources": [
         {
           "path": "src/route.ts",
-          "line": 90,
+          "line": 89,
           "label": "fail-closed outcome"
         }
       ],

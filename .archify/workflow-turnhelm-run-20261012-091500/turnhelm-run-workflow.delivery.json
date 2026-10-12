@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
-  "receiptId": "eb498fa2-7fe0-46b8-9131-c3ff92142116",
+  "receiptId": "9b140bf0-8ec0-4227-b276-aef0cd4787af",
   "status": "current",
   "command": "deliver",
   "type": "workflow",
   "input": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261012-091500/candidate.json",
   "output": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261012-091500/turnhelm-run-workflow.html",
   "specification": {
-    "sha256": "c88d2d2e729ee693229476b8541026b21b8c00e2f8b86fbdca9b2810272b4c04",
-    "bytes": 8271
+    "sha256": "71220e9752c70960db1e731f0e46dcd2ed65306b8a15c65a758f3ef2ea954181",
+    "bytes": 8396
   },
   "artifact": {
-    "sha256": "b6e22cbaf2b2e447a15e2d970ae09a89dae96dd6e301b8a2d473f6a767d96441",
-    "bytes": 764585
+    "sha256": "231f07a1be2c66f1cf02ea9b120924410b64518e4e2d00d2865d259b813476a0",
+    "bytes": 764679
   }
 }
