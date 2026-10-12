@@ -480,10 +480,13 @@ test("worker descendant zsh never sources host startup files", { timeout: 30_000
   // and falls back to HOME, so a worker's zsh descendant re-exported a stripped
   // key from the host .zshenv. An owned fake home pins the mechanism without
   // touching or reading any real startup file.
-  const probe = await execute("/bin/zsh", ["-c", "print -r -- ok"]).catch(error => error);
-  if ((probe as NodeJS.ErrnoException).code === "ENOENT") t.skip("/bin/zsh is not available");
   const home = await mkdtemp(join(tmpdir(), "turnhelm-zshhome-"));
   t.after(() => rm(home, { recursive: true, force: true }));
+  // The availability probe must not execute host startup files either: point its
+  // zsh lookup at the still-empty owned home (a missing file there is a skip).
+  const probe = await execute("/bin/zsh", ["-c", "print -r -- ok"],
+    { env: { PATH: process.env.PATH, ZDOTDIR: home } }).catch(error => error);
+  if ((probe as NodeJS.ErrnoException).code === "ENOENT") t.skip("/bin/zsh is not available");
   await writeFile(join(home, ".zshenv"), "export TURNHELM_TEST_ZSHENV_MARKER=leaked\n");
   const { recorded, directory } = await runWorker(t, {
     parentEnv: { HOME: home },
@@ -491,16 +494,21 @@ test("worker descendant zsh never sources host startup files", { timeout: 30_000
 finish(() => {
   const spawnSync = require("node:child_process").spawnSync;
   const zsh = spawnSync("/bin/zsh", ["-c", "print -r -- \\$TURNHELM_TEST_ZSHENV_MARKER"], { encoding: "utf8" });
-  fs.writeFileSync(path.join(here, "zshenv-marker.txt"),
-    (zsh.error ? String(zsh.error.code) : "") + String(zsh.stdout ?? ""));
+  fs.writeFileSync(path.join(here, "zshenv-marker.txt"), JSON.stringify({
+    status: zsh.error ? "error:" + zsh.error.code : zsh.status,
+    stdout: String(zsh.stdout ?? "")
+  }));
   emit({ type: "turn.completed" });
 });
 `
   });
   assert.equal(recorded.status, "completed");
-  const marker = await fakeFile(directory, "zshenv-marker.txt");
-  assert.ok(!marker.includes("leaked"),
-    "a worker descendant zsh must not source the host .zshenv, saw: " + JSON.stringify(marker));
+  const evidence = JSON.parse(await fakeFile(directory, "zshenv-marker.txt")) as { status: number | string; stdout: string };
+  // A zsh that never ran proves nothing: the descendant probe must exit cleanly
+  // for the leak check below to be evidence of isolation.
+  assert.equal(evidence.status, 0, "the descendant zsh must actually execute for this regression to mean anything");
+  assert.ok(!evidence.stdout.includes("leaked"),
+    "a worker descendant zsh must not source the host .zshenv, saw: " + JSON.stringify(evidence.stdout));
 });
 
 test("fake worker never forwards an unrelated synthetic parent canary", { timeout: 30_000 }, async () => {
