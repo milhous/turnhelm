@@ -12,6 +12,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { parseProjectConfig, PROFILE_IDS, type ProfileId, type ProjectConfig } from "../src/config.js";
+import { FAILURE_PHRASINGS, type FailureClass } from "../src/codex-events.js";
 import { initProject } from "../src/init.js";
 import { readProjectFile } from "../src/project.js";
 import { routeTask } from "../src/route.js";
@@ -71,10 +72,19 @@ export type WorkerUsageEvidence =
   Readonly<Partial<Record<"input_tokens" | "output_tokens" | "cached_input_tokens" | "reasoning_output_tokens", number>>>
   | "unreported";
 
+// The bounded failure projection: class and the action boolean only, plus the
+// optional correlation hash and observed death signal. No failure text.
+export type WorkerFailureEvidence = Readonly<{
+  class: FailureClass;
+  errorSha256?: string;
+  signal?: "SIGINT" | "SIGTERM" | "SIGKILL";
+  ownedShutdown: boolean;
+}>;
+
 export type SafeEvidence =
   | Readonly<{ phase: "prepared"; suite: LiveSuite; manifestSha256: string; startedAt: string }>
   | Readonly<{ phase: "reserved"; caseId: string; worker: number; backends: readonly AcceptanceBackend[] }>
-  | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number; workerUsage?: WorkerUsageEvidence }>
+  | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number; workerUsage?: WorkerUsageEvidence; workerFailure?: WorkerFailureEvidence }>
   | Readonly<{ phase: "verified"; caseId: string; verdict: "pass" | "fail"; policy: "match" | "mismatch" | "not-applicable"; checks: Readonly<Record<string, boolean>>; oracleInput?: OracleInputEvidence }>
   | Readonly<{ phase: "completed"; outcome: "pass" | "policy-mismatch"; cases: number; policyMatches: number; policyMismatches: number }>
   | Readonly<{ phase: "completed"; outcome: "pass" | "fail"; cases: number; failed: number }>
@@ -890,6 +900,36 @@ const projectWorkerUsage = (usage: unknown): WorkerUsageEvidence => {
   return Object.keys(counters).length === 0 ? "unreported" : counters;
 };
 
+// The projection validates against the decoder's own frozen taxonomy: every
+// non-unknown class necessarily carries a phrasing (the decoder's closure test
+// pins that), so the set derives from the phrasing table without a copy.
+const FAILURE_CLASSES: ReadonlySet<string> = new Set([...FAILURE_PHRASINGS.map(([failureClass]) => failureClass), "unknown"]);
+const FAILURE_SIGNALS: ReadonlySet<string> = new Set(["SIGINT", "SIGTERM", "SIGKILL"]);
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+// All-or-nothing on the required fields, per-field on the optional ones: a
+// malformed class or ownedShutdown drops the whole projection, a malformed
+// hash or signal drops only itself. Nothing throws except on an unknown key
+// inside a present projection — the same strictness as oracleInput.
+const projectWorkerFailure = (value: unknown): WorkerFailureEvidence | undefined => {
+  if (!isRecord(value)) return undefined;
+  for (const key of Object.keys(value)) {
+    if (key !== "class" && key !== "ownedShutdown" && key !== "errorSha256" && key !== "signal") {
+      throw evidenceReject("workerFailure must not contain unknown field " + JSON.stringify(key));
+    }
+  }
+  if (typeof value.class !== "string" || !FAILURE_CLASSES.has(value.class)) return undefined;
+  if (typeof value.ownedShutdown !== "boolean") return undefined;
+  const projection: { class: FailureClass; ownedShutdown: boolean; errorSha256?: string; signal?: "SIGINT" | "SIGTERM" | "SIGKILL" } = {
+    class: value.class as FailureClass, ownedShutdown: value.ownedShutdown
+  };
+  if (typeof value.errorSha256 === "string" && SHA256_HEX.test(value.errorSha256)) projection.errorSha256 = value.errorSha256;
+  if (typeof value.signal === "string" && FAILURE_SIGNALS.has(value.signal)) {
+    projection.signal = value.signal as "SIGINT" | "SIGTERM" | "SIGKILL";
+  }
+  return projection;
+};
+
 const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
   const raw = record as unknown as Record<string, unknown>;
   switch (raw.phase) {
@@ -909,7 +949,8 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
       );
       return { phase: "reserved", caseId: evidenceString(raw.caseId) ?? "", worker: evidenceCount(raw.worker), backends };
     }
-    case "observed":
+    case "observed": {
+      const workerFailure = raw.workerFailure === undefined ? undefined : projectWorkerFailure(raw.workerFailure);
       return {
         phase: "observed",
         caseId: evidenceString(raw.caseId) ?? "",
@@ -919,8 +960,10 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
         exitCode: typeof raw.exitCode === "number" && Number.isInteger(raw.exitCode) ? raw.exitCode : null,
         durationMs: evidenceCount(raw.durationMs),
         attempts: evidenceCount(raw.attempts),
-        ...(raw.workerUsage !== undefined ? { workerUsage: projectWorkerUsage(raw.workerUsage) } : {})
+        ...(raw.workerUsage !== undefined ? { workerUsage: projectWorkerUsage(raw.workerUsage) } : {}),
+        ...(workerFailure !== undefined ? { workerFailure } : {})
       };
+    }
     case "verified": {
       const checks: Record<string, boolean> = {};
       if (isRecord(raw.checks)) {
@@ -1316,6 +1359,27 @@ const jsonEquals = (raw: string | null, expected: Readonly<{ count: number; sum:
   }
 };
 
+// WH-2: the adjudicated stdout envelope — the contract object on line 1 plus
+// any number of inert trailer lines. A trailer is inert only when it parses
+// as no JSON value, opens with no object, array, or string (after optional
+// whitespace), and is no code-fence delimiter; anything else could carry a
+// second structured payload past the oracle.
+const inertTrailerLine = (line: string): boolean => {
+  const trimmed = line.trimStart();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[") || trimmed.startsWith("\"")) return false;
+  if (trimmed.startsWith("```")) return false;
+  try { JSON.parse(line); return false; } catch { return true; }
+};
+
+const envelope = (text: string, expected: Readonly<{ count: number; sum: number }>): boolean => {
+  const lines = text.split("\n");
+  return jsonEquals(lines[0], expected) && lines.slice(1).every(inertTrailerLine);
+};
+
+// stdout oracle: the exact whole payload, or that payload plus inert prose.
+const stdoutPayloadEquals = (raw: string | null, expected: Readonly<{ count: number; sum: number }>): boolean =>
+  raw !== null && (jsonEquals(raw, expected) || envelope(raw, expected));
+
 const withoutLayaKey = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
   const copy = { ...env };
   delete copy.LAYA_API_KEY;
@@ -1557,12 +1621,24 @@ export async function executeAcceptance(
           // not from a second read taken after fallible verification.
           const worker = receiptFrame !== null && typeof receiptFrame.worker === "object" && receiptFrame.worker !== null
             ? receiptFrame.worker as Record<string, unknown> : null;
+          // The failure projection comes from the same durable receipt frame as
+          // usage, and lands only for a failed worker whose class and boolean
+          // survive validation — never fabricated, never failure text.
+          const workerFailure = worker !== null && worker.status === "failed"
+            ? projectWorkerFailure({
+              class: worker.failureClass,
+              ownedShutdown: worker.ownedShutdown,
+              ...(worker.errorSha256 !== undefined ? { errorSha256: worker.errorSha256 } : {}),
+              ...(worker.signal !== undefined ? { signal: worker.signal } : {})
+            })
+            : undefined;
           const claimedRoot = receiptFrame !== null && typeof receiptFrame.root === "string" ? receiptFrame.root : null;
           const rootOk = claimedRoot !== null && await realpath(claimedRoot).catch(() => "") === item.root;
           observation = {
             phase: "observed", caseId: item.id, backend, profileId, rootMatches,
             exitCode: supervision.exitCode, durationMs: supervision.durationMs, attempts,
-            workerUsage: projectWorkerUsage(worker?.usage)
+            workerUsage: projectWorkerUsage(worker?.usage),
+            ...(workerFailure !== undefined ? { workerFailure } : {})
           };
 
           // The observation is persisted before any fallible verification read
@@ -1599,7 +1675,7 @@ export async function executeAcceptance(
               const stdoutText = decodeBounded(supervision.stdout);
               let oracleOk = false;
               if (item.oracle.kind === "stdout-json") {
-                oracleOk = jsonEquals(stdoutText, item.oracle.expected);
+                oracleOk = stdoutPayloadEquals(stdoutText, item.oracle.expected);
                 oracleInput = { source: "stdout", text: stdoutText, bytes: supervision.stdout.length };
               } else if (item.oracle.kind === "summary-file") {
                 // The retained input reuses the same read the oracle judged —

@@ -1,7 +1,10 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -83,6 +86,8 @@ type WorkerScenario = {
   tail?: TailSpec;
   lateDestroy?: "error" | "quiet";
   trackFrameConcat?: boolean;
+  trackKills?: boolean;
+  settlementGuardMs?: number;
 };
 
 type Recorded = {
@@ -108,6 +113,11 @@ type Recorded = {
   abortAfterShutdownReached?: boolean;
   outputErrBefore?: number;
   outputErrAfter?: number;
+  ownedShutdown?: boolean;
+  failureClass?: string;
+  errorSha256?: string;
+  signal?: string;
+  postSettleKills?: number;
 };
 
 async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ recorded: Recorded; stdout: string; stderr: string; directory: string }> {
@@ -187,6 +197,16 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
       const combined = originalConcat(chunks, length);
       maxFrameConcatBytes = Math.max(maxFrameConcatBytes, combined.length);
       return combined;
+    };` : ""}
+    ${scenario.trackKills ? `
+    // Counts group-signal ATTEMPTS after settlement; a stray post-settle
+    // deadline callback would land here even when the group is already gone
+    // (ESRCH) because the count precedes the delegation.
+    let settledFlag = false;
+    let postSettleKills = 0;
+    process.kill = (pid, sig) => {
+      if (settledFlag && pid === -ownedPid && sig !== 0) postSettleKills += 1;
+      return originalKill.call(process, pid, sig);
     };` : ""}
     ${scenario.tail ? `
     let tailSink;
@@ -276,7 +296,7 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
     const restore = () => {
       childProcesses.spawn = originalSpawn;
       syncBuiltinESMExports();
-      process.kill = originalKill;
+      ${scenario.trackKills ? "" : "process.kill = originalKill;"}
       ${scenario.trackFrameConcat ? "Buffer.concat = originalConcat;" : ""}
     };
     const killOwned = () => {
@@ -301,7 +321,7 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
       clearInterval(bootPoll);
       bootPoll = undefined;
       clearTimeout(guard);
-      guard = setTimeout(() => watchdog("settlement"), 2500);
+      guard = setTimeout(() => watchdog("settlement"), ${scenario.settlementGuardMs ?? 2500});
     }, 10);
     ${scenario.gate === "abort-ready" ? `
     const waitReady = async () => {
@@ -332,6 +352,7 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
       ${scenario.gate === "epipe-received" ? "while (received < 1 && !gateController.signal.aborted) await gateSleep(10); if (!gateController.signal.aborted) output.destroy(new Error(\"EPIPE\"));" : ""}
       ${scenario.gate && scenario.gate !== "abort-after-shutdown" ? "})()]);" : ""}
       const result = await running;
+      ${scenario.trackKills ? "settledFlag = true;" : ""}
       stopObservation();
       restore();
       if (storedCb) {
@@ -350,8 +371,10 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
         await new Promise(resolve => setTimeout(resolve, 50));
         lateErrAfter = lateSink.listenerCount("error");
       }` : ""}
-      await writeFile(resultFile, JSON.stringify({ ...result, received, maxPending, emitted: captured, outputAcked, diagAcked, diagWrites, diagMaxLength, diagFinalLength, outputErrBefore, outputErrAfter, tailWrites, lateErrBefore, lateErrAfter, ...(${scenario.trackFrameConcat ?? false} ? { maxFrameConcatBytes } : {}), ...(${scenario.gate === "abort-after-shutdown"} ? { abortAfterShutdownReached } : {}) }));
-      ${scenario.lingerMs ? `setTimeout(() => {}, ${scenario.lingerMs});` : ""}
+      // Sample post-settlement signals after the linger window, not before it:
+      // a late ladder attempt must land in postSettleKills, not after the read.
+      ${scenario.lingerMs ? `await sleep(${scenario.lingerMs});` : ""}
+      await writeFile(resultFile, JSON.stringify({ ...result, received, maxPending, emitted: captured, outputAcked, diagAcked, diagWrites, diagMaxLength, diagFinalLength, outputErrBefore, outputErrAfter, tailWrites, lateErrBefore, lateErrAfter, ...(${scenario.trackFrameConcat ?? false} ? { maxFrameConcatBytes } : {}), ...(${scenario.trackKills ?? false} ? { postSettleKills } : {}), ...(${scenario.gate === "abort-after-shutdown"} ? { abortAfterShutdownReached } : {}) }));
     } catch (error) {
       stopObservation();
       killOwned();
@@ -433,6 +456,8 @@ test("subprocess environment strips classifier credentials while preserving Code
     TURNHELM_ALLOW_HOSTED_JEV: "1",
     TURNHELM_CONFIG: "/tmp/turnhelm.json",
     NODE_V8_COVERAGE: "/tmp/node-coverage-shared",
+    BASH_ENV: "/tmp/host-bashenv",
+    ENV: "/tmp/host-shenv",
     CODEX_HOME: "/tmp/codex",
     PATH: "/bin"
   });
@@ -441,6 +466,8 @@ test("subprocess environment strips classifier credentials while preserving Code
   assert.equal(env.TURNHELM_ALLOW_HOSTED_JEV, undefined);
   assert.equal(env.TURNHELM_CONFIG, undefined);
   assert.equal(env.NODE_V8_COVERAGE, undefined);
+  assert.equal(env.BASH_ENV, undefined);
+  assert.equal(env.ENV, undefined);
   assert.equal(env.CODEX_HOME, "/tmp/codex");
   assert.equal(env.PATH, "/bin");
 });
@@ -556,7 +583,8 @@ finish(() => {
     diagWrites: 0,
     diagMaxLength: 0,
     diagFinalLength: 0,
-    tailWrites: 0
+    tailWrites: 0,
+    ownedShutdown: false
   });
   assert.equal(await fakeFile(directory, "argv.json"), JSON.stringify(buildWorkerArgs(decision("balanced"), true)));
   assert.equal(await fakeFile(directory, "cwd.txt"), await realpath(join(directory, "root")));
@@ -588,19 +616,230 @@ const { spawn } = require("node:child_process");
 const child = spawn(process.execPath, ["-e", ${JSON.stringify(stubbornChild)}], { stdio: "ignore" });
 fs.writeFileSync(path.join(here, "descendant.pid"), String(child.pid));
 finish(() => {
-  emit({ type: "turn.failed" });
+  emit({ type: "turn.failed", message: "rate limit exceeded for key" });
   emit({ type: "turn.completed", usage: { input_tokens: 99 } });
-  ready();
-  setTimeout(() => {}, 5000);
+  setTimeout(() => process.exit(0), 200);
 });
 `
   });
   assert.equal(recorded.status, "failed");
   assert.equal(recorded.error, "worker");
-  // The group TERM from the sticky failure lands before the leader's natural exit.
-  assert.equal(recorded.code, 143);
+  // The leader's own exit code stands; the cleanup ladder only targets the group.
+  assert.equal(recorded.code, 0);
+  assert.equal(recorded.ownedShutdown, true, "a surviving group forces the cleanup ladder");
+  assert.equal(recorded.failureClass, "rate-limit");
   assert.equal(await fakeFile(directory, "runs"), "1");
   await waitForExit(Number(await fakeFile(directory, "descendant.pid")));
+});
+
+test("turn.failed then leader close within grace records its own exit code without a ladder", { timeout: 30_000 }, async t => {
+  const message = "upstream usage limit reached on the billing account";
+  const { recorded, directory } = await runWorker(t, {
+    trackKills: true,
+    lingerMs: 5500,
+    script: `
+finish(() => {
+  emit({ type: "turn.failed", message: ${JSON.stringify(message)} });
+  setTimeout(() => process.exit(7), 100);
+});
+`
+  });
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "worker");
+  assert.equal(recorded.code, 7, "the leader's own exit code is recorded");
+  assert.equal(recorded.ownedShutdown, false, "an already-gone group is discharged silently");
+  assert.equal(recorded.failureClass, "usage-limit");
+  assert.equal(recorded.errorSha256, createHash("sha256").update(message, "utf8").digest("hex"));
+  // The inner harness lingers past the 5 s deadline: no group signal may be
+  // attempted after settlement (the deadline timer must be disposed).
+  assert.equal(recorded.postSettleKills, 0, "no post-settlement ladder attempt");
+  await waitForExit(Number(await readFile(join(directory, "owned.pid"), "utf8")));
+});
+
+test("a failed turn buffered past child close still discharges the cleanup obligation", { timeout: 30_000 }, async t => {
+  const { recorded, directory } = await runWorker(t, {
+    output: "blocker",
+    drainDelayMs: 800,
+    script: `
+const { spawn } = require("node:child_process");
+const child = spawn(process.execPath, ["-e", ${JSON.stringify(stubbornChild)}], { stdio: "ignore" });
+fs.writeFileSync(path.join(here, "descendant.pid"), String(child.pid));
+finish(() => {
+  setTimeout(() => {
+    // One write: the blocked sink stops the loop after the message frame, so
+    // the failed frame is only decoded after the drain — past child close.
+    process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "partial" } }) + "\\n" + JSON.stringify({ type: "turn.failed", message: "rate limit exceeded" }) + "\\n");
+    process.exit(7);
+  }, 400);
+});
+`
+  });
+  const descendant = Number(await fakeFile(directory, "descendant.pid"));
+  t.after(() => { try { process.kill(descendant, "SIGKILL"); } catch { /* already gone on the green path */ } });
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "worker");
+  assert.equal(recorded.code, 7);
+  assert.equal(recorded.failureClass, "rate-limit");
+  // The blocked sink holds the failed frame until after close: settlement
+  // must not outrun the group-cleanup obligation.
+  assert.equal(recorded.ownedShutdown, true, "the ladder must still run for a post-close failed turn");
+  await waitForExit(descendant);
+});
+
+test("failure deadline expiry escalates a still-alive leader", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    settlementGuardMs: 9000,
+    script: `
+finish(() => {
+  emit({ type: "turn.failed", message: "stream disconnected before completion" });
+  setInterval(() => {}, 500);
+});
+`
+  });
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "worker");
+  assert.equal(recorded.code, 143, "the deadline ladder TERMs the lingering leader");
+  assert.equal(recorded.signal, "SIGTERM");
+  assert.equal(recorded.ownedShutdown, true);
+  assert.equal(recorded.failureClass, "stream-disconnected");
+  assert.ok((recorded.durationMs ?? 0) >= 4900, "the deadline waits the full grace before escalating, saw " + String(recorded.durationMs));
+});
+
+test("failure deadline expiry escalates an exited leader whose descendant holds inherited stdio", { timeout: 30_000 }, async t => {
+  const { recorded, directory } = await runWorker(t, {
+    settlementGuardMs: 9000,
+    script: `
+const { spawn } = require("node:child_process");
+finish(() => {
+  const child = spawn(process.execPath, ["-e", ${JSON.stringify(stubbornChild)}], { stdio: ["inherit", "inherit", "inherit"] });
+  fs.writeFileSync(path.join(here, "descendant.pid"), String(child.pid));
+  emit({ type: "turn.failed", message: "request timed out after 60000ms" });
+  process.exit(0);
+});
+`
+  });
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "worker");
+  assert.equal(recorded.code, 0);
+  assert.equal(recorded.ownedShutdown, true, "expiry discharges regardless of leader liveness");
+  assert.equal(recorded.failureClass, "timeout");
+  await waitForExit(Number(await fakeFile(directory, "descendant.pid")));
+});
+
+test("repeated failed events start one deadline and keep the first failure class", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    settlementGuardMs: 9000,
+    script: `
+finish(() => {
+  emit({ type: "turn.failed", message: "rate limit exceeded" });
+  setTimeout(() => emit({ type: "turn.failed", message: "request timed out" }), 700);
+  setInterval(() => {}, 500);
+});
+`
+  });
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.ownedShutdown, true);
+  assert.equal(recorded.failureClass, "rate-limit", "the first failure event wins attribution");
+  assert.equal(recorded.code, 143);
+  // One deadline from the FIRST failed event: escalation lands near 5 s, not 5.7 s.
+  assert.ok((recorded.durationMs ?? 0) < 5400, "the deadline must not restart, saw " + String(recorded.durationMs));
+  assert.ok((recorded.durationMs ?? 0) >= 4900, "escalation still waits the grace, saw " + String(recorded.durationMs));
+});
+
+test("caller cancellation during the grace supersedes immediately", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    gate: "abort-ready",
+    script: `
+finish(() => {
+  emit({ type: "turn.failed", message: "upstream overloaded" });
+  ready();
+  setInterval(() => {}, 500);
+});
+`
+  });
+  assert.equal(recorded.status, "cancelled");
+  assert.equal(recorded.error, undefined);
+  assert.equal(recorded.ownedShutdown, true, "cancellation runs the ladder without waiting");
+  assert.ok((recorded.durationMs ?? 0) < 3000, "cancellation must not wait out the deadline, saw " + String(recorded.durationMs));
+});
+
+test("a transport failure during the grace supersedes immediately with its own cause", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    output: "blocker",
+    gate: "epipe-received",
+    script: `
+finish(() => {
+  emit({ type: "turn.failed", message: "upstream overloaded" });
+  emit({ type: "item.completed", item: { type: "agent_message", text: "partial" } });
+  setInterval(() => {}, 500);
+});
+`
+  });
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "output", "the transport cause wins over the pending deadline");
+  assert.equal(recorded.ownedShutdown, true);
+  assert.equal(recorded.failureClass, "overloaded");
+  assert.ok((recorded.durationMs ?? 0) < 3000, "a broken pipe must not wait out the deadline, saw " + String(recorded.durationMs));
+});
+
+test("signal death records the observed death signal", { timeout: 30_000 }, async t => {
+  for (const [sig, code] of [["SIGTERM", 143], ["SIGINT", 130], ["SIGKILL", 137]] as const) {
+    const { recorded } = await runWorker(t, {
+      script: `
+finish(() => { process.kill(process.pid, ${JSON.stringify(sig)}); });
+`
+    });
+    assert.equal(recorded.status, "failed", sig);
+    assert.equal(recorded.error, "worker", sig);
+    assert.equal(recorded.code, code, sig);
+    assert.equal(recorded.signal, sig, sig);
+    assert.equal(recorded.ownedShutdown, false, sig);
+    assert.equal(recorded.failureClass, "unknown", sig);
+  }
+});
+
+test("an eventless failure carries failureClass unknown and ownedShutdown false", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    script: `
+finish(() => { process.exit(3); });
+`
+  });
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "worker");
+  assert.equal(recorded.code, 3);
+  assert.equal(recorded.failureClass, "unknown");
+  assert.equal(recorded.ownedShutdown, false);
+  assert.equal(recorded.errorSha256, undefined);
+});
+
+test("the failed dispatch writes exactly one class-only diagnostic line", { timeout: 30_000 }, async t => {
+  const message = "password=p@ss.word! leaked into rate limit exceeded";
+  const { recorded, stderr } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "turn.failed", message: ${JSON.stringify(message)} });
+  setTimeout(() => process.exit(5), 100);
+});
+`
+  });
+  assert.equal(recorded.status, "failed");
+  assert.equal(stderr, "turnhelm: worker-failed: rate-limit\n");
+  forbid(stderr, "password=p@ss.word!");
+});
+
+test("repeated failed turns write exactly one diagnostic line with the first class", { timeout: 30_000 }, async t => {
+  const { recorded, stderr } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "turn.failed", message: "rate limit exceeded" });
+  emit({ type: "turn.failed", message: "request timed out after 60000ms" });
+  setTimeout(() => process.exit(5), 100);
+});
+`
+  });
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.failureClass, "rate-limit", "the first failure event wins attribution");
+  assert.equal(stderr, "turnhelm: worker-failed: rate-limit\n");
 });
 
 test("an error event is a fixed diagnostic and cannot undo a later completion", { timeout: 30_000 }, async t => {
@@ -1375,4 +1614,91 @@ test("pending gate accepts booted worker settlement before output", { timeout: 3
   assert.equal(await fakeFile(directory, "runs"), "1");
   await readFile(join(directory, "boot"));
   await waitForExit(Number(await fakeFile(directory, "owned.pid")));
+});
+
+test("an end-to-end hostile worker failure yields class-only attribution in the receipt", { timeout: 30_000 }, async t => {
+  const directory = await mkdtemp(join(tmpdir(), "turnhelm-worker-e2e-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const bin = join(directory, "bin");
+  const root = join(directory, "root");
+  await mkdir(bin, { recursive: true });
+  await mkdir(join(root, ".turnhelm"), { recursive: true });
+  // One local classify call answers a fixed balanced choice; no real backend.
+  const server = createServer((request, response) => {
+    request.resume();
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ answers: { route: { type: "choice", choice: "balanced" } } }));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  });
+  const taskSentence = "Fix the pago row before the nightly cutoff lands.";
+  const hostile = `upstream rate limit exceeded while password=p@ss.word! and Bearer tok_9f3a81c4d2 were live ${taskSentence}`;
+  const hostileSha = createHash("sha256").update(hostile, "utf8").digest("hex");
+  await executableFixture(join(bin, "codex"), [
+    `#!${process.execPath}`,
+    "const argv = process.argv.slice(2);",
+    'if (argv[0] === "--version") { console.log("codex-cli 0.160.2"); process.exit(0); }',
+    'if (argv[0] === "exec" && argv[1] === "--help") { console.log("--json\\n--ephemeral\\n--sandbox <MODE>\\n-"); process.exit(0); }',
+    "process.stdin.setEncoding(\"utf8\");",
+    "process.stdin.on(\"data\", () => {});",
+    "process.stdin.on(\"end\", () => {",
+    `  process.stdout.write(JSON.stringify({ type: "error", message: ${JSON.stringify(hostile)} }) + "\\n");`,
+    `  process.stdout.write(JSON.stringify({ type: "turn.failed", message: ${JSON.stringify(hostile)} }) + "\\n");`,
+    "  process.exit(9);",
+    "});"
+  ].join("\n"), "node");
+  await executableFixture(join(bin, "git"), "#!/bin/sh\nif [ \"$1\" = \"-C\" ]; then echo true; exit 0; fi\nexit 64\n", "shell");
+  await writeFile(join(root, ".turnhelm", "config.json"), JSON.stringify({
+    version: 1,
+    routingTimeoutMs: 4000,
+    backends: { laya: { enabled: true, url: `http://127.0.0.1:${port}` }, jev: { enabled: false } },
+    profiles: {
+      fast: { model: "gpt-6-luna", effort: "low" },
+      balanced: { model: "gpt-6.1-sol", effort: "medium" },
+      deep: { model: "gpt-6.1-sol", effort: "high" },
+      frontier: { model: "gpt-6-astra", effort: "high" },
+      frontier_xhigh: { model: "gpt-6-astra", effort: "xhigh" },
+      frontier_max: { model: "gpt-6-astra", effort: "max" }
+    }
+  }));
+  const run = await new Promise<{ code: number; stdout: string; stderr: string }>(resolve => {
+    const child = spawn(process.execPath, [
+      fileURLToPath(new URL("../src/cli.js", import.meta.url)), "run", taskSentence
+    ], {
+      cwd: root,
+      env: { PATH: bin, LAYA_API_KEY: "dummy-laya-key", CODEX_HOME: join(directory, "codex-home") }
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk; });
+    child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk; });
+    child.stdin?.end();
+    const guard = setTimeout(() => child.kill("SIGKILL"), 20_000);
+    child.on("close", code => { clearTimeout(guard); resolve({ code: code ?? -1, stdout, stderr }); });
+  });
+  assert.equal(run.code, 9, "the worker's own exit code propagates: " + run.stderr);
+  const receiptLines = run.stderr.split("\n").filter(line => line.includes("turnhelm.receipt"));
+  assert.equal(receiptLines.length, 1, "exactly one receipt line");
+  const receipt = JSON.parse(receiptLines[0]) as { worker: Record<string, unknown> };
+  assert.equal(receipt.worker.status, "failed");
+  assert.equal(receipt.worker.code, 9);
+  assert.equal(typeof receipt.worker.ownedShutdown, "boolean", "every executed-worker receipt carries the boolean");
+  assert.equal(receipt.worker.ownedShutdown, false);
+  assert.equal(receipt.worker.failureClass, "rate-limit");
+  assert.equal(receipt.worker.errorSha256, hostileSha);
+  const canaries = ["password=p@ss.word!", "Bearer tok_9f3a81c4d2", taskSentence];
+  const surfaces = run.stdout + run.stderr;
+  for (const canary of canaries) {
+    assert.ok(!surfaces.includes(canary), "canary leaked: " + canary);
+    assert.ok(!JSON.stringify(receipt).includes(canary), "canary leaked into the receipt: " + canary);
+  }
+  for (let i = 0; i + 20 <= hostile.length; i++) {
+    const window = hostile.slice(i, i + 20);
+    assert.ok(!surfaces.includes(window), `20-char window at ${i} of the raw message leaked`);
+  }
+  assert.ok(surfaces.includes("turnhelm: worker-failed: rate-limit"), "the class-only diagnostic line is present");
 });

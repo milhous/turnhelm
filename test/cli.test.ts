@@ -562,7 +562,9 @@ test("a worker terminal failure fails the run despite exit zero", async t => {
     status: "failed",
     code: 0,
     durationMs: (receipt.worker as { durationMs: number }).durationMs,
-    usage: "unreported"
+    usage: "unreported",
+    ownedShutdown: false,
+    failureClass: "unknown"
   });
 });
 
@@ -647,7 +649,8 @@ test("a completed run without usage reports it explicitly unreported", async t =
     status: "completed",
     code: 0,
     durationMs: (receipt.worker as { durationMs: number }).durationMs,
-    usage: "unreported"
+    usage: "unreported",
+    ownedShutdown: false
   });
   assert.equal(receipt.classifierUsage, "unreported");
   assert.equal(receipt.wholeRunUsageScope, "unverified");
@@ -668,7 +671,10 @@ for (const [name, expectedCode] of [["SIGINT", 130], ["SIGTERM", 143]] as const)
       status: "cancelled",
       code: (receipt.worker as { code: number }).code,
       durationMs: (receipt.worker as { durationMs: number }).durationMs,
-      usage: "unreported"
+      usage: "unreported",
+      // Cancellation runs the parent-owned ladder; the worker dies by our TERM.
+      ownedShutdown: true,
+      signal: "SIGTERM"
     });
     assert.equal((await workerRecords(f)).runs, 1);
     const pid = Number(await readFile(join(f.bin, "pid"), "utf8"));

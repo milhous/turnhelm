@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { join } from "node:path";
-import { decodeWorkerEvent, MAX_EVENT_BYTES, type WorkerEvent, type WorkerUsage } from "./codex-events.js";
+import { decodeWorkerEvent, MAX_EVENT_BYTES, type FailureClass, type WorkerEvent, type WorkerUsage } from "./codex-events.js";
 import type { TaskDecision } from "./route.js";
 
 export type WorkerResult = Readonly<{
@@ -10,6 +10,12 @@ export type WorkerResult = Readonly<{
   usage?: WorkerUsage;
   usageScope: "unverified";
   error?: "spawn" | "stdin" | "protocol" | "output" | "worker";
+  // The child's observed death signal; an action record of a parent-initiated
+  // group shutdown (ownedShutdown), never a claim about the child's cause.
+  signal?: "SIGINT" | "SIGTERM" | "SIGKILL";
+  ownedShutdown: boolean;
+  failureClass?: FailureClass;
+  errorSha256?: string;
 }>;
 
 export function buildWorkerArgs(decision: TaskDecision, write: boolean): string[] {
@@ -24,6 +30,11 @@ export function subprocessEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv
   delete copy.TYPESAFE_API_KEY;
   delete copy.TURNHELM_ALLOW_HOSTED_JEV;
   delete copy.TURNHELM_CONFIG;
+  // A non-interactive bash (or POSIX-shell) descendant sources these at
+  // startup, re-importing stripped material the same way zsh's startup files
+  // did before the ZDOTDIR redirect.
+  delete copy.BASH_ENV;
+  delete copy.ENV;
   // Coverage instrumentation belongs to this process, not to the external worker
   // binary; forwarding it lets test-spawned children write into the shared
   // coverage directory where a killed child leaves a truncated file behind.
@@ -45,6 +56,10 @@ export function workerEnvironment(env: NodeJS.ProcessEnv, root: string): NodeJS.
 
 const TERM_GRACE_MS = 1000;
 const GROUP_POLL_MS = 25;
+const FAILED_EXIT_GRACE_MS = 5000;
+const DEATH_SIGNALS: ReadonlySet<string> = new Set(["SIGINT", "SIGTERM", "SIGKILL"]);
+const isDeathSignal = (signal: NodeJS.Signals): signal is "SIGINT" | "SIGTERM" | "SIGKILL" =>
+  DEATH_SIGNALS.has(signal);
 
 const exitStatus = (code: number | null, signal: NodeJS.Signals | null): number => {
   if (code !== null) return code;
@@ -69,7 +84,7 @@ export function executeWorker(
 ): Promise<WorkerResult> {
   const started = performance.now();
   if (options.signal?.aborted) {
-    return Promise.resolve({ code: -1, status: "cancelled", durationMs: 0, usageScope: "unverified" });
+    return Promise.resolve({ code: -1, status: "cancelled", durationMs: 0, usageScope: "unverified", ownedShutdown: false });
   }
   return new Promise<WorkerResult>(resolve => {
     const child = spawn(options.executable, buildWorkerArgs(decision, options.write), {
@@ -94,6 +109,10 @@ export function executeWorker(
     let childSignal: NodeJS.Signals | null = null;
     let closed = false;
     let finished = false;
+    let ownedShutdown = false;
+    let failureClass: FailureClass | undefined;
+    let failureHash: string | undefined;
+    let failureDeadline: NodeJS.Timeout | undefined;
     let shutdownStarted = false;
     let shutdownDischarged = true;
     let pollTimer: NodeJS.Timeout | undefined;
@@ -137,6 +156,7 @@ export function executeWorker(
     const finish = (): void => {
       if (finished) return;
       finished = true;
+      clearFailureDeadline();
       options.signal?.removeEventListener("abort", onAbort);
       // With writes still in flight the listeners stay attached (they detach
       // from the last write callback); cancellation may settle despite them.
@@ -155,9 +175,18 @@ export function executeWorker(
         status,
         durationMs: Math.round(performance.now() - started),
         usageScope: "unverified"
-      } as { code: number; status: WorkerResult["status"]; durationMs: number; usageScope: "unverified"; usage?: WorkerUsage; error?: WorkerResult["error"] };
+      } as { code: number; status: WorkerResult["status"]; durationMs: number; usageScope: "unverified"; ownedShutdown: boolean; usage?: WorkerUsage; error?: WorkerResult["error"]; signal?: "SIGINT" | "SIGTERM" | "SIGKILL"; failureClass?: FailureClass; errorSha256?: string };
+      result.ownedShutdown = ownedShutdown;
       if (usage) result.usage = usage;
       if (error) result.error = error;
+      // A failed status always carries a class: an eventless failure is unknown.
+      if (status === "failed") {
+        result.failureClass = failureClass ?? "unknown";
+        if (failureHash !== undefined) result.errorSha256 = failureHash;
+      }
+      if (childCode === null && childSignal !== null && isDeathSignal(childSignal)) {
+        result.signal = childSignal;
+      }
       resolve(result);
     };
 
@@ -177,16 +206,32 @@ export function executeWorker(
       settle();
     };
 
+    // One bounded deadline from the first failure event: expiry discharges the
+    // cleanup obligation unconditionally, regardless of leader liveness.
+    const clearFailureDeadline = (): void => {
+      if (failureDeadline !== undefined) { clearTimeout(failureDeadline); failureDeadline = undefined; }
+    };
+    const startFailureDeadline = (): void => {
+      if (failureDeadline !== undefined || finished || shutdownStarted) return;
+      failureDeadline = setTimeout(() => {
+        failureDeadline = undefined;
+        if (finished || shutdownStarted) return;
+        beginShutdown();
+      }, FAILED_EXIT_GRACE_MS);
+    };
+
     // TERM the owned group now, then KILL within the grace if it remains. A leader
     // exit never discharges this obligation while owned descendants stay alive.
     const beginShutdown = (): void => {
       if (shutdownStarted) return;
       shutdownStarted = true;
+      clearFailureDeadline();
       frame = Buffer.alloc(0);
       cancelDrainWait?.();
       cancelDiagWait?.();
       stopStdin();
       if (child.pid === undefined) { settle(); return; }
+      ownedShutdown = true;
       shutdownDischarged = false;
       signalGroup("SIGTERM");
       const shutdownAt = performance.now();
@@ -197,6 +242,18 @@ export function executeWorker(
           dischargeShutdown();
         }
       }, GROUP_POLL_MS);
+    };
+
+    // Group-cleanup obligation of a sticky failure: holds settlement until the
+    // owned group is gone — discharged silently when it already is, or through
+    // the TERM→KILL ladder when descendants survive the leader. Reached from
+    // the close handler and from a failed frame decoded after close.
+    const settleObligation = (): void => {
+      if (shutdownStarted || finished) return;
+      clearFailureDeadline();
+      shutdownDischarged = false;
+      if (!signalGroup(0)) { dischargeShutdown(); return; }
+      beginShutdown();
     };
 
     // The first transport cause wins; consequences of our own shutdown are not
@@ -345,6 +402,16 @@ export function executeWorker(
       cancelDiagWait = waitDiagDrain();
     };
 
+    // One fixed line per failed run, written by its first failed turn; the
+    // taxonomy class is the only failure-text derivative that ever reaches
+    // the diagnostics sink.
+    const reportWorkerFailed = (failureClass: FailureClass): void => {
+      if (shutdownStarted || finished) return;
+      const line = "turnhelm: worker-failed: " + failureClass + "\n";
+      if (cancelDiagWait !== undefined) { diagLine = line; return; }
+      writeDiagLine(line);
+    };
+
     // One fixed-category line per diagnostic event; never the raw command,
     // output, stderr, or native error text behind it. While the sink is
     // blocked, at most the latest new event's line is retained — the queue
@@ -367,11 +434,27 @@ export function executeWorker(
           if (event.usage) usage = event.usage;
           return;
         case "failed":
-          // Irreversible: a later completion cannot restore success.
+          // Irreversible: a later completion cannot restore success. The first
+          // failure event owns the attribution and the single diagnostic line;
+          // the deadline, not an immediate shutdown, now bounds the
+          // group-cleanup obligation.
+          if (!stickyFailed) reportWorkerFailed(event.failureClass);
           stickyFailed = true;
-          beginShutdown();
+          if (failureClass === undefined) {
+            failureClass = event.failureClass;
+            failureHash = event.errorSha256;
+          }
+          // A frame held back by sink backpressure can only be decoded after
+          // the child closed; the close handler saw no sticky failure then, so
+          // the obligation discharges here — settlement cannot outrun cleanup.
+          if (closed) { settleObligation(); return; }
+          startFailureDeadline();
           return;
         case "diagnostic":
+          if (event.category === "worker-event-error" && failureClass === undefined) {
+            failureClass = event.failureClass;
+            failureHash = event.errorSha256;
+          }
           reportDiagnostic(event.category);
           return;
         default:
@@ -429,6 +512,7 @@ export function executeWorker(
       closed = true;
       childCode = code;
       childSignal = signal;
+      if (stickyFailed) settleObligation();
       settle();
     });
   });

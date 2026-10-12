@@ -177,6 +177,11 @@ The task text is sent to the configured backend at `POST /v1/systemone`:
 }
 ```
 
+These criteria strings are v1 and current: a criteria-v2 policy-alignment
+experiment (2026-10-12) found no revision that satisfied its adoption gates
+and shipped nothing; the sealed record, including the best rejected draft,
+is `docs/validation/2026-10-12-calibration-v2.md`.
+
 Laya's `max_len` is a token window, distinct from the 8192-byte task limit.
 Hosted Jev uses the same envelope with `model: "jev-latest"` and no `max_len`.
 The required response shape is the nested choice answer:
@@ -238,8 +243,11 @@ than opened.
 - **No recursion.** Turnhelm marks its Codex children with
   `TURNHELM_MANAGED_CHILD=1`; `run` inside such a session is refused.
 - **Initial process environment only.** `LAYA_API_KEY`,
-  `TYPESAFE_API_KEY`, `TURNHELM_ALLOW_HOSTED_JEV`, and `TURNHELM_CONFIG`
-  are removed from the environment passed when spawning the Codex worker,
+  `TYPESAFE_API_KEY`, `TURNHELM_ALLOW_HOSTED_JEV`, `TURNHELM_CONFIG`, and
+  the startup-file keys `BASH_ENV` and `ENV` are removed from the
+  environment passed when spawning the Codex worker — a non-interactive
+  bash or POSIX-shell descendant would otherwise source them at startup and
+  re-import stripped material, the same route zsh's startup files used —
   and `ZDOTDIR` is redirected to the managed `.turnhelm` root so a zsh
   descendant no longer sources the host `~/.zshenv` that reintroduced the
   Jev key (a missing startup file there is zsh's skip state). This is still
@@ -250,7 +258,12 @@ than opened.
   a check pass.
 - **Bounded child output.** Raw worker stderr and arbitrary error text never
   cross the diagnostic boundary; the parent prints fixed-category lines and
-  the structured receipt on stderr. Worker messages go to stdout; this is
+  the structured receipt on stderr. A failed worker turn reports exactly one
+  fixed line, `turnhelm: worker-failed: <class>`, where the class comes from
+  a frozen taxonomy (`stream-disconnected`, `rate-limit`, `usage-limit`,
+  `timeout`, `auth`, `overloaded`, `unknown`) matched against the native
+  message — the message itself never crosses; only its SHA-256 does, in the
+  receipt. Worker messages go to stdout; this is
   not a general-purpose redactor for secrets in those messages.
 - Remove secrets and sensitive data from a task before routing; the full
   task text is sent to the configured classifier.
@@ -260,6 +273,15 @@ than opened.
   classification starts, `run` emits exactly one JSON receipt on stderr at the
   end, including routing failure/cancellation and the worker outcome.
   Client cancellation does not prove backend inference has stopped.
+
+The receipt's `worker` object always carries the status, exit code,
+duration, usage, and `ownedShutdown` — a required boolean action record
+meaning a parent-initiated stop ladder ran, never a causation claim; it is
+false on every natural path. A failed worker also carries the frozen
+`failureClass` (plus `errorSha256`, a SHA-256 over the native error bytes
+for cross-run correlation, when a native message existed); a worker that
+died by SIGINT/SIGTERM/SIGKILL — failed or cancelled — carries the death
+`signal`. The text behind that hash never crosses the diagnostic boundary.
 
 ## Usage evidence is honest, not authoritative
 
@@ -318,7 +340,13 @@ human reads the complete manifest and explicitly approves that sha256;
 suite only; reservations never carry across suites. The manifest claims
 exactly once (a second execute refuses), so a run is never replayed or
 resumed; drift in the baseline, corpus, or any frozen case file stops it
-before further spend. Each case reserves its caps to the append-only evidence
+before further spend. Output judging is adjudicated for stdout only: a
+stdout case passes when the whole stdout is the exact contract JSON object,
+or that object on line 1 followed solely by inert trailer lines — lines
+that parse as no JSON value, open with no object/array/string, and are no
+code-fence delimiter, so a second structured payload cannot ride along.
+The summary-file oracle stays strict: the payload must be the entire file.
+Each case reserves its caps to the append-only evidence
 journal (mode 0600) before any call; the journal stores bounded fixed fields —
 never task text or environment values — and unknown receipt data degrades to
 fixed `invalid`/`unknown` markers, with one deliberate exception: each judged
@@ -327,7 +355,9 @@ judged, bounded to 64 KiB of UTF-8 before serialization. That is deliberate
 raw-content retention, not secret sanitization: it is private to the claimed
 run and covered by the manifest approval, and never a license to put secrets
 in task output. Observed records also carry `workerUsage`, a whitelisted
-four-counter projection whose scope is unverified. Exit codes: `2` usage, `1`
+four-counter projection whose scope is unverified, and `workerFailure` —
+the frozen failure class plus the `ownedShutdown` action boolean, with an
+optional correlation hash and observed death signal; no failure text. Exit codes: `2` usage, `1`
 failure or incomplete, `0` complete pass, `3` a complete calibration roster
 containing a band-policy mismatch, `4` a complete worker roster containing at
 least one engineering failure, `130`/`143` on interrupt. In the calibration
