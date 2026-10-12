@@ -102,8 +102,9 @@ has no receipt. A failed worker turn prints exactly one fixed
 `turnhelm: worker-failed: <class>` line — class from a frozen taxonomy,
 never native error text. The receipt's `worker` object always carries
 `ownedShutdown`, a boolean action record (a parent-initiated stop ladder
-ran), not a causation claim, and a failed/cancelled worker adds
-`failureClass`, `errorSha256` (hash only), and the death `signal`. Read the
+ran), not a causation claim; a failed worker adds `failureClass` and
+`errorSha256` (hash only), and any death by SIGINT/SIGTERM/SIGKILL —
+failed or cancelled — adds the `signal`. Read the
 exit code and routing/worker statuses, not stderr
 presence or a selected profile alone.
 

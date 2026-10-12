@@ -277,10 +277,11 @@ than opened.
 The receipt's `worker` object always carries the status, exit code,
 duration, usage, and `ownedShutdown` — a required boolean action record
 meaning a parent-initiated stop ladder ran, never a causation claim; it is
-false on every natural path. A failed or cancelled worker also carries the
-frozen `failureClass`, the observed death `signal`, and `errorSha256`, a
-SHA-256 over the native error bytes for cross-run correlation. The text
-behind that hash never crosses the diagnostic boundary.
+false on every natural path. A failed worker also carries the frozen
+`failureClass` (plus `errorSha256`, a SHA-256 over the native error bytes
+for cross-run correlation, when a native message existed); a worker that
+died by SIGINT/SIGTERM/SIGKILL — failed or cancelled — carries the death
+`signal`. The text behind that hash never crosses the diagnostic boundary.
 
 ## Usage evidence is honest, not authoritative
 

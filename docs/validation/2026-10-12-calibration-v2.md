@@ -34,7 +34,7 @@ service log). No hosted Jev, no workers, no paid spend, no other side effects.
   3 trials; the sealed v020 report's heading-en 3/3 agrees). Observed choice probabilities
   are near-uniform (winning option ≈ 0.2–0.3, margins ≈ 0.02), so single trials are exact.
 
-## Tuning log (budget 200/200 classifies spent)
+## Tuning log (budget 200/200 calls spent — 198 classifies + 2 raw envelope dumps)
 
 | revision | calls | intent → effect |
 |---|---|---|
@@ -44,7 +44,7 @@ service log). No hosted Jev, no workers, no paid spend, no other side effects.
 | c | 13 | "fully specified up front" deep → lifted 05/09/11/14; auth-en and 16 fell to deep |
 | d | 10 | dropped "untrusted input" from deep → no recovery of the review family |
 | e | 8 | discovery-vs-specified frontier → no movement |
-| f | 31 | "implementation or repair" deep + review-worded frontier → all contracts deep, reviews frontier; **best draft** |
+| f | 31 | "implementation or repair" deep + review-worded frontier → all contracts deep, reviews frontier; **best draft** (its 31 include the repeats row below) |
 | g | 8 | "changes no files" in frontier → no change for the two stragglers |
 | h | 9 | narrowed balanced + "distributed" frontier → no change for the two stragglers |
 | i | 8 | v1-verbatim frontier → broad regression (07, 15, auth-en, 16) |
@@ -54,11 +54,13 @@ service log). No hosted Jev, no workers, no paid spend, no other side effects.
 | m | 8 | deep without "repair" → heading-en broke; auth-zh-v1 unmoved |
 | n | 4 | tenant/authorization frontier → auth-zh-v1 fixed; heading-en and decoy-en broke |
 | o | 7 | f + k's xhigh/max only → heading-en and 07 broke |
-| f (repeats) | 6 + 3 + 1 | determinism trials and picture completion |
+| draft-f-raw | 2 | raw envelope dumps of the two stragglers (per-option probabilities; no placements) |
+| f (repeats) | (10) | determinism trials and picture completion — counted inside f's 31 above, not extra spend |
 
-Pattern: every fix for one of the two residual items flipped at least one other item; no
-revision beat draft f. 4 remaining-diagnostics were raw envelope dumps (`draft-f-raw`, 2)
-and the final picture completion.
+Rows are additive and sum to the budget: 30+16+12+13+10+8+31+8+9+8+7+9+8+10+8+4+7
+= 198 classifies, plus the 2 `draft-f-raw` envelope dumps = 200/200. Pattern: every fix
+for one of the two residual items flipped at least one other item; no revision beat
+draft f.
 
 ## Best draft (f) — frozen verbatim, not shipped
 
