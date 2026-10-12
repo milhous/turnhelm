@@ -1033,3 +1033,37 @@ async function runGatedRound(
   }
   return failedCases === 0 ? 0 : 4;
 }
+
+// ---------- command entry (spec §3.1): prepare and execute modes ----------
+
+// Only act when invoked as the main module; a test importing this file must
+// never trip the dispatcher.
+const invokedAsMain = async (): Promise<boolean> => {
+  if (process.argv[1] === undefined) return false;
+  try {
+    return await realpath(process.argv[1]) === await realpath(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+};
+
+const runEntry = async (argv: readonly string[]): Promise<number> => {
+  const usage = "usage: custom-round prepare <roster.json> | execute <manifest.json> <sha256>";
+  if (argv[0] === "prepare" && argv.length === 2) {
+    try {
+      const { manifestPath, approvalSha256 } = await prepareRound(argv[1]);
+      process.stdout.write("manifest: " + manifestPath + "\nsha256: " + approvalSha256 + "\n");
+      return 0;
+    } catch (error) {
+      process.stderr.write("prepare refused: " + (error as Error).message + "\n");
+      return 1;
+    }
+  }
+  if (argv[0] === "execute" && argv.length === 3) {
+    return executeRound(argv[1], argv[2]);
+  }
+  process.stderr.write(usage + "\n");
+  return 1;
+};
+
+if (await invokedAsMain()) process.exitCode = await runEntry(process.argv.slice(2));

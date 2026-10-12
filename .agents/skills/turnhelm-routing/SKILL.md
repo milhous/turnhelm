@@ -182,27 +182,39 @@ semantics, model entitlement, or paid benefit. A real worker using ChatGPT login
 is not API-key billing or invoice evidence.
 
 The checkout also carries a hermetic custom-round runner — `test/custom-round.ts`,
-exported through the built `dist/test` surface — for owner-defined validation
-rosters. The round input is a data-only JSON roster: nothing executable is
-trusted from it, and every referenced file is hashed into a frozen manifest as
-data. `prepareRound` validates the roster, re-verifies the pinned HEAD and
-consumed-file baseline, runs local sandboxed preflights, and writes the
-manifest with a human approval request while spending nothing — zero classifier
-requests and zero worker executions, asserted by the manifest's zero-spend
-block. `executeRound` runs only under the human-approved sha256: it re-verifies
-manifest bytes, evidence-root identity, runtime, HEAD, and baseline, claims the
-append-only evidence ledger exactly once (a replay refuses), and gates every
-case identity-before-spend — root dev/ino identity and frozen file hashes must
-re-verify before any launch. Task-output and contract-assertion failures fail
-their case and the roster continues to exit `4`; integrity failures (identity
-drift, timeout, output cap, cleanup, check infrastructure) and auth-, rate-
-limit-, or usage-limit-class worker receipts stop all remaining spend with exit
-`1`; a roster whose planned spend exceeds its frozen caps is refused before
-launch; the first SIGINT settles gracefully with `130` and SIGTERM with `143`.
-Worker-write contracts execute inside the runner's sandboxed check launcher,
-whose single marked outcome line replaces exit-code and stderr inference; the
-sandbox boundary is a path-injected fake on every platform, with a real
-seatbelt profile only in the macOS-gated test. Two harness pins landed with it:
-acceptance-style tests observe actual fake-worker invocations rather than
-reserved records, and the worker receipt's `lastEventAgeMs` is pinned positive
-through a post-drain settlement gap.
+exported through the built `dist/test` surface and invocable as
+`node dist/test/custom-round.js prepare <roster.json>` / `execute <manifest.json>
+<sha256>` — for owner-defined validation rosters. The round input is a
+data-only JSON roster: nothing executable is trusted from it, and every
+referenced file is hashed into a frozen manifest as data, alongside a per-case
+snapshot of the whole consumer tree. `prepareRound` validates the roster,
+re-verifies the pinned HEAD and the whole-consumption baseline (every built
+module the round executes), preflights the sandbox machinery and each roster
+contract's loadability, and writes the manifest with a human approval request
+while spending nothing — zero classifier requests and zero worker executions,
+asserted by the manifest's zero-spend block. `executeRound` runs only under
+the human-approved sha256: it re-verifies manifest bytes, evidence-root
+identity, runtime, HEAD, and baseline, claims the append-only evidence ledger
+exactly once (a replay refuses), and gates every case identity-before-spend —
+root dev/ino identity, frozen file hashes, the frozen tree, and the consumed
+baseline re-verify before each reservation, and a reserved record that cannot
+be written stops all remaining spend. A run must carry exactly one CLI receipt
+to be graded; journal backend/profileId values surface only through a fixed
+whitelist; a legal profile outside the case's allowedProfiles fails its case;
+and each judged case retains its bounded `oracleInput`. After the worker runs,
+the consumer tree re-verifies against the case's allowedChanges — a write
+outside them stops the round even when the output graded fine. Task-output and
+contract-assertion failures fail their case and the roster continues to exit
+`4`; integrity failures (identity, baseline, or tree drift, missing receipts,
+timeout, output cap, cleanup, check infrastructure) and auth-, rate-limit-, or
+usage-limit-class worker receipts stop all remaining spend with exit `1`; a
+roster whose planned spend exceeds its frozen caps is refused before launch;
+SIGINT anywhere in the round, including mid-contract, settles gracefully with
+`130` and SIGTERM with `143`. Worker-write contracts execute inside the
+runner's sandboxed check launcher, whose runner-owned fd-3 outcome record
+replaces exit-code and stdout inference; the sandbox boundary is a
+path-injected fake on every platform, with a real seatbelt profile only in the
+macOS-gated test. Two harness pins landed with it: acceptance-style tests
+observe actual fake-worker invocations rather than reserved records, and the
+worker receipt's `lastEventAgeMs` is pinned positive through a post-drain
+settlement gap.

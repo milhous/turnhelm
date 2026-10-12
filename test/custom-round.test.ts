@@ -888,7 +888,51 @@ test("the CLI child env is scrubbed before it reaches the CLI and again the work
     assert.equal(worker.PATH, round.env.PATH);
   });
 
-// ---------- Task 6: stop policy, lifecycle, and exit codes (spec §3.3) ----------
+// ---------- command entry modes (spec §3.1): prepare and execute ----------
+
+const runEntry = (args: readonly string[]): { code: number; stdout: string; stderr: string } => {
+  try {
+    const stdout = execFileSync(process.execPath,
+      [join(REPO_ROOT, "dist", "test", "custom-round.js"), ...args], { encoding: "utf8" });
+    return { code: 0, stdout, stderr: "" };
+  } catch (error) {
+    const failure = error as { status?: number; stdout?: string; stderr?: string };
+    return { code: failure.status ?? -1, stdout: failure.stdout ?? "", stderr: failure.stderr ?? "" };
+  }
+};
+
+test("the command entry prints usage and exits 1 with no subcommand", async () => {
+  const result = runEntry([]);
+  assert.equal(result.code, 1, "an argument-less invocation is a usage error, not a silent success");
+  assert.ok(result.stderr.includes("usage:"), "the usage line names both entry modes");
+  assert.equal(result.stdout, "");
+});
+
+test("prepare mode refuses an unreadable roster with the reason on stderr", async () => {
+  const result = runEntry(["prepare", join(tmpdir(), "turnhelm-absent-roster.json")]);
+  assert.equal(result.code, 1, "a refused prepare exits 1");
+  assert.ok(result.stderr.includes("prepare refused:"), "the refusal carries the validation error");
+});
+
+test("execute mode exits with the round code for a mismatched approval hash", async t => {
+  const round = await scratchExecuteRound(t, [
+    {
+      id: "case-a", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+    }
+  ]);
+  const result = runEntry(["execute", round.manifestPath, "0".repeat(64)]);
+  assert.equal(result.code, 1, "a wrong sha256 is the structural refusal, surfaced through the entry mode");
+});
+
+test("prepare mode prints the manifest path and approval hash", { skip: process.platform !== "darwin" }, async t => {
+  const scratch = await scratchRoster(t);
+  const result = runEntry(["prepare", scratch.rosterPath]);
+  assert.equal(result.code, 0);
+  assert.ok(result.stdout.includes("manifest: " + join(scratch.evidenceRoot, "custom-round-manifest.json")),
+    "stdout names the frozen manifest");
+  assert.ok(/sha256: [0-9a-f]{64}/.test(result.stdout), "stdout carries the approval hash");
+});
 
 test("a worker writing outside its allowedChanges stops the round", { timeout: 90_000 }, async t => {
   const round = await scratchExecuteRound(t, [
