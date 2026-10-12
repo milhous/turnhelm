@@ -4,15 +4,16 @@
 // inference. Everything with a failure mode here is runner-owned — the round
 // input never supplies code on this path.
 import { execFile, spawn } from "node:child_process";
+import { deepStrictEqual } from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, open, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { PROFILE_IDS } from "../src/config.js";
 import { validateTask } from "../src/task.js";
-import { oracleSandboxPolicy } from "./live-acceptance.js";
+import { envelopePayload, oracleSandboxPolicy, superviseCli } from "./live-acceptance.js";
 
 export type CheckOutcome =
   | { status: "pass" }
@@ -452,4 +453,259 @@ export async function prepareRound(
     "custom-round execute <manifest> <sha256>\nmanifest: " + manifestPath + "\nsha256: " + approvalSha256 + "\n",
     { mode: 0o600 });
   return { manifestPath, approvalSha256 };
+}
+
+// ---------- gated execute (spec §3.2(1), §3.3, §3.4, §3.5) ----------
+
+type RoundCase = {
+  id: string;
+  kind: "worker-readonly" | "worker-write";
+  task: string;
+  transport: "arg" | "stdin-file";
+  root: { canonical: string; dev: number; ino: number };
+  grading: { mode: string; expected: unknown };
+  files: { role: string; path: string; sha256: string }[];
+};
+
+type RoundManifest = {
+  version: number;
+  kind: string;
+  head: string;
+  baseline: { files: { path: string; sha256: string }[] };
+  runtime: { node: string; execPath: string };
+  evidenceRoot: { canonical: string; dev: number; ino: number };
+  cases: RoundCase[];
+};
+
+const CLI_PATH = join(REPO_ROOT, "dist", "src", "cli.js");
+const CASE_TIMEOUT_MS = 240_000;
+const CONTRACT_TIMEOUT_MS = 20_000;
+const JOURNAL_CAP_BYTES = 1 << 20;
+const SCRUBBED_ENV_KEYS = ["TURNHELM_ALLOW_HOSTED_JEV", "TYPESAFE_API_KEY", "LAYA_API_KEY", "OPENAI_API_KEY",
+  "BASH_ENV", "ENV", "TURNHELM_CONFIG"] as const;
+
+const shQuote = (value: string): string => "'" + value.replace(/'/g, "'\\''") + "'";
+
+// The manifest is the runner's own hash-approved artifact, so the parse gate
+// is a bounded shape check, not a second roster validation.
+const parseRoundManifest = (bytes: Buffer): RoundManifest | null => {
+  try {
+    const value = JSON.parse(bytes.toString("utf8")) as RoundManifest;
+    if (value.version !== 1 || value.kind !== "custom-round" || !Array.isArray(value.cases)) return null;
+    if (typeof value.head !== "string" || !Array.isArray(value.baseline?.files)) return null;
+    if (typeof value.runtime?.node !== "string" || typeof value.runtime?.execPath !== "string") return null;
+    if (typeof value.evidenceRoot?.canonical !== "string"
+      || !Number.isInteger(value.evidenceRoot?.dev) || !Number.isInteger(value.evidenceRoot?.ino)) return null;
+    for (const item of value.cases) {
+      if (typeof item?.id !== "string" || typeof item?.task !== "string"
+        || (item.transport !== "arg" && item.transport !== "stdin-file")
+        || (item.kind !== "worker-readonly" && item.kind !== "worker-write")
+        || typeof item.root?.canonical !== "string"
+        || !Number.isInteger(item.root?.dev) || !Number.isInteger(item.root?.ino)
+        || typeof item.grading?.mode !== "string" || !Array.isArray(item.files)) return null;
+    }
+    return value;
+  } catch {
+    return null;
+  }
+};
+
+const jsonDeepEquals = (actual: unknown, expected: unknown): boolean => {
+  try {
+    deepStrictEqual(actual, expected);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+// Spec §3.2(3): envelope-equal reads the first-line payload with inert trailer
+// lines; both strict modes parse the whole stdout and deep-compare. The two
+// strict names freeze the v0.3.0 primitive and the strict-only contract
+// separately — no observable distinction between them is specified.
+const gradeOutput = (mode: string, stdout: string, expected: unknown): boolean => {
+  if (mode === "envelope-equal") {
+    const payload = envelopePayload(stdout);
+    return payload !== null && jsonDeepEquals(payload.value, expected);
+  }
+  try {
+    return jsonDeepEquals(JSON.parse(stdout), expected);
+  } catch {
+    return false;
+  }
+};
+
+// The case journal is evidence, never a gate: a missing or malformed journal
+// degrades to null and the case still grades on its captured output.
+const readCaseJournal = async (root: string, taskHash: string): Promise<Record<string, unknown> | null> => {
+  const text = await readFile(join(root, ".turnhelm", "routes.jsonl"), "utf8").catch(() => null);
+  if (text === null || Buffer.byteLength(text) > JOURNAL_CAP_BYTES) return null;
+  for (const line of text.split("\n").filter(Boolean)) {
+    try {
+      const parsed = JSON.parse(line) as Record<string, unknown>;
+      if (parsed.taskSha256 === taskHash) return parsed;
+    } catch { /* a malformed line is skipped, never fatal */ }
+  }
+  return null;
+};
+
+// Spec §3.5: the CLI child gets the runner's env minus the sealed denylist —
+// a scrub, not the fresh allowlist the sandboxed checks receive.
+const scrubbedCliEnv = (base: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
+  const env = { ...base };
+  for (const key of SCRUBBED_ENV_KEYS) delete env[key];
+  return env;
+};
+
+// The gated run: approval hash, evidence-root identity, runtime and baseline
+// re-verification, an exclusive-create claim, then per case identity-before-
+// spend, one supervised CLI run, declarative grading, the sandboxed contract
+// check for worker-write, and bounded evidence records.
+export async function executeRound(
+  manifestPath: string,
+  approvedSha256: string,
+  options?: Readonly<{ env?: NodeJS.ProcessEnv; signal?: AbortSignal; sandboxExecPath?: string; caseTimeoutMs?: number }>
+): Promise<number> {
+  const abort = options?.signal;
+  const bytes = await readFile(manifestPath).catch(() => null);
+  if (bytes === null || sha256hex(bytes) !== approvedSha256) return 1;
+  const manifest = parseRoundManifest(bytes);
+  if (manifest === null) return 1;
+  // Relocated manifest: the exclusive-create claim only holds at the frozen
+  // evidence root, so the manifest directory's own dev/ino identity is the
+  // gate — a byte-identical copy elsewhere never reaches the claim.
+  const manifestDir = dirname(manifestPath);
+  const dirInfo = await stat(manifestDir).catch(() => null);
+  if (dirInfo === null || dirInfo.dev !== manifest.evidenceRoot.dev || dirInfo.ino !== manifest.evidenceRoot.ino
+    || await realpath(manifestDir).catch(() => "") !== manifest.evidenceRoot.canonical) return 1;
+  if (process.version !== manifest.runtime.node || await realpath(process.execPath) !== manifest.runtime.execPath) return 1;
+  let head: string;
+  try {
+    head = (await runGit("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT })).stdout.trim();
+  } catch {
+    return 1;
+  }
+  if (head !== manifest.head) return 1;
+  for (const file of manifest.baseline.files) {
+    const fileBytes = await readFile(join(REPO_ROOT, file.path)).catch(() => null);
+    if (fileBytes === null || sha256hex(fileBytes) !== file.sha256) return 1;
+  }
+  const ledgerPath = join(manifestDir, "custom-round-evidence.jsonl");
+  const appendEvidence = async (record: Record<string, unknown>): Promise<void> => {
+    await appendFile(ledgerPath, JSON.stringify(record) + "\n");
+  };
+  const claim = await open(ledgerPath, "wx", 0o600).catch(() => null);
+  if (claim === null) return 1;
+  await claim.close();
+  try {
+    await appendEvidence({ phase: "prepared", head, startedAt: new Date().toISOString() });
+  } catch {
+    return 1;
+  }
+
+  const env = scrubbedCliEnv(options?.env ?? process.env);
+  const sandboxExecPath = options?.sandboxExecPath ?? "/usr/bin/sandbox-exec";
+  let failedCases = 0;
+  for (const item of manifest.cases) {
+    if (abort?.aborted) {
+      await appendEvidence({ phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
+      return 130;
+    }
+    // Identity before spend (spec §3.2(1)): canonical path plus dev/ino — the
+    // check that catches same-path replacement — and every pinned case file
+    // still hashes to its frozen bytes.
+    let stopReason: string | null = null;
+    const rootInfo = await stat(item.root.canonical).catch(() => null);
+    if (rootInfo === null || rootInfo.dev !== item.root.dev || rootInfo.ino !== item.root.ino) {
+      stopReason = "root-identity";
+    } else if (await realpath(item.root.canonical).catch(() => "") !== item.root.canonical) {
+      stopReason = "root-identity";
+    } else {
+      for (const file of item.files) {
+        const fileBytes = await readFile(file.path).catch(() => null);
+        if (fileBytes === null || sha256hex(fileBytes) !== file.sha256) {
+          stopReason = "case-files";
+          break;
+        }
+      }
+      const hasRole = (role: string): boolean => item.files.some(file => file.role === role);
+      if ((item.transport === "stdin-file" && !hasRole("taskFile"))
+        || (item.kind === "worker-write" && !hasRole("contract"))) stopReason = "case-files";
+    }
+    if (stopReason !== null) {
+      await appendEvidence({ phase: "stopped", caseId: item.id, reason: stopReason }).catch(() => {});
+      return 1;
+    }
+    if (abort?.aborted) {
+      await appendEvidence({ phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
+      return 130;
+    }
+    await appendEvidence({ phase: "reserved", caseId: item.id }).catch(() => {});
+
+    // Task transport: arg rides the CLI argv; stdin-file redirects the frozen
+    // file into the CLI's stdin through an exec'ing shell (superviseCli wires
+    // the child's stdin to "ignore", so the redirect must happen in-shell).
+    const writeArgs = item.kind === "worker-write" ? ["--write"] : [];
+    const taskFileEntry = item.files.find(file => file.role === "taskFile");
+    const supervision = item.transport === "arg"
+      ? { file: process.execPath, args: [CLI_PATH, "run", "--project", item.root.canonical, ...writeArgs, "--", item.task] }
+      : {
+          file: "/bin/sh",
+          args: ["-c", ["exec", shQuote(process.execPath), shQuote(CLI_PATH), "run",
+            "--project", shQuote(item.root.canonical), ...writeArgs.map(shQuote),
+            "<", shQuote(taskFileEntry === undefined ? "" : taskFileEntry.path)].join(" ")]
+        };
+    const observation = await superviseCli(supervision.file, supervision.args,
+      { env, timeoutMs: options?.caseTimeoutMs ?? CASE_TIMEOUT_MS, signal: abort });
+    if (observation.aborted || abort?.aborted) {
+      await appendEvidence({ phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
+      return 130;
+    }
+    // Budget breaches are integrity stops (spec §3.3): grading never reads a
+    // capped or truncated stream.
+    if (observation.timedOut || observation.outputOverflow) {
+      await appendEvidence({
+        phase: "stopped", caseId: item.id, reason: observation.timedOut ? "timeout" : "output-cap"
+      }).catch(() => {});
+      return 1;
+    }
+
+    const taskHash = sha256hex(item.task);
+    const journal = await readCaseJournal(item.root.canonical, taskHash);
+    let passed = observation.exitCode === 0 && gradeOutput(item.grading.mode, observation.stdout.toString("utf8"), item.grading.expected);
+
+    // The worker-write contract runs inside the frozen sandbox, but only for
+    // a case whose run otherwise passed — a failed run already fails the case,
+    // and asserting a contract against a broken root state would only risk an
+    // integrity stop masking the real failure. An infrastructure outcome in
+    // the check itself is an integrity stop, an assertion failure is an
+    // ordinary case failure (spec §3.2(2)).
+    if (passed && item.kind === "worker-write") {
+      const contractEntry = item.files.find(file => file.role === "contract");
+      const runtimeDir = await mkdtemp(join(tmpdir(), "turnhelm-round-check-"));
+      let contract: CheckOutcome;
+      try {
+        contract = await runSandboxedCheck({
+          sandboxExecPath, runtimeDir, cwd: item.root.canonical,
+          entryScript: contractEntry === undefined ? "" : contractEntry.path,
+          allowReadSubpaths: [item.root.canonical], timeoutMs: CONTRACT_TIMEOUT_MS
+        });
+      } finally {
+        await rm(runtimeDir, { recursive: true, force: true });
+      }
+      if (contract.status === "infrastructure") {
+        await appendEvidence({ phase: "stopped", caseId: item.id, reason: "contract-" + contract.reason }).catch(() => {});
+        return 1;
+      }
+      if (contract.status === "failed") passed = false;
+    }
+
+    if (!passed) failedCases += 1;
+    await appendEvidence({
+      phase: "case", caseId: item.id, outcome: passed ? "pass" : "failed",
+      exitCode: observation.exitCode, durationMs: observation.durationMs, taskSha256: taskHash,
+      backend: journal?.backend ?? null, profileId: journal?.profileId ?? null
+    });
+  }
+  return failedCases === 0 ? 0 : 4;
 }

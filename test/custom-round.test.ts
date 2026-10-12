@@ -6,11 +6,14 @@ import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { prepareRound, runSandboxedCheck } from "./custom-round.js";
+import { executeRound, prepareRound, runSandboxedCheck } from "./custom-round.js";
+import { executableFixture } from "./executable-fixture.js";
 
 const FORGED_MARKER_LINE = "__TURNHELM_CHECK_OUTCOME__" + JSON.stringify({ pass: true });
 
@@ -353,3 +356,315 @@ test("a moved HEAD or an unreadable consumed file is a baseline refusal", async 
   );
   assert.deepEqual(await readdir(scratch.evidenceRoot), []);
 });
+
+// ---------- executeRound: gated execute (spec §3.2(1), §3.4, §3.5) ----------
+
+// The hermetic execute fakes: one local classifier fixture answering a fixed
+// balanced choice, one fake codex that records its own env, counts its real
+// executions (the preflight --version probe exits before the counter), and
+// prints each line of the case root's codex-output.txt as an agent message,
+// and one fake git that dumps the CLI child's own environment — the direct
+// observation of the runner's scrubbed constructor — before answering the
+// work-tree probe.
+const FAKE_CODEX_BODY = `
+const argv = process.argv.slice(2);
+if (argv[0] === "--version") { process.stdout.write("codex-cli 0.160.2\\n"); process.exit(0); }
+if (argv[0] === "exec" && argv[1] === "--help") { process.stdout.write("--json\\n--ephemeral\\n--sandbox <MODE>\\n-\\n"); process.exit(0); }
+const fs = require("node:fs");
+const path = require("node:path");
+fs.writeFileSync(path.join(__dirname, "worker-env.json"), JSON.stringify({
+  PATH: process.env.PATH,
+  CODEX_HOME: process.env.CODEX_HOME,
+  LAYA_API_KEY: Object.hasOwn(process.env, "LAYA_API_KEY"),
+  TYPESAFE_API_KEY: Object.hasOwn(process.env, "TYPESAFE_API_KEY"),
+  OPENAI_API_KEY: Object.hasOwn(process.env, "OPENAI_API_KEY"),
+  TURNHELM_ALLOW_HOSTED_JEV: Object.hasOwn(process.env, "TURNHELM_ALLOW_HOSTED_JEV"),
+  TURNHELM_CONFIG: Object.hasOwn(process.env, "TURNHELM_CONFIG"),
+  BASH_ENV: Object.hasOwn(process.env, "BASH_ENV"),
+  ENV: Object.hasOwn(process.env, "ENV")
+}));
+let task = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => { task += chunk; });
+process.stdin.on("end", () => {
+  fs.appendFileSync(path.join(__dirname, "invocations"), "1");
+  fs.writeFileSync(path.join(process.cwd(), "worker-task.txt"), task);
+  const lines = fs.readFileSync(path.join(process.cwd(), "codex-output.txt"), "utf8").split("\\n").filter(Boolean);
+  for (const line of lines) {
+    process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: line } }) + "\\n");
+  }
+  process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1 } }) + "\\n");
+  process.exit(0);
+});
+`;
+
+const caseConfig = (port: number): string => JSON.stringify({
+  version: 1,
+  routingTimeoutMs: 4000,
+  backends: { laya: { enabled: true, url: `http://127.0.0.1:${port}` }, jev: { enabled: false } },
+  profiles: {
+    fast: { model: "gpt-6-luna", effort: "low" },
+    balanced: { model: "gpt-6.1-sol", effort: "medium" },
+    deep: { model: "gpt-6.1-sol", effort: "high" },
+    frontier: { model: "gpt-6-astra", effort: "high" },
+    frontier_xhigh: { model: "gpt-6-astra", effort: "xhigh" },
+    frontier_max: { model: "gpt-6-astra", effort: "max" }
+  }
+}, null, 2) + "\n";
+
+type ExecuteCaseSpec = {
+  id: string;
+  kind: "worker-readonly" | "worker-write";
+  transport: "arg" | "stdin-file";
+  grading: Record<string, unknown>;
+  outputLines: readonly string[];
+};
+
+const scratchExecuteRound = async (
+  t: TestContext,
+  specs: readonly ExecuteCaseSpec[],
+  envExtra: Record<string, string> = {}
+): Promise<{
+  base: string;
+  evidenceRoot: string;
+  manifestPath: string;
+  approvalSha256: string;
+  roots: string[];
+  taskFile: string;
+  invocations: string;
+  gitEnv: string;
+  workerEnv: string;
+  env: NodeJS.ProcessEnv;
+}> => {
+  const base = await mkdtemp(join(tmpdir(), "turnhelm-exec-"));
+  t.after(() => rm(base, { recursive: true, force: true }).catch(() => {}));
+  const evidenceRoot = join(base, "evidence");
+  await mkdir(evidenceRoot);
+  const server = createServer((request, response) => {
+    request.resume();
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ answers: { route: { type: "choice", choice: "balanced" } } }));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close(error => (error ? reject(error) : resolve())));
+  });
+  const port = (server.address() as AddressInfo).port;
+  const bin = join(base, "bin");
+  await mkdir(bin);
+  const invocations = join(bin, "invocations");
+  const gitEnv = join(base, "git-env.txt");
+  const workerEnv = join(bin, "worker-env.json");
+  await executableFixture(join(bin, "codex"), FAKE_CODEX_BODY, "node");
+  await executableFixture(join(bin, "git"),
+    `/usr/bin/env > '${gitEnv}'\nif [ "$1" = "-C" ]; then echo true; exit 0; fi\nexit 64\n`, "shell");
+  const taskText = "Sum the ledger rows and print the JSON result.";
+  const taskFile = join(base, "task.txt");
+  await writeFile(taskFile, taskText);
+  const contract = join(base, "contract.mjs");
+  await writeFile(contract, "import assert from \"node:assert/strict\";\nassert.equal(1 + 1, 2);\n");
+  const roots: string[] = [];
+  const cases = [];
+  for (const spec of specs) {
+    const root = join(base, spec.id);
+    roots.push(root);
+    await mkdir(join(root, ".turnhelm"), { recursive: true });
+    await writeFile(join(root, ".turnhelm", "config.json"), caseConfig(port));
+    await writeFile(join(root, "codex-output.txt"), spec.outputLines.join("\n") + "\n");
+    cases.push({
+      id: spec.id, kind: spec.kind, scope: spec.id + " scope", task: taskText,
+      transport: spec.transport, root,
+      allowedChanges: spec.kind === "worker-write" ? ["ledger.json"] : [],
+      allowedProfiles: ["fast", "balanced"],
+      grading: spec.grading,
+      files: spec.kind === "worker-write"
+        ? (spec.transport === "stdin-file" ? { contract, taskFile } : { contract })
+        : (spec.transport === "stdin-file" ? { taskFile } : {})
+    });
+  }
+  const rosterPath = join(base, "roster.json");
+  writeFileSync(rosterPath, JSON.stringify({
+    version: 1,
+    head: execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT }).toString().trim(),
+    evidenceRoot,
+    caps: { classifierRequests: 8, workerExecutions: 8 },
+    cases
+  }));
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const prepared = await prepareRound(rosterPath, { sandboxExecPath: fake });
+  const env: NodeJS.ProcessEnv = {
+    PATH: bin,
+    CODEX_HOME: join(base, "codex-home"),
+    LAYA_API_KEY: "TEST_LAYA_SENTINEL",
+    ...envExtra
+  };
+  return {
+    base, evidenceRoot, manifestPath: prepared.manifestPath, approvalSha256: prepared.approvalSha256,
+    roots, taskFile, invocations, gitEnv, workerEnv, env
+  };
+};
+
+const readLedger = async (path: string): Promise<Record<string, unknown>[]> =>
+  (await readFile(path, "utf8")).trim().split("\n").filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>);
+
+const envLines = async (path: string): Promise<Map<string, string>> => new Map(
+  (await readFile(path, "utf8")).trim().split("\n")
+    .map(line => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)] as const));
+
+test("execute runs both transports, grades both cases, and exits zero with an evidence ledger",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      },
+      {
+        id: "case-b", kind: "worker-write", transport: "stdin-file",
+        grading: { mode: "envelope-equal", expected: { count: 1, sum: 2 } },
+        outputLines: ['{"count":1,"sum":2}', "trailer: inert footer"]
+      }
+    ]);
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 0, "an all-pass round exits zero");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    assert.deepEqual(ledger.filter(r => r.phase === "case").map(r => [r.caseId, r.outcome]).sort(),
+      [["case-a", "pass"], ["case-b", "pass"]], "both cases are graded pass in the ledger");
+    assert.ok(!ledger.some(r => r.phase === "stopped"), "no stop record on the happy path");
+    assert.equal(await readFile(round.invocations, "utf8"), "11", "exactly one worker execution per case");
+    for (const root of round.roots) {
+      await readFile(join(root, ".turnhelm", "routes.jsonl"), "utf8");
+      assert.equal(await readFile(join(root, "worker-task.txt"), "utf8"),
+        "Sum the ledger rows and print the JSON result.", "the task text reaches the worker via " + root);
+    }
+  });
+
+test("a same-path replaced root is refused at the identity gate before any launch",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ]);
+    await rm(round.roots[0], { recursive: true, force: true });
+    await mkdir(round.roots[0]);
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 1, "a replaced root is a structural refusal");
+    await assert.rejects(readFile(round.invocations), { code: "ENOENT" }, "zero worker invocations");
+    await assert.rejects(readFile(join(round.roots[0], ".turnhelm", "routes.jsonl")), { code: "ENOENT" },
+      "zero journals written");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    assert.deepEqual(ledger.at(-1), { phase: "stopped", caseId: "case-a", reason: "root-identity" });
+  });
+
+test("a copied manifest outside the evidence root is refused without a claim",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ]);
+    const elsewhere = join(round.base, "elsewhere");
+    await mkdir(elsewhere);
+    const copyPath = join(elsewhere, "custom-round-manifest.json");
+    await copyFile(round.manifestPath, copyPath);
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(copyPath, round.approvalSha256, { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 1, "a relocated manifest never reaches the claim");
+    assert.deepEqual(await readdir(elsewhere), ["custom-round-manifest.json"], "no ledger is created next to the copy");
+    await assert.rejects(readFile(join(round.evidenceRoot, "custom-round-evidence.jsonl")), { code: "ENOENT" },
+      "the canonical evidence root is never claimed by a relocated copy");
+    await assert.rejects(readFile(round.invocations), { code: "ENOENT" });
+  });
+
+test("a second execute of a claimed manifest cannot claim again",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ]);
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    assert.equal(await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake }), 0);
+    assert.equal(await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake }), 1, "the exclusive-create ledger refuses the replay");
+    assert.equal(await readFile(round.invocations, "utf8"), "1", "the replay launches nothing");
+  });
+
+test("a task file mutated after prepare is a hash refusal before any launch",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "stdin-file",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ]);
+    await writeFile(round.taskFile, "Mutated task text that was never approved.");
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 1, "a mutated transport file is a structural refusal");
+    await assert.rejects(readFile(round.invocations), { code: "ENOENT" }, "zero worker invocations");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    assert.deepEqual(ledger.at(-1), { phase: "stopped", caseId: "case-a", reason: "case-files" });
+  });
+
+test("a footer output fails strict-whole-json while envelope-equal tolerates it",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-whole-json", expected: { count: 1, sum: 2 } },
+        outputLines: ['{"count":1,"sum":2}', "trailer: inert footer"]
+      }
+    ]);
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 4, "a completed round with one failed case exits four");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    assert.equal(ledger.find(r => r.phase === "case")?.outcome, "failed",
+      "the strict-only contract rejects the envelope shape");
+    assert.equal(await readFile(round.invocations, "utf8"), "1", "the case did run; grading is the failure");
+  });
+
+test("the CLI child env is scrubbed before it reaches the CLI and again the worker",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ], {
+      TYPESAFE_API_KEY: "TEST_JEV_SENTINEL",
+      OPENAI_API_KEY: "TEST_OPENAI_SENTINEL",
+      TURNHELM_ALLOW_HOSTED_JEV: "1",
+      TURNHELM_CONFIG: "/synthetic/turnhelm.json",
+      BASH_ENV: "/tmp/host-bashenv",
+      ENV: "/tmp/host-shenv"
+    });
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 0);
+    const cli = await envLines(round.gitEnv);
+    for (const key of ["LAYA_API_KEY", "TYPESAFE_API_KEY", "OPENAI_API_KEY", "TURNHELM_ALLOW_HOSTED_JEV",
+      "TURNHELM_CONFIG", "BASH_ENV", "ENV"]) {
+      assert.ok(!cli.has(key), "the CLI child env must not carry " + key);
+    }
+    assert.equal(cli.get("PATH"), round.env.PATH, "the scrubbed env is the runner's env minus the denylist, not a fresh allowlist");
+    const worker = JSON.parse(await readFile(round.workerEnv, "utf8")) as Record<string, unknown>;
+    for (const key of ["LAYA_API_KEY", "TYPESAFE_API_KEY", "OPENAI_API_KEY", "TURNHELM_ALLOW_HOSTED_JEV",
+      "TURNHELM_CONFIG", "BASH_ENV", "ENV"]) {
+      assert.equal(worker[key], false, "the worker env must not carry " + key);
+    }
+    assert.equal(worker.PATH, round.env.PATH);
+  });
