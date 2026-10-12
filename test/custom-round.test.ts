@@ -12,7 +12,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { executeRound, prepareRound, runSandboxedCheck } from "./custom-round.js";
+import { executeRound, nodeReadClosure, prepareRound, runSandboxedCheck } from "./custom-round.js";
 import { executableFixture } from "./executable-fixture.js";
 
 const FORGED_MARKER_LINE = "__TURNHELM_CHECK_OUTCOME__" + JSON.stringify({ pass: true });
@@ -98,6 +98,78 @@ test("a forged marker mid-run never outranks the wrapper's final marker", async 
     sandboxExecPath: fake, runtimeDir: dirs.runtimeDir, cwd: dirs.caseRoot,
     entryScript: entry, allowReadSubpaths: [dirs.entries], timeoutMs: 10_000
   }), { status: "failed" }, "the final marker is the wrapper's pass:false, not the forged line");
+});
+
+test("a forged marker followed by an exit is infrastructure, never a pass", async t => {
+  const dirs = await scratch(t);
+  const fake = await writeFakeSandboxExec(t, 'shift 2\nexec "$@"');
+  const entry = await writeEntry(dirs.entries, "forged-then-exits.mjs",
+    `console.log(${JSON.stringify(FORGED_MARKER_LINE)});\nprocess.exit(9);\n`);
+  assert.deepEqual(await runSandboxedCheck({
+    sandboxExecPath: fake, runtimeDir: dirs.runtimeDir, cwd: dirs.caseRoot,
+    entryScript: entry, allowReadSubpaths: [dirs.entries], timeoutMs: 10_000
+  }), { status: "infrastructure", reason: "missing-outcome" },
+  "stdout is not an outcome channel: an entry that dies before the wrapper settles has no grade");
+});
+
+test("a contract that cannot load is infrastructure, not a failed assertion", async t => {
+  const dirs = await scratch(t);
+  const fake = await writeFakeSandboxExec(t, 'shift 2\nexec "$@"');
+  const syntaxError = await writeEntry(dirs.entries, "syntax-error.mjs", "const (\n");
+  const missingModule = await writeEntry(dirs.entries, "missing-module.mjs", "import \"./absent.mjs\";\n");
+  for (const [what, entry] of [["a syntax error", syntaxError], ["an unresolved import", missingModule]] as const) {
+    assert.deepEqual(await runSandboxedCheck({
+      sandboxExecPath: fake, runtimeDir: dirs.runtimeDir, cwd: dirs.caseRoot,
+      entryScript: entry, allowReadSubpaths: [dirs.entries], timeoutMs: 10_000
+    }), { status: "infrastructure", reason: "entry-load" },
+    what + " means the contract never ran — broken machinery, not a failed check");
+  }
+});
+
+test("settlement stays bounded even when a descendant holds the outcome pipe open", async t => {
+  const dirs = await scratch(t);
+  const fake = await writeFakeSandboxExec(t, "trap '' TERM\nshift 2\n/bin/echo output\nsleep 5");
+  const startedAt = Date.now();
+  assert.deepEqual(await runSandboxedCheck({
+    sandboxExecPath: fake, runtimeDir: dirs.runtimeDir, cwd: dirs.caseRoot,
+    entryScript: await writeEntry(dirs.entries, "completes.mjs", "export const checked = true;\n"),
+    allowReadSubpaths: [dirs.entries], timeoutMs: 300
+  }), { status: "infrastructure", reason: "timeout" });
+  const elapsed = Date.now() - startedAt;
+  assert.ok(elapsed < 4500, "SIGKILL plus a bounded grace settles the check, saw " + elapsed + "ms");
+});
+
+test("the node read closure never climbs out of the installation prefix", async () => {
+  const nvm = nodeReadClosure("/Users/alice/.nvm/versions/node/v24.5.0/bin/node");
+  assert.ok(nvm.length > 0 && nvm.every(path => path.startsWith("/Users/alice/.nvm/")),
+    "an nvm node grants only inside ~/.nvm, never the home directory: " + JSON.stringify(nvm));
+  const downloaded = nodeReadClosure("/Users/alice/Downloads/node-v24/bin/node");
+  assert.ok(downloaded.every(path => path.startsWith("/Users/alice/Downloads/node-v24")),
+    "a home-downloaded node grants only its own extracted tree: " + JSON.stringify(downloaded));
+  const cellar = nodeReadClosure("/opt/homebrew/Cellar/node/24.5.0/bin/node");
+  assert.ok(cellar.some(path => path.endsWith("/Cellar")) && !cellar.includes("/opt"),
+    "a homebrew node's dyld closure stays inside the brew layout: " + JSON.stringify(cellar));
+  assert.ok(nodeReadClosure("/usr/local/bin/node").includes("/usr/local"),
+    "the conventional /usr/local prefix is still granted in full");
+});
+
+test("an aborted signal settles the check as aborted without waiting out its timeout", async t => {
+  const dirs = await scratch(t);
+  const fake = await writeFakeSandboxExec(t, 'shift 2\nexec "$@"');
+  // A bare never-settling top-level await lets node's loop drain and exit 13
+  // (unsettled TLA); a live interval keeps the check genuinely open so the
+  // abort — not an early close — is what settles it.
+  const entry = await writeEntry(dirs.entries, "stalls.mjs", "setInterval(() => {}, 60_000);\nawait new Promise(() => {});\n");
+  const controller = new AbortController();
+  const pending = runSandboxedCheck({
+    sandboxExecPath: fake, runtimeDir: dirs.runtimeDir, cwd: dirs.caseRoot,
+    entryScript: entry, allowReadSubpaths: [dirs.entries], timeoutMs: 20_000, signal: controller.signal
+  });
+  await new Promise(resolve => setTimeout(resolve, 250));
+  controller.abort();
+  const abortedAt = Date.now();
+  assert.deepEqual(await pending, { status: "infrastructure", reason: "aborted" });
+  assert.ok(Date.now() - abortedAt < 2000, "an aborted check settles now, not at its own timeout");
 });
 
 test("the check child receives the fresh allowlist env, never the runner's", async t => {
@@ -191,7 +263,7 @@ const REPO_ROOT = join(import.meta.dirname, "..", "..");
 // sentinel preflight (the one check a real sandbox enforces and a fake must
 // act out), and a liar that grades everything failed.
 const PREPARE_PASSTHROUGH = 'shift 2\ncase "$*" in *sentinel*) exit 9;; *) exec "$@";; esac';
-const PREPARE_ALL_FAIL = `shift 2\nprintf '%s\\n' '__TURNHELM_CHECK_OUTCOME__{"pass":false}'`;
+const PREPARE_ALL_FAIL = `shift 2\nprintf '%s\\n' '__TURNHELM_CHECK_OUTCOME__{"pass":false}' >&3`;
 
 type ScratchRoster = {
   rosterPath: string;

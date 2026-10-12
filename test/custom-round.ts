@@ -1,16 +1,17 @@
 // Runner-owned sandboxed check launcher for custom rounds (spec §3.2(2)):
 // contract and oracle checks run under the frozen sandbox policy through a
-// wrapper whose single marked outcome line replaces exit-code and stderr
-// inference. Everything with a failure mode here is runner-owned — the round
-// input never supplies code on this path.
+// wrapper that reports on a runner-provided outcome channel the checked code
+// cannot print to. Everything with a failure mode here is runner-owned — the
+// round input never supplies code on this path.
 import { execFile, spawn } from "node:child_process";
 import { deepStrictEqual } from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import { appendFile, mkdir, mkdtemp, open, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import type { Readable } from "node:stream";
 import { PROFILE_IDS } from "../src/config.js";
 import { validateTask } from "../src/task.js";
 import { envelopePayload, oracleSandboxPolicy, superviseCli } from "./live-acceptance.js";
@@ -18,26 +19,62 @@ import { envelopePayload, oracleSandboxPolicy, superviseCli } from "./live-accep
 export type CheckOutcome =
   | { status: "pass" }
   | { status: "failed" }
-  | { status: "infrastructure"; reason: "spawn-error" | "signal" | "timeout" | "missing-outcome" };
+  | { status: "infrastructure"; reason: "spawn-error" | "signal" | "timeout" | "missing-outcome" | "entry-load" | "aborted" };
 
 // The wrapper the runner ships into every check: importing the entry IS the
 // check — a thrown error is the assertion failure — and only this wrapper
-// prints the marked line, exiting immediately after so no pending entry timer
-// can print a forged marker behind it.
-export const CHECK_WRAPPER_SOURCE = `import { pathToFileURL } from "node:url";
+// writes the outcome, through fd 3: a pipe the runner owns and the entry has
+// no ordinary way to print to, so a forged marker on stdout can never
+// masquerade as the wrapper's record (spec §3.2(2): a runner-provided outcome
+// path, not stdout inference). A module that fails to even load — syntax
+// error or unresolved import — is broken machinery rather than a failed
+// assertion, so it records a load error the launcher grades infrastructure.
+// Contracts are runner-authored trusted code; an entry deliberately throwing
+// a SyntaxError instance to pose as a parse failure is out of scope.
+export const CHECK_WRAPPER_SOURCE = `import { writeSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 const [entry] = process.argv.slice(2);
+let record;
 try {
   await import(pathToFileURL(entry).href);
-  process.stdout.write("__TURNHELM_CHECK_OUTCOME__" + JSON.stringify({ pass: true }) + "\\n");
-} catch {
-  process.stdout.write("__TURNHELM_CHECK_OUTCOME__" + JSON.stringify({ pass: false }) + "\\n");
+  record = { pass: true };
+} catch (error) {
+  const load = error instanceof SyntaxError
+    || (typeof error?.code === "string" && error.code.startsWith("ERR_MODULE_"));
+  record = load ? { pass: false, load: true } : { pass: false };
 }
+writeSync(3, "__TURNHELM_CHECK_OUTCOME__" + JSON.stringify(record) + "\\n");
 process.exit(0);
 `;
 
 const CHECK_MARKER = "__TURNHELM_CHECK_OUTCOME__";
-const STDOUT_CAP_BYTES = 1 << 20;
+const OUTCOME_CAP_BYTES = 8192;
 const TERM_GRACE_MS = 2000;
+const SETTLEMENT_GRACE_MS = 1000;
+
+// The node read closure must never climb out of the node installation
+// prefix: a blind ancestor walk from a home-resident node (~/.nvm,
+// ~/Downloads) would hand the sandbox every credential under the user's home
+// directory. Climbing therefore stops at the first ancestor whose name is
+// not an installation-layout name — bin/lib/libexec/Cellar/versions/
+// node-*/v24.5.0/homebrew/local and friends — so an nvm node grants only
+// inside ~/.nvm, a downloaded tarball only its own extracted tree, and a
+// homebrew node the brew layout root. ponytail: an exotic prefix with
+// non-layout names (volta's ~/.volta) adds itself via allowReadSubpaths.
+const INSTALL_LAYOUT_NAMES = new Set(["bin", "sbin", "lib", "lib64", "libexec", "share",
+  "include", "etc", "common", "doc", "docs", "man", "Cellar", "versions", "node_modules",
+  "local", "homebrew", "opt"]);
+const isInstallLayoutName = (name: string): boolean =>
+  INSTALL_LAYOUT_NAMES.has(name) || /^v?\d+(\.\d+)*$/.test(name) || name.startsWith("node");
+
+export const nodeReadClosure = (start: string): string[] => {
+  const granted: string[] = [];
+  for (let path = dirname(start), depth = 0; depth < 5 && path !== dirname(path); path = dirname(path), depth++) {
+    if (depth > 0 && !isInstallLayoutName(basename(path))) break;
+    granted.push(path);
+  }
+  return granted;
+};
 
 export async function runSandboxedCheck(options: {
   sandboxExecPath: string;
@@ -46,6 +83,7 @@ export async function runSandboxedCheck(options: {
   entryScript: string;
   allowReadSubpaths: readonly string[];
   timeoutMs: number;
+  signal?: AbortSignal;
 }): Promise<CheckOutcome> {
   const nonce = randomBytes(12).toString("hex");
   const profilePath = join(options.runtimeDir, `check-profile-${nonce}.sb`);
@@ -57,20 +95,13 @@ export async function runSandboxedCheck(options: {
   // cannot even boot without its cwd (the v0.3.0 EPERM uv_cwd crash shape),
   // and a package-manager node's dyld closure spans its whole install prefix
   // (homebrew resolves into a Cellar tree whose dylibs live in sibling formula
-  // dirs like /opt/homebrew/opt/llhttp) — reachable only by walking ancestors,
-  // because process.execPath may already be the realpath, not the shim.
-  // ponytail: ancestor depth 5 covers homebrew Cellar/<name>/<ver>/bin/node
-  // and nvm versions/node/<ver>/bin/node; a deeper layout adds its prefix via
-  // allowReadSubpaths. SBPL subpaths match literally, so every readable path
-  // is canonicalized first — a symlinked prefix (/tmp, /var) would otherwise
-  // never match its kernel-resolved form (/private/tmp, /private/var).
+  // dirs like /opt/homebrew/opt/llhttp). SBPL subpaths match literally, so
+  // every readable path is canonicalized first — a symlinked prefix (/tmp,
+  // /var) would otherwise never match its kernel-resolved form
+  // (/private/tmp, /private/var).
   const nodeReal = await realpath(process.execPath);
   const nodeClosure: string[] = [];
-  for (const start of new Set([process.execPath, nodeReal])) {
-    for (let path = dirname(start), depth = 0; depth < 5 && path !== dirname(path); path = dirname(path), depth++) {
-      nodeClosure.push(path);
-    }
-  }
+  for (const start of new Set([process.execPath, nodeReal])) nodeClosure.push(...nodeReadClosure(start));
   await writeFile(profilePath, oracleSandboxPolicy({
     runtimeDir: await realpath(options.runtimeDir),
     allowReadSubpaths: await Promise.all([...new Set([
@@ -95,66 +126,95 @@ export async function runSandboxedCheck(options: {
       };
       const child = spawn(options.sandboxExecPath,
         ["-f", profilePath, process.execPath, wrapperPath, options.entryScript],
-        { cwd: options.cwd, env, stdio: ["ignore", "pipe", "pipe"] });
-      const stdout: Buffer[] = [];
-      let stdoutBytes = 0;
-      let stdoutCapped = false;
+        { cwd: options.cwd, env, stdio: ["ignore", "ignore", "ignore", "pipe"] });
+      const outcome = child.stdio[3] as Readable | null;
+      let outcomeBytes = 0;
+      let outcomeLine = "";
       let spawnErrored = false;
       let timedOut = false;
+      let aborted = false;
       let resolved = false;
-      const timers: NodeJS.Timeout[] = [];
-      const finish = (outcome: CheckOutcome): void => {
+      const onAbort = (): void => {
+        aborted = true;
+        killLater();
+        finish({ status: "infrastructure", reason: "aborted" });
+      };
+      const finish = (result: CheckOutcome): void => {
         if (resolved) return;
         resolved = true;
-        for (const timer of timers) clearTimeout(timer);
-        resolve(outcome);
+        options.signal?.removeEventListener("abort", onAbort);
+        outcome?.destroy();
+        resolve(result);
       };
-      // An explicit outcome record is graded normally; a spawn error, death
-      // signal, timeout, or any exit without a usable final marker is an
+      // The kill ladder is deliberately never cancelled by finish: a child
+      // that already settled its outcome still gets its TERM→KILL cleanup.
+      const killLater = (): void => {
+        child.kill("SIGTERM");
+        setTimeout(() => child.kill("SIGKILL"), TERM_GRACE_MS).unref();
+      };
+      // An explicit outcome record is graded normally; a spawn error, abort,
+      // death signal, timeout, or any close without a usable record is an
       // integrity stop. Nothing is inferred from exit code alone.
-      const classify = (signal: NodeJS.Signals | null): CheckOutcome => {
-        if (spawnErrored) return { status: "infrastructure", reason: "spawn-error" };
-        if (timedOut) return { status: "infrastructure", reason: "timeout" };
-        if (signal !== null) return { status: "infrastructure", reason: "signal" };
-        // Only the final marked line counts: a forged marker printed mid-run
-        // cannot outrank the wrapper's last word. A capped buffer cannot
-        // prove which marker was final, so it fails closed.
-        if (stdoutCapped) return { status: "infrastructure", reason: "missing-outcome" };
-        const last = stdout.map(chunk => chunk.toString("utf8")).join("")
-          .split("\n").filter(line => line.startsWith(CHECK_MARKER)).at(-1);
-        if (last === undefined) return { status: "infrastructure", reason: "missing-outcome" };
+      const classifyRecord = (line: string): CheckOutcome => {
+        if (!line.startsWith(CHECK_MARKER)) return { status: "infrastructure", reason: "missing-outcome" };
         try {
-          const parsed: unknown = JSON.parse(last.slice(CHECK_MARKER.length));
+          const parsed: unknown = JSON.parse(line.slice(CHECK_MARKER.length));
           if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("shape");
           const record = parsed as Record<string, unknown>;
-          if (Object.keys(record).length !== 1 || (record.pass !== true && record.pass !== false)) {
-            throw new Error("shape");
+          const keys = Object.keys(record).sort();
+          if (keys.length === 1 && keys[0] === "pass" && (record.pass === true || record.pass === false)) {
+            return record.pass ? { status: "pass" } : { status: "failed" };
           }
-          return record.pass ? { status: "pass" } : { status: "failed" };
+          if (keys.length === 2 && keys[0] === "load" && keys[1] === "pass"
+            && record.load === true && record.pass === false) {
+            return { status: "infrastructure", reason: "entry-load" };
+          }
+          throw new Error("shape");
         } catch {
           return { status: "infrastructure", reason: "missing-outcome" };
         }
       };
-      child.stdout.on("data", (chunk: Buffer) => {
-        stdoutBytes += chunk.length;
-        if (stdoutBytes > STDOUT_CAP_BYTES) {
-          stdoutCapped = true;
+      outcome?.on("data", (chunk: Buffer) => {
+        outcomeBytes += chunk.length;
+        // A capped record cannot be parsed honestly, so it fails closed.
+        if (outcomeBytes > OUTCOME_CAP_BYTES) {
+          finish({ status: "infrastructure", reason: "missing-outcome" });
+          killLater();
           return;
         }
-        stdout.push(chunk);
+        outcomeLine += chunk.toString("utf8");
+        const newline = outcomeLine.indexOf("\n");
+        if (newline >= 0) finish(classifyRecord(outcomeLine.slice(0, newline)));
       });
-      // Stderr is drained and discarded: classification never reads it.
-      child.stderr.on("data", () => {});
+      outcome?.on("error", () => {});
       child.on("error", () => {
         spawnErrored = true;
         finish({ status: "infrastructure", reason: "spawn-error" });
       });
-      child.on("close", (_code, signal) => finish(classify(signal)));
-      timers.push(setTimeout(() => {
+      child.on("close", (_code, signal) => {
+        if (resolved) return;
+        if (spawnErrored) return finish({ status: "infrastructure", reason: "spawn-error" });
+        if (aborted) return finish({ status: "infrastructure", reason: "aborted" });
+        if (timedOut) return finish({ status: "infrastructure", reason: "timeout" });
+        if (signal !== null) return finish({ status: "infrastructure", reason: "signal" });
+        finish({ status: "infrastructure", reason: "missing-outcome" });
+      });
+      setTimeout(() => {
         timedOut = true;
-        child.kill("SIGTERM");
-        timers.push(setTimeout(() => child.kill("SIGKILL"), TERM_GRACE_MS));
-      }, options.timeoutMs));
+        killLater();
+      }, options.timeoutMs).unref();
+      // Bounded settlement: a descendant inheriting fd 3 can hold the pipe
+      // open past every kill, so the check settles by wall clock, not close.
+      setTimeout(() => {
+        if (resolved) return;
+        finish(aborted
+          ? { status: "infrastructure", reason: "aborted" }
+          : { status: "infrastructure", reason: timedOut ? "timeout" : "missing-outcome" });
+      }, options.timeoutMs + TERM_GRACE_MS + SETTLEMENT_GRACE_MS).unref();
+      if (options.signal !== undefined) {
+        if (options.signal.aborted) onAbort();
+        else options.signal.addEventListener("abort", onAbort, { once: true });
+      }
     });
   } finally {
     await rm(profilePath, { force: true });
