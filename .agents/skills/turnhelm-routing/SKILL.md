@@ -132,9 +132,20 @@ calibration-holdout ≤ 12 each; workers: laya ≤ 7, jev ≤ 1, dual ≤ 2, and
 calibration suites 0). Each manifest covers exactly one suite, claims once —
 never replayed or resumed — and the
 evidence journal stores bounded fixed fields only, degrading unknown receipt
-data to `invalid`/`unknown`. Exit `3` means a complete calibration roster with
-a band-policy mismatch: the roster ran all 12 calls and only the exit code
-plus the terminal checks prove completion, not a visible `completed` record.
+data to `invalid`/`unknown`, with one deliberate exception: each judged case
+retains its `oracleInput` — the exact oracle-judged stdout or summary bytes,
+bounded to 64 KiB, private to the claimed run; that is raw-content retention,
+not secret sanitization. Observed records also carry a whitelisted
+`workerUsage` projection whose scope is unverified. Exit `3` means a complete
+calibration roster with a band-policy mismatch; exit `4` means a complete
+worker roster with at least one engineering failure. A task-output failure
+(wrong or missing output, every integrity check true) fails the case and the
+approved roster continues; any integrity failure — including a replaced
+consumer root, caught by `root-identity` — stops immediately. A `completed`
+record plus the exit code is a convenience status only: acceptance reconciles
+case IDs, verdicts, counts, the absence of a terminal `stopped`, and the
+process exit — the 2026-10-12 validation findings stay open until a fresh
+live run passes them.
 Cancelling signals only the owned CLI child
 (SIGINT, then SIGTERM after a fixed grace); left-behind descendants are not
 scanned or killed, and a child that still never closes stops the round as
