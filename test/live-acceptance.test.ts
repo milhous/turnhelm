@@ -714,8 +714,10 @@ const HOSTILE_FAILURE = "upstream rate limit exceeded while password=p@ss.word! 
 // fail, hang, emit-then-hang (one decoded event, then idles until cancelled),
 // wrong-output, no-output, oversize, mutate-input, summary-invalid,
 // hostile-answer, usage-full, usage-mixed, usage-invalid, mixed-verdict (write
-// cases pass, every other case fails the oracle alone), swap-root (replaces the
-// consumer root with a same-path copy, then answers correctly).
+// cases pass, every other case fails the oracle alone), absent-then-correct
+// (the absent-* write case writes no summary, the rest write correct ones),
+// swap-root (replaces the consumer root with a same-path copy, then answers
+// correctly).
 const FAKE_CODEX = `#!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
@@ -876,6 +878,18 @@ process.stdin.on("end", () => {
     if (!args.includes("workspace-write")) {
       emit({ type: "item.completed", item: { type: "agent_message", text: '{"count":5,"sum":18}' } });
       emit({ type: "turn.completed" });
+      process.exit(0);
+    }
+    fs.mkdirSync(path.join(process.cwd(), "out"), { recursive: true });
+    fs.writeFileSync(path.join(process.cwd(), "out", "summary.json"), answer);
+  }
+  if (mode === "absent-then-correct") {
+    // Per-case control by consumer id (both cases are write cases, so the
+    // sandbox flag cannot distinguish them): the absent case completes cleanly
+    // but writes no summary; every other case writes the correct one.
+    if (path.basename(process.cwd()).startsWith("absent")) {
+      emit({ type: "item.completed", item: { type: "agent_message", text: answer } });
+      emit({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 5 } });
       process.exit(0);
     }
     fs.mkdirSync(path.join(process.cwd(), "out"), { recursive: true });
@@ -1575,6 +1589,37 @@ test("oracle-only failures continue the roster to a failed completion", async t 
   assert.ok(doubleEvidence.filter(line => line.phase === "verified")
     .every(line => line.oracleInput), "every continued failure retains its input");
   assert.deepEqual(doubleEvidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 2 });
+});
+
+test("an absent summary fails its oracle and continues the write roster", async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+
+  // TH-1 pin: both cases are worker-write; the first completes cleanly but
+  // writes no out/summary.json. The absent file fails the oracle alone, the
+  // roster continues, and the second write case still runs and passes.
+  const run = await buildRun(t, "laya", classifier.url, [
+    { id: "absent-write", kind: "worker-write" },
+    { id: "correct-write", kind: "worker-write" }
+  ]);
+  assert.equal(await executeAcceptance(run.manifestPath, run.sha256,
+    { env: workerEnv(fakeBin, "absent-then-correct") }), 4);
+  const evidence = await readEvidence(run.runRoot);
+  assert.deepEqual(evidence.filter(line => line.phase === "reserved"),
+    [
+      { phase: "reserved", caseId: "absent-write", worker: 1, backends: ["laya"] },
+      { phase: "reserved", caseId: "correct-write", worker: 1, backends: ["laya"] }
+    ], "both write cases spawn their worker");
+  assert.ok(!evidence.some(line => line.phase === "stopped"));
+  assert.deepEqual(evidence.filter(line => line.phase === "verified").map(line => line.verdict),
+    ["fail", "pass"]);
+  const absent = evidence.find(line => line.phase === "verified" && line.caseId === "absent-write");
+  assert.deepEqual(absent?.oracleInput, { source: "summary-file", text: null, bytes: null },
+    "an absent summary is evidence of absence, not a fabricated payload");
+  assert.equal((absent?.checks as Record<string, unknown>).oracle, false);
+  assert.equal((evidence.find(line => line.phase === "verified" && line.caseId === "correct-write")
+    ?.checks as Record<string, unknown>).oracle, true);
+  assert.deepEqual(evidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 1 });
 });
 
 test("integrity failures still stop even beside a failing oracle", async t => {
