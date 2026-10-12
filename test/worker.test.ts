@@ -38,6 +38,7 @@ fs.writeFileSync(path.join(here, "cwd.txt"), process.cwd());
 fs.writeFileSync(path.join(here, "env.json"), JSON.stringify({
   PATH: process.env.PATH,
   CODEX_HOME: process.env.CODEX_HOME,
+  ZDOTDIR: process.env.ZDOTDIR,
   TURNHELM_MANAGED_CHILD: process.env.TURNHELM_MANAGED_CHILD,
   LAYA_API_KEY: Object.hasOwn(process.env, "LAYA_API_KEY"),
   TYPESAFE_API_KEY: Object.hasOwn(process.env, "TYPESAFE_API_KEY"),
@@ -71,6 +72,7 @@ type WorkerScenario = {
   taskRepeat?: number;
   profileId?: ProfileId;
   write?: boolean;
+  parentEnv?: Record<string, string>;
   abortBeforeCall?: boolean;
   gate?: Gate;
   output?: OutputMode;
@@ -361,6 +363,8 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
   `;
   const run = await execute(process.execPath, ["--input-type=module", "--eval", inner], {
     env: {
+      // Parent additions may only introduce keys; the fixed entries below stay authoritative.
+      ...(scenario.parentEnv ?? {}),
       PATH: directory,
       CODEX_HOME: join(directory, "codex-home"),
       LAYA_API_KEY: "TEST_LAYA_SENTINEL",
@@ -442,8 +446,10 @@ test("subprocess environment strips classifier credentials while preserving Code
 });
 
 test("worker environment additionally marks the managed child", () => {
-  const env = workerEnvironment({ TYPESAFE_API_KEY: "TEST_JEV_SENTINEL", CODEX_HOME: "/tmp/codex" });
+  const env = workerEnvironment({ TYPESAFE_API_KEY: "TEST_JEV_SENTINEL", CODEX_HOME: "/tmp/codex" }, "/consumer/root");
   assert.equal(env.TURNHELM_MANAGED_CHILD, "1");
+  assert.equal(env.ZDOTDIR, join("/consumer/root", ".turnhelm"),
+    "the managed child's zsh lookup redirects to the turnhelm-owned root");
   assert.equal(env.TYPESAFE_API_KEY, undefined);
   assert.equal(env.CODEX_HOME, "/tmp/codex");
 });
@@ -460,12 +466,49 @@ finish(() => emit({ type: "turn.completed" }));
   assert.deepEqual(JSON.parse(await fakeFile(directory, "env.json")), {
     PATH: directory,
     CODEX_HOME: join(directory, "codex-home"),
+    ZDOTDIR: join(directory, "root", ".turnhelm"),
     TURNHELM_MANAGED_CHILD: "1",
     LAYA_API_KEY: false,
     TYPESAFE_API_KEY: false,
     TURNHELM_ALLOW_HOSTED_JEV: false,
     TURNHELM_CONFIG: false
   });
+});
+
+test("worker descendant zsh never sources host startup files", { timeout: 30_000 }, async t => {
+  // The observed leak path: zsh sources $ZDOTDIR/.zshenv even non-interactively
+  // and falls back to HOME, so a worker's zsh descendant re-exported a stripped
+  // key from the host .zshenv. An owned fake home pins the mechanism without
+  // touching or reading any real startup file.
+  const home = await mkdtemp(join(tmpdir(), "turnhelm-zshhome-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  // The availability probe must not execute host startup files either: point its
+  // zsh lookup at the still-empty owned home (a missing file there is a skip).
+  const probe = await execute("/bin/zsh", ["-c", "print -r -- ok"],
+    { env: { PATH: process.env.PATH, ZDOTDIR: home } }).catch(error => error);
+  if ((probe as NodeJS.ErrnoException).code === "ENOENT") t.skip("/bin/zsh is not available");
+  await writeFile(join(home, ".zshenv"), "export TURNHELM_TEST_ZSHENV_MARKER=leaked\n");
+  const { recorded, directory } = await runWorker(t, {
+    parentEnv: { HOME: home },
+    script: `
+finish(() => {
+  const spawnSync = require("node:child_process").spawnSync;
+  const zsh = spawnSync("/bin/zsh", ["-c", "print -r -- \\$TURNHELM_TEST_ZSHENV_MARKER"], { encoding: "utf8" });
+  fs.writeFileSync(path.join(here, "zshenv-marker.txt"), JSON.stringify({
+    status: zsh.error ? "error:" + zsh.error.code : zsh.status,
+    stdout: String(zsh.stdout ?? "")
+  }));
+  emit({ type: "turn.completed" });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  const evidence = JSON.parse(await fakeFile(directory, "zshenv-marker.txt")) as { status: number | string; stdout: string };
+  // A zsh that never ran proves nothing: the descendant probe must exit cleanly
+  // for the leak check below to be evidence of isolation.
+  assert.equal(evidence.status, 0, "the descendant zsh must actually execute for this regression to mean anything");
+  assert.ok(!evidence.stdout.includes("leaked"),
+    "a worker descendant zsh must not source the host .zshenv, saw: " + JSON.stringify(evidence.stdout));
 });
 
 test("fake worker never forwards an unrelated synthetic parent canary", { timeout: 30_000 }, async () => {

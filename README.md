@@ -239,10 +239,13 @@ than opened.
   `TURNHELM_MANAGED_CHILD=1`; `run` inside such a session is refused.
 - **Initial process environment only.** `LAYA_API_KEY`,
   `TYPESAFE_API_KEY`, `TURNHELM_ALLOW_HOSTED_JEV`, and `TURNHELM_CONFIG`
-  are removed from the environment passed when spawning the Codex worker.
-  This is not host filesystem secret isolation: a worker's later shell can
-  reload keys from startup files. Existing validation observed `.zshenv`
-  reintroducing the Jev key. Keep secrets out of tasks, logs, diffs and config;
+  are removed from the environment passed when spawning the Codex worker,
+  and `ZDOTDIR` is redirected to the managed `.turnhelm` root so a zsh
+  descendant no longer sources the host `~/.zshenv` that reintroduced the
+  Jev key (a missing startup file there is zsh's skip state). This is still
+  not host filesystem secret isolation: other shells' startup files, absolute
+  reads of host files, or a key already exported by another mechanism remain
+  outside this boundary. Keep secrets out of tasks, logs, diffs and config;
   do not read key values or change host authentication/startup files to make
   a check pass.
 - **Bounded child output.** Raw worker stderr and arbitrary error text never

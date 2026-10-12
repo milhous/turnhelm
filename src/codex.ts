@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { join } from "node:path";
 import { decodeWorkerEvent, MAX_EVENT_BYTES, type WorkerEvent, type WorkerUsage } from "./codex-events.js";
 import type { TaskDecision } from "./route.js";
 
@@ -30,8 +31,16 @@ export function subprocessEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv
   return copy;
 }
 
-export function workerEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return { ...subprocessEnvironment(env), TURNHELM_MANAGED_CHILD: "1" };
+export function workerEnvironment(env: NodeJS.ProcessEnv, root: string): NodeJS.ProcessEnv {
+  return {
+    ...subprocessEnvironment(env),
+    TURNHELM_MANAGED_CHILD: "1",
+    // zsh sources $ZDOTDIR/.zshenv even non-interactively, falling back to HOME,
+    // which let host startup files re-export stripped keys into worker
+    // descendants. Pointing ZDOTDIR at the managed root keeps those files out;
+    // a missing startup file there is zsh's skip state.
+    ZDOTDIR: join(root, ".turnhelm")
+  };
 }
 
 const TERM_GRACE_MS = 1000;
@@ -68,7 +77,7 @@ export function executeWorker(
       cwd: options.root,
       detached: true,
       stdio: ["pipe", "pipe", "pipe"],
-      env: workerEnvironment(options.env)
+      env: workerEnvironment(options.env, options.root)
     });
     const output = options.output;
     const diagnostics = options.diagnostics ?? process.stderr;
