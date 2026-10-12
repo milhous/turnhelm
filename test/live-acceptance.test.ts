@@ -710,7 +710,8 @@ const HOSTILE_ANSWER = '"}\\n before {"count":4,"sum":17} after "'
 const HOSTILE_FAILURE = "upstream rate limit exceeded while password=p@ss.word! stayed live for the caller";
 
 // Modes: ok-readonly, ok-write, write-readonly (writes despite read-only sandbox),
-// fail, hang, wrong-output, no-output, oversize, mutate-input, summary-invalid,
+// fail, hang, emit-then-hang (one decoded event, then idles until cancelled),
+// wrong-output, no-output, oversize, mutate-input, summary-invalid,
 // hostile-answer, usage-full, usage-mixed, usage-invalid, mixed-verdict (write
 // cases pass, every other case fails the oracle alone), swap-root (replaces the
 // consumer root with a same-path copy, then answers correctly).
@@ -738,6 +739,14 @@ process.stdin.on("end", () => {
     process.exit(9);
   }
   if (mode === "hang") { setInterval(() => {}, 3600); return; }
+  if (mode === "emit-then-hang") {
+    // One decoded event, then a gate file once it has flushed, then idle: the
+    // caller aborts after the gate, cancelling a run that already decoded.
+    emit({ type: "item.completed", item: { type: "agent_message", text: "partial" } });
+    setTimeout(() => fs.writeFileSync(process.env.TURNHELM_TEST_GATE_FILE, "1"), 150);
+    setInterval(() => {}, 3600);
+    return;
+  }
   if (mode === "wrong-output") {
     emit({ type: "item.completed", item: { type: "agent_message", text: "hello" } });
     emit({ type: "turn.completed" });
@@ -1395,6 +1404,79 @@ test("the sanitizer projects worker usage without throwing", async t => {
   const last = (await readFile(run.evidencePath, "utf8")).trim().split("\n")
     .map(line => JSON.parse(line) as Record<string, unknown>).at(-1);
   assert.ok(last && !("workerUsage" in last), "no worker usage is invented where none was observed");
+});
+
+test("observed records carry the decoded-event progress projection", async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  const run = await buildRun(t, "laya", classifier.url, [{ id: "progress-completed", kind: "worker-readonly" }]);
+  await executeAcceptance(run.manifestPath, run.sha256, { env: workerEnv(fakeBin, "ok-readonly") });
+  const observed = (await readEvidence(run.runRoot)).find(line => line.phase === "observed");
+  const progress = observed?.workerProgress as { events: number; lastEventAgeMs?: number } | undefined;
+  assert.ok(progress, "a completed worker carries the progress projection");
+  assert.equal(progress.events, 2, "the fake stream decodes one message plus one completion");
+  assert.equal(typeof progress.lastEventAgeMs, "number",
+    "a positive count carries the age from the last decode to settlement");
+});
+
+test("a cancelled mid-stream worker keeps its decoded events in the observed record", async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  const run = await buildRun(t, "laya", classifier.url, [{ id: "progress-cancelled", kind: "worker-readonly" }]);
+  const gate = join(run.runRoot, "emit-gate");
+  const controller = new AbortController();
+  const executed = executeAcceptance(run.manifestPath, run.sha256,
+    { env: { ...workerEnv(fakeBin, "emit-then-hang"), TURNHELM_TEST_GATE_FILE: gate }, signal: controller.signal });
+  // The gate file appears only after the worker's event has flushed, so the
+  // abort lands on a run that has already decoded at least one event.
+  for (let round = 0; !(await stat(gate).then(() => true, () => false)); round++) {
+    assert.ok(round < 480, "the mid-stream worker never became observable");
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  controller.abort();
+  assert.equal(await executed, 130);
+  const evidence = await readEvidence(run.runRoot);
+  const progress = evidence.find(line => line.phase === "observed")?.workerProgress as
+    { events: number; lastEventAgeMs?: number } | undefined;
+  assert.ok(progress && progress.events >= 1, "the decoded message before cancellation still counts");
+  assert.equal(typeof progress?.lastEventAgeMs, "number");
+  assert.equal(evidence.at(-1)?.phase, "stopped");
+  assert.equal(evidence.at(-1)?.reason, "signal", "the terminal stopped record is still written");
+});
+
+test("workerProgress evidence is all-or-nothing on events and per-field on age", async t => {
+  const prepared = await prepareJev(t);
+  const run = await claimAcceptance(prepared.manifestPath, prepared.sha256);
+  t.after(() => run.handle.close());
+  const base = {
+    phase: "observed", caseId: "jev-default-readonly", backend: "jev", profileId: "default",
+    rootMatches: true, exitCode: 3, durationMs: 42, attempts: 1
+  };
+  const append = async (workerProgress: unknown): Promise<Record<string, unknown>> => {
+    await appendEvidence(run, { ...base, workerProgress } as unknown as SafeEvidence);
+    return JSON.parse((await readFile(run.evidencePath, "utf8")).trim().split("\n").at(-1)!);
+  };
+
+  // A complete projection survives exactly.
+  assert.deepEqual(await append({ events: 3, lastEventAgeMs: 250 }),
+    { ...base, workerProgress: { events: 3, lastEventAgeMs: 250 } });
+  // A malformed age drops only that field.
+  assert.deepEqual(await append({ events: 3, lastEventAgeMs: -1 }),
+    { ...base, workerProgress: { events: 3 } });
+  // A malformed count drops the whole projection; so does a non-object.
+  for (const workerProgress of [{ events: "3" }, { events: 1.5 }, { events: -2 }, "turnhelm"]) {
+    const observed = await append(workerProgress);
+    assert.ok(!("workerProgress" in observed), JSON.stringify(workerProgress) + " must drop the whole projection");
+  }
+  // An unknown key inside a present projection rejects the record outright.
+  await assert.rejects(
+    () => appendEvidence(run, { ...base, workerProgress: { events: 3, decodedBytes: 99 } } as unknown as SafeEvidence),
+    /workerProgress/
+  );
+  // An observed record without the projection invents none.
+  await appendEvidence(run, { ...base, caseId: "heading-en-trial-1" } as unknown as SafeEvidence);
+  const last = JSON.parse((await readFile(run.evidencePath, "utf8")).trim().split("\n").at(-1)!);
+  assert.ok(!("workerProgress" in last), "no progress projection is invented where none was observed");
 });
 
 test("oracle-only failures continue the roster to a failed completion", async t => {

@@ -81,10 +81,15 @@ export type WorkerFailureEvidence = Readonly<{
   ownedShutdown: boolean;
 }>;
 
+// The parent-observed decoded-event projection: the count of successfully
+// decoded events and, when at least one decoded, the rounded age from the last
+// decode to settlement. An observation, never a liveness or stall claim.
+export type WorkerProgressEvidence = Readonly<{ events: number; lastEventAgeMs?: number }>;
+
 export type SafeEvidence =
   | Readonly<{ phase: "prepared"; suite: LiveSuite; manifestSha256: string; startedAt: string }>
   | Readonly<{ phase: "reserved"; caseId: string; worker: number; backends: readonly AcceptanceBackend[] }>
-  | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number; workerUsage?: WorkerUsageEvidence; workerFailure?: WorkerFailureEvidence }>
+  | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number; workerUsage?: WorkerUsageEvidence; workerFailure?: WorkerFailureEvidence; workerProgress?: WorkerProgressEvidence }>
   | Readonly<{ phase: "verified"; caseId: string; verdict: "pass" | "fail"; policy: "match" | "mismatch" | "not-applicable"; checks: Readonly<Record<string, boolean>>; oracleInput?: OracleInputEvidence }>
   | Readonly<{ phase: "completed"; outcome: "pass" | "policy-mismatch"; cases: number; policyMatches: number; policyMismatches: number }>
   | Readonly<{ phase: "completed"; outcome: "pass" | "fail"; cases: number; failed: number }>
@@ -930,6 +935,25 @@ const projectWorkerFailure = (value: unknown): WorkerFailureEvidence | undefined
   return projection;
 };
 
+// All-or-nothing on events, per-field on lastEventAgeMs: a malformed count
+// drops the whole projection, a malformed age drops only itself. Nothing
+// throws except on an unknown key inside a present projection — the same
+// strictness as workerFailure.
+const projectWorkerProgress = (value: unknown): WorkerProgressEvidence | undefined => {
+  if (!isRecord(value)) return undefined;
+  for (const key of Object.keys(value)) {
+    if (key !== "events" && key !== "lastEventAgeMs") {
+      throw evidenceReject("workerProgress must not contain unknown field " + JSON.stringify(key));
+    }
+  }
+  if (typeof value.events !== "number" || !Number.isSafeInteger(value.events) || value.events < 0) return undefined;
+  const projection: { events: number; lastEventAgeMs?: number } = { events: value.events };
+  if (typeof value.lastEventAgeMs === "number" && Number.isSafeInteger(value.lastEventAgeMs) && value.lastEventAgeMs >= 0) {
+    projection.lastEventAgeMs = value.lastEventAgeMs;
+  }
+  return projection;
+};
+
 const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
   const raw = record as unknown as Record<string, unknown>;
   switch (raw.phase) {
@@ -951,6 +975,7 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
     }
     case "observed": {
       const workerFailure = raw.workerFailure === undefined ? undefined : projectWorkerFailure(raw.workerFailure);
+      const workerProgress = raw.workerProgress === undefined ? undefined : projectWorkerProgress(raw.workerProgress);
       return {
         phase: "observed",
         caseId: evidenceString(raw.caseId) ?? "",
@@ -961,7 +986,8 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
         durationMs: evidenceCount(raw.durationMs),
         attempts: evidenceCount(raw.attempts),
         ...(raw.workerUsage !== undefined ? { workerUsage: projectWorkerUsage(raw.workerUsage) } : {}),
-        ...(workerFailure !== undefined ? { workerFailure } : {})
+        ...(workerFailure !== undefined ? { workerFailure } : {}),
+        ...(workerProgress !== undefined ? { workerProgress } : {})
       };
     }
     case "verified": {
@@ -1632,13 +1658,23 @@ export async function executeAcceptance(
               ...(worker.signal !== undefined ? { signal: worker.signal } : {})
             })
             : undefined;
+          // The decoded-event projection comes from the same durable receipt
+          // frame: the parent-observed count and age, projected only when the
+          // count survives validation.
+          const workerProgress = worker !== null
+            ? projectWorkerProgress({
+              events: worker.progressEvents,
+              ...(worker.lastEventAgeMs !== undefined ? { lastEventAgeMs: worker.lastEventAgeMs } : {})
+            })
+            : undefined;
           const claimedRoot = receiptFrame !== null && typeof receiptFrame.root === "string" ? receiptFrame.root : null;
           const rootOk = claimedRoot !== null && await realpath(claimedRoot).catch(() => "") === item.root;
           observation = {
             phase: "observed", caseId: item.id, backend, profileId, rootMatches,
             exitCode: supervision.exitCode, durationMs: supervision.durationMs, attempts,
             workerUsage: projectWorkerUsage(worker?.usage),
-            ...(workerFailure !== undefined ? { workerFailure } : {})
+            ...(workerFailure !== undefined ? { workerFailure } : {}),
+            ...(workerProgress !== undefined ? { workerProgress } : {})
           };
 
           // The observation is persisted before any fallible verification read
