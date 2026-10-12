@@ -8,7 +8,7 @@
     "repository": {
       "url": "git@github.com:milhous/turnhelm.git",
       "link_mode": "local-only",
-      "revision": "7167de1b60485ce0fd8786e0197bb806266a6256"
+      "revision": "6a2f8dcf1b5c3a7e6a157a4b895930f120297b4a"
     },
     "views": [
       {
@@ -36,7 +36,7 @@
       "sources": [
         {
           "path": ".agents/skills/turnhelm-routing/SKILL.md",
-          "line": 59,
+          "line": 60,
           "label": "invokes turnhelm run"
         }
       ]
@@ -104,7 +104,7 @@
         {
           "path": "src/systemone.ts",
           "line": 171,
-          "end_line": 172,
+          "end_line": 173,
           "label": "triple gate"
         },
         {
@@ -193,7 +193,7 @@
       "sources": [
         {
           "path": "src/preflight.ts",
-          "line": 14,
+          "line": 12,
           "label": "Codex minimum version"
         },
         {
@@ -213,7 +213,7 @@
       "sources": [
         {
           "path": "src/journal.ts",
-          "line": 33,
+          "line": 34,
           "label": "confidence recorded"
         },
         {
@@ -223,8 +223,8 @@
         },
         {
           "path": "src/journal.ts",
-          "line": 52,
-          "end_line": 57,
+          "line": 58,
+          "end_line": 64,
           "label": "best-effort append"
         }
       ]

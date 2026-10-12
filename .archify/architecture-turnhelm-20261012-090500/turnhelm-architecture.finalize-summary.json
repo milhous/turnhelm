@@ -7,12 +7,12 @@
   "quality": "showcase",
   "specification": {
     "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261012-090500/candidate.json",
-    "sha256": "8e89eb124b0da914dc0b3f9c3512d04d24a56b3fcdaa3f2e18ad8422a4920372",
+    "sha256": "78c2659529d24ef3ec3f57f50af31cd8ddbbaf89d346b658ae517dc3223073cb",
     "bytes": 9186
   },
   "artifact": {
     "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261012-090500/turnhelm-architecture.html",
-    "sha256": "368695ae0327cf75cd85d6055bf2bd9ea080223ecdb40824d3043adbf77a06c5",
+    "sha256": "964b860798a4edbd03f26277a31a90e8893912153fee72fc7fc8155e8ec92bae",
     "bytes": 767773
   },
   "gates": {
@@ -38,12 +38,12 @@
     "availableVersion": "3.0.1",
     "releaseNotes": null,
     "checkedAt": "2026-10-12T00:59:12.082Z",
-    "source": "network",
+    "source": "cache",
     "noticeRequired": false,
     "noticeText": null
   },
   "visualReview": "not-requested",
-  "durationMs": 1865,
+  "durationMs": 1836,
   "visualReviewRecommendation": {
     "action": "inspect-route-readability",
     "signals": {

@@ -392,12 +392,14 @@ for the interactive versions with zoom, guided views, and source links.
 [![Architecture diagram](.archify/architecture-turnhelm-20261012-090500/visual-check/turnhelm-architecture.visual-check.1440x900.light.png)](.archify/architecture-turnhelm-20261012-090500/turnhelm-architecture.html)
 
 [Architecture](.archify/architecture-turnhelm-20261012-090500/turnhelm-architecture.html)
-— components, the host-loopback boundary, and trust gates (pinned at
-`7167de1`, including the ZDOTDIR managed-root redirect).
+— components, the host-loopback boundary, and trust gates including the
+ZDOTDIR managed-root redirect.
 
-[![Routing workflow diagram](.archify/workflow-turnhelm-run-20261009-130339/visual-check/turnhelm-run-workflow.visual-check.1440x900.light.png)](.archify/workflow-turnhelm-run-20261009-130339/turnhelm-run-workflow.html)
+[![Routing workflow diagram](.archify/workflow-turnhelm-run-20261012-091500/visual-check/turnhelm-run-workflow.visual-check.1440x900.light.png)](.archify/workflow-turnhelm-run-20261012-091500/turnhelm-run-workflow.html)
 
-[Routing workflow](.archify/workflow-turnhelm-run-20261009-130339/turnhelm-run-workflow.html)
+[Routing workflow](.archify/workflow-turnhelm-run-20261012-091500/turnhelm-run-workflow.html)
 — one `turnhelm run` from task submission to receipt, including rejection
-and fail-closed paths (pinned at `d4d47f8`; the run flow is unchanged
-since, so the earlier pin remains flow-accurate).
+and fail-closed paths.
+
+Both diagrams are pinned at `6a2f8dc`; earlier `.archify/` generations
+remain as historical evidence.

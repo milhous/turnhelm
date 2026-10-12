@@ -6,10 +6,10 @@
   "status": "pass",
   "visualReview": "not-requested",
   "provenance": "current",
-  "deliveryReceiptId": "7329bb4b-79d2-4e5a-b830-6efc604852ee",
+  "deliveryReceiptId": "ab0aa3c0-4629-4407-9ce7-2bd573d324b9",
   "artifact": {
     "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261012-090500/turnhelm-architecture.html",
-    "sha256": "368695ae0327cf75cd85d6055bf2bd9ea080223ecdb40824d3043adbf77a06c5",
+    "sha256": "964b860798a4edbd03f26277a31a90e8893912153fee72fc7fc8155e8ec92bae",
     "bytes": 767773
   },
   "state": {
