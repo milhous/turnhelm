@@ -6,7 +6,7 @@
 import { execFile, spawn } from "node:child_process";
 import { deepStrictEqual } from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
-import { appendFile, mkdir, mkdtemp, open, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -256,7 +256,6 @@ export type Roster = {
 };
 
 const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
-const DEFAULT_BASELINE_FILES = ["dist/test/custom-round.js", "dist/test/live-acceptance.js"] as const;
 const MAX_ROSTER_BYTES = 1 << 20;
 const GRADING_MODES = new Set(["strict-equal", "envelope-equal", "strict-whole-json"]);
 const PROFILE_SET = new Set<string>(PROFILE_IDS);
@@ -278,6 +277,22 @@ const expectExactKeys = (value: object, keys: readonly string[], what: string): 
 
 const isHex = (value: string, length: number): boolean => new RegExp(`^[0-9a-f]{${length}}$`).test(value);
 
+// The baseline hashes everything execution consumes (spec 3.4), not just the
+// harness modules around it: every file built under dist/src plus the runner
+// and shared-primitive test modules.
+const defaultBaselineFiles = async (): Promise<string[]> => {
+  const files: string[] = ["dist/test/custom-round.js", "dist/test/live-acceptance.js"];
+  const walk = async (relative: string): Promise<void> => {
+    for (const entry of await readdir(join(REPO_ROOT, relative), { withFileTypes: true })) {
+      const child = relative + "/" + entry.name;
+      if (entry.isDirectory()) await walk(child);
+      else if (entry.isFile()) files.push(child);
+    }
+  };
+  await walk("dist/src");
+  return files;
+};
+
 const isDirectory = async (path: string, what: string): Promise<void> => {
   const info = await stat(path).catch(() => rosterFail(what + " " + JSON.stringify(path) + " does not exist"));
   if (!info.isDirectory()) rosterFail(what + " " + JSON.stringify(path) + " is not a directory");
@@ -286,6 +301,61 @@ const isDirectory = async (path: string, what: string): Promise<void> => {
 const isRegularFile = async (path: string, what: string): Promise<void> => {
   const info = await stat(path).catch(() => rosterFail(what + " " + JSON.stringify(path) + " does not exist"));
   if (!info.isFile()) rosterFail(what + " " + JSON.stringify(path) + " is not a regular file");
+};
+
+// ---------- consumer-tree freeze (spec 3.1, 3.4) ----------
+// The sealed round froze each case's whole consumer tree; live-acceptance.ts
+// carries the same discipline but the spec's change boundary freezes that
+// file with its tree hash unexported, so this bounded copy is a deliberate
+// re-implementation, not drift. Symlinks, FIFOs, oversize files, and oversize
+// trees refuse the freeze rather than hashing partially.
+const TREE_MAX_ENTRIES = 512;
+const TREE_MAX_FILE_BYTES = 1 << 20;
+const JOURNAL_RELATIVE = ".turnhelm/routes.jsonl";
+
+const hashTree = async (root: string): Promise<Map<string, string> | null> => {
+  const files = new Map<string, string>();
+  const walk = async (relative: string): Promise<boolean> => {
+    const entries = await readdir(relative === "" ? root : join(root, relative), { withFileTypes: true })
+      .catch(() => null);
+    if (entries === null) return false;
+    for (const entry of entries) {
+      if (entry.name === ".git") continue;
+      const childRelative = relative === "" ? entry.name : relative + "/" + entry.name;
+      const info = await lstat(join(root, childRelative)).catch(() => null);
+      if (info === null) return false;
+      if (info.isDirectory()) {
+        if (!(await walk(childRelative))) return false;
+      } else {
+        if (!info.isFile() || info.size > TREE_MAX_FILE_BYTES || files.size >= TREE_MAX_ENTRIES) return false;
+        const bytes = await readFile(join(root, childRelative)).catch(() => null);
+        if (bytes === null) return false;
+        files.set(childRelative, sha256hex(bytes));
+      }
+    }
+    return true;
+  };
+  return (await walk("")) ? files : null;
+};
+
+// An allowed change is the case's declared allowedChanges plus the routing
+// journal the CLI itself appends; anything else that appears, changes, or
+// disappears in the consumer tree is drift. Returns the first violating
+// relative path, or null when the tree stayed within its allowance.
+const treeChangedOutside = (
+  before: Map<string, string>,
+  after: Map<string, string>,
+  allowed: readonly string[]
+): string | null => {
+  const isAllowed = (path: string): boolean =>
+    path === JOURNAL_RELATIVE || allowed.some(prefix => path === prefix || path.startsWith(prefix + "/"));
+  for (const [path, digest] of after) {
+    if (before.get(path) !== digest && !isAllowed(path)) return path;
+  }
+  for (const path of before.keys()) {
+    if (!after.has(path) && !isAllowed(path)) return path;
+  }
+  return null;
 };
 
 const validateRoster = async (rosterPath: string): Promise<Roster> => {
@@ -461,7 +531,10 @@ export async function prepareRound(
   if (head !== roster.head) {
     throw new Error("baseline: repo HEAD " + head + " does not match the roster's pinned head " + roster.head);
   }
-  const baselineFiles = options?.baselineFiles ?? DEFAULT_BASELINE_FILES;
+  const baselineFiles = options?.baselineFiles ?? await defaultBaselineFiles();
+  if (baselineFiles.length === 0) {
+    throw new Error("baseline: the consumed-file baseline must not be empty");
+  }
   const baseline: { path: string; sha256: string }[] = [];
   for (const relative of [...baselineFiles].sort()) {
     const bytes = await readFile(join(REPO_ROOT, relative)).catch(() => {
@@ -469,11 +542,17 @@ export async function prepareRound(
     });
     baseline.push({ path: relative, sha256: sha256hex(bytes) });
   }
-  await runPreflights(options?.sandboxExecPath ?? "/usr/bin/sandbox-exec");
+  const sandboxExecPath = options?.sandboxExecPath ?? "/usr/bin/sandbox-exec";
+  await runPreflights(sandboxExecPath);
   const evidenceInfo = await stat(roster.evidenceRoot);
   const cases = [];
   for (const item of roster.cases) {
     const rootInfo = await stat(item.root);
+    const tree = await hashTree(item.root);
+    if (tree === null) {
+      rosterFail("case " + JSON.stringify(item.id)
+        + " root tree cannot be frozen (oversize, unreadable, or non-regular file)");
+    }
     const files: { role: string; path: string; sha256: string }[] = [];
     const addFile = async (role: string, path: string): Promise<void> => {
       files.push({ role, path, sha256: sha256hex(await readFile(path)) });
@@ -482,6 +561,25 @@ export async function prepareRound(
     if (item.files.taskFile !== undefined) await addFile("taskFile", item.files.taskFile);
     for (const hook of item.files.hooks ?? []) await addFile("hook", hook);
     files.sort((a, b) => (a.path === b.path ? (a.role < b.role ? -1 : 1) : (a.path < b.path ? -1 : 1)));
+    // Preflight the final roster's own contracts (spec 3.1): a contract the
+    // machinery cannot even load refuses the freeze. A contract that loads
+    // and fails its assertion is acceptable — on the pristine root a
+    // post-run contract legitimately fails before the worker has run.
+    if (item.files.contract !== undefined) {
+      const runtimeDir = await mkdtemp(join(tmpdir(), "turnhelm-contract-preflight-"));
+      try {
+        const outcome = await runSandboxedCheck({
+          sandboxExecPath, runtimeDir, cwd: await realpath(item.root),
+          entryScript: item.files.contract,
+          allowReadSubpaths: [item.root, dirname(item.files.contract)], timeoutMs: 20_000
+        });
+        if (outcome.status === "infrastructure") {
+          throw new Error("preflight: contract " + JSON.stringify(item.id) + " " + outcome.reason);
+        }
+      } finally {
+        await rm(runtimeDir, { recursive: true, force: true });
+      }
+    }
     cases.push({
       id: item.id,
       kind: item.kind,
@@ -492,6 +590,7 @@ export async function prepareRound(
       allowedChanges: item.allowedChanges,
       allowedProfiles: item.allowedProfiles,
       grading: item.grading,
+      tree: Object.fromEntries(tree),
       files
     });
   }
@@ -523,7 +622,10 @@ type RoundCase = {
   task: string;
   transport: "arg" | "stdin-file";
   root: { canonical: string; dev: number; ino: number };
+  allowedChanges: string[];
+  allowedProfiles: string[];
   grading: { mode: string; expected: unknown };
+  tree: Record<string, string>;
   files: { role: string; path: string; sha256: string }[];
 };
 
@@ -565,7 +667,12 @@ const parseRoundManifest = (bytes: Buffer): RoundManifest | null => {
         || (item.kind !== "worker-readonly" && item.kind !== "worker-write")
         || typeof item.root?.canonical !== "string"
         || !Number.isInteger(item.root?.dev) || !Number.isInteger(item.root?.ino)
-        || typeof item.grading?.mode !== "string" || !Array.isArray(item.files)) return null;
+        || typeof item.grading?.mode !== "string" || !Array.isArray(item.files)
+        || !Array.isArray(item.allowedChanges) || item.allowedChanges.some(v => typeof v !== "string")
+        || !Array.isArray(item.allowedProfiles) || item.allowedProfiles.length === 0
+        || item.allowedProfiles.some(v => typeof v !== "string")
+        || typeof item.tree !== "object" || item.tree === null || Array.isArray(item.tree)
+        || !Object.values(item.tree).every(v => typeof v === "string")) return null;
     }
     return value;
   } catch {
