@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 export type WorkerUsage = Readonly<{
   input_tokens?: number;
   output_tokens?: number;
@@ -46,8 +47,6 @@ export const MAX_EVENT_BYTES = 1048576;
 const USAGE_FIELDS: readonly (keyof WorkerUsage)[] = [
   "input_tokens", "output_tokens", "cached_input_tokens", "reasoning_output_tokens"
 ];
-
-import { createHash } from "node:crypto";
 
 const FRAME_DECODER = new TextDecoder("utf-8", { fatal: true });
 
