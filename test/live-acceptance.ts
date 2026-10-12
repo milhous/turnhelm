@@ -67,10 +67,14 @@ export type StoppedReason =
 export type OracleInputEvidence =
   Readonly<{ source: "stdout" | "summary-file"; text: string | null; bytes: number | null }>;
 
+export type WorkerUsageEvidence =
+  Readonly<Partial<Record<"input_tokens" | "output_tokens" | "cached_input_tokens" | "reasoning_output_tokens", number>>>
+  | "unreported";
+
 export type SafeEvidence =
   | Readonly<{ phase: "prepared"; suite: LiveSuite; manifestSha256: string; startedAt: string }>
   | Readonly<{ phase: "reserved"; caseId: string; worker: number; backends: readonly AcceptanceBackend[] }>
-  | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number }>
+  | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number; workerUsage?: WorkerUsageEvidence }>
   | Readonly<{ phase: "verified"; caseId: string; verdict: "pass" | "fail"; policy: "match" | "mismatch" | "not-applicable"; checks: Readonly<Record<string, boolean>>; oracleInput?: OracleInputEvidence }>
   | Readonly<{ phase: "completed"; outcome: "pass" | "policy-mismatch"; cases: number; policyMatches: number; policyMismatches: number }>
   | Readonly<{ phase: "stopped"; caseId: string | null; reason: StoppedReason }>;
@@ -869,6 +873,22 @@ const evidenceString = (value: unknown): string | null => (typeof value === "str
 const evidenceCount = (value: unknown): number =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
 
+// Worker usage is a projection, never a promise: unknown or malformed counters
+// drop instead of throwing, and an absent snapshot, the CLI's literal
+// "unreported", and zero surviving counters all read as "unreported".
+const USAGE_COUNTERS = ["input_tokens", "output_tokens", "cached_input_tokens", "reasoning_output_tokens"] as const;
+const projectWorkerUsage = (usage: unknown): WorkerUsageEvidence => {
+  if (usage === "unreported" || typeof usage !== "object" || usage === null || Array.isArray(usage)) {
+    return "unreported";
+  }
+  const counters: Partial<Record<(typeof USAGE_COUNTERS)[number], number>> = {};
+  for (const field of USAGE_COUNTERS) {
+    const value = (usage as Record<string, unknown>)[field];
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) counters[field] = value;
+  }
+  return Object.keys(counters).length === 0 ? "unreported" : counters;
+};
+
 const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
   const raw = record as unknown as Record<string, unknown>;
   switch (raw.phase) {
@@ -897,7 +917,8 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
         rootMatches: typeof raw.rootMatches === "boolean" ? raw.rootMatches : "unknown",
         exitCode: typeof raw.exitCode === "number" && Number.isInteger(raw.exitCode) ? raw.exitCode : null,
         durationMs: evidenceCount(raw.durationMs),
-        attempts: evidenceCount(raw.attempts)
+        attempts: evidenceCount(raw.attempts),
+        ...(raw.workerUsage !== undefined ? { workerUsage: projectWorkerUsage(raw.workerUsage) } : {})
       };
     case "verified": {
       const checks: Record<string, boolean> = {};
@@ -1510,11 +1531,17 @@ export async function executeAcceptance(
           const rootInfo = await stat(item.root).catch(() => null);
           const rootMatches = rootInfo !== null && rootInfo.dev === item.identity.dev && rootInfo.ino === item.identity.ino;
           const receiptFrame = lastJsonLine(decodeBounded(supervision.stderr) ?? "");
+          // The receipt's worker object is extracted before the observation is
+          // built: usage must be projected from the same durable observation,
+          // not from a second read taken after fallible verification.
+          const worker = receiptFrame !== null && typeof receiptFrame.worker === "object" && receiptFrame.worker !== null
+            ? receiptFrame.worker as Record<string, unknown> : null;
           const claimedRoot = receiptFrame !== null && typeof receiptFrame.root === "string" ? receiptFrame.root : null;
           const rootOk = claimedRoot !== null && await realpath(claimedRoot).catch(() => "") === item.root;
           observation = {
             phase: "observed", caseId: item.id, backend, profileId, rootMatches,
-            exitCode: supervision.exitCode, durationMs: supervision.durationMs, attempts
+            exitCode: supervision.exitCode, durationMs: supervision.durationMs, attempts,
+            workerUsage: projectWorkerUsage(worker?.usage)
           };
 
           // The observation is persisted before any fallible verification read
@@ -1549,8 +1576,6 @@ export async function executeAcceptance(
               const configUnchanged = configNow !== undefined && configNow.equals(canonicalConfigBytes(item.config));
               const gitClean = treeDiffClean(treeBefore, await hashTree(item.root), item.allowedChanges);
               const stdoutText = decodeBounded(supervision.stdout);
-              const worker = receiptFrame !== null && typeof receiptFrame.worker === "object" && receiptFrame.worker !== null
-                ? receiptFrame.worker as Record<string, unknown> : null;
               let oracleOk = false;
               if (item.oracle.kind === "stdout-json") {
                 oracleOk = jsonEquals(stdoutText, item.oracle.expected);

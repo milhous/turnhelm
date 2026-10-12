@@ -659,7 +659,7 @@ const HOSTILE_ANSWER = '"}\\n before {"count":4,"sum":17} after "'
 
 // Modes: ok-readonly, ok-write, write-readonly (writes despite read-only sandbox),
 // fail, hang, wrong-output, no-output, oversize, mutate-input, summary-invalid,
-// hostile-answer.
+// hostile-answer, usage-full, usage-mixed, usage-invalid.
 const FAKE_CODEX = `#!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
@@ -760,6 +760,21 @@ process.stdin.on("end", () => {
   if (mode === "hostile-answer") {
     emit({ type: "item.completed", item: { type: "agent_message", text: ${JSON.stringify(HOSTILE_ANSWER)} } });
     emit({ type: "turn.completed" });
+    process.exit(0);
+  }
+  if (mode === "usage-full") {
+    emit({ type: "item.completed", item: { type: "agent_message", text: answer } });
+    emit({ type: "turn.completed", usage: { input_tokens: 11, output_tokens: 7, cached_input_tokens: 5, reasoning_output_tokens: 3 } });
+    process.exit(0);
+  }
+  if (mode === "usage-mixed") {
+    emit({ type: "item.completed", item: { type: "agent_message", text: answer } });
+    emit({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: -3, bogus_tokens: 7 } });
+    process.exit(0);
+  }
+  if (mode === "usage-invalid") {
+    emit({ type: "item.completed", item: { type: "agent_message", text: answer } });
+    emit({ type: "turn.completed", usage: { input_tokens: -5, output_tokens: 1.5 } });
     process.exit(0);
   }
   if (mode === "linger-forever") {
@@ -1192,6 +1207,57 @@ test("the sanitizer bounds and shapes oracle input evidence", async t => {
   } as unknown as SafeEvidence);
   const bare = (await evidenceLines()).find(line => line.caseId === "bare");
   assert.ok(bare && !("oracleInput" in bare), "no oracle input is invented where none was judged");
+});
+
+test("observed records carry a whitelisted worker usage projection", async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  const observedUsage = async (mode: string): Promise<unknown> => {
+    const run = await buildRun(t, "laya", classifier.url, [{ id: "usage-" + mode, kind: "worker-readonly" }]);
+    await executeAcceptance(run.manifestPath, run.sha256, { env: workerEnv(fakeBin, mode) });
+    return (await readEvidence(run.runRoot)).find(line => line.phase === "observed")?.workerUsage;
+  };
+
+  assert.deepEqual(await observedUsage("usage-full"),
+    { input_tokens: 11, output_tokens: 7, cached_input_tokens: 5, reasoning_output_tokens: 3 },
+    "a full snapshot records all four counters");
+  assert.deepEqual(await observedUsage("ok-readonly"), { input_tokens: 10, output_tokens: 5 },
+    "a partial snapshot records only the present counters, no invented zeros");
+  assert.deepEqual(await observedUsage("usage-mixed"), { input_tokens: 10 },
+    "invalid and unknown counters drop; the valid subset survives");
+  assert.equal(await observedUsage("usage-invalid"), "unreported",
+    "counters that are all invalid report nothing");
+  assert.equal(await observedUsage("no-output"), "unreported",
+    "an absent usage snapshot reports nothing");
+});
+
+test("the sanitizer projects worker usage without throwing", async t => {
+  const prepared = await prepareAcceptance("jev");
+  t.after(() => rm(dirname(prepared.manifestPath), { recursive: true, force: true }));
+  const run = await claimAcceptance(prepared.manifestPath, prepared.sha256);
+  t.after(() => run.handle.close());
+  const appendObserved = (workerUsage: unknown): Promise<void> => appendEvidence(run, {
+    phase: "observed", caseId: "jev-default-readonly", backend: "jev", profileId: "default",
+    rootMatches: true, exitCode: 0, durationMs: 1, attempts: 1, workerUsage
+  } as unknown as SafeEvidence);
+  await appendObserved("unreported");
+  await appendObserved({ input_tokens: 4, output_tokens: -1, cached_input_tokens: 1.5, evil_tokens: 9 });
+  await appendObserved({ input_tokens: "10" });
+  const projected = (await readFile(run.evidencePath, "utf8")).trim().split("\n")
+    .map(line => JSON.parse(line) as Record<string, unknown>)
+    .filter(line => line.phase === "observed")
+    .map(line => line.workerUsage);
+  assert.deepEqual(projected, ["unreported", { input_tokens: 4 }, "unreported"],
+    "malformed counters drop instead of throwing; zero valid counters report nothing");
+
+  // The classifier-only shape round-trips without inventing a projection.
+  await appendEvidence(run, {
+    phase: "observed", caseId: "heading-en-trial-1", backend: "laya", profileId: "fast",
+    rootMatches: "unknown", exitCode: null, durationMs: 2, attempts: 1
+  });
+  const last = (await readFile(run.evidencePath, "utf8")).trim().split("\n")
+    .map(line => JSON.parse(line) as Record<string, unknown>).at(-1);
+  assert.ok(last && !("workerUsage" in last), "no worker usage is invented where none was observed");
 });
 
 test("worker and calibration cases have different pass criteria", async t => {
@@ -2383,6 +2449,9 @@ test("RR03 calibration is local classifier only", async t => {
   for (const record of evidence.filter(line => line.phase === "reserved")) {
     assert.equal(record.worker, 0);
     assert.deepEqual(record.backends, ["laya"]);
+  }
+  for (const record of evidence.filter(line => line.phase === "observed")) {
+    assert.ok(!("workerUsage" in record), "a classifier-only observation reports no worker usage");
   }
   assert.deepEqual(evidence.filter(line => line.phase === "verified").map(line => line.verdict),
     Array.from({ length: 12 }, () => "pass"));
