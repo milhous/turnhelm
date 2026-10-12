@@ -85,7 +85,8 @@ opt-ins out of reusable defaults. Laya may require `LAYA_API_KEY`.
 The full task goes to the classifier: remove secrets and consider residency,
 cost, and consent first. Keep keys out of prompts/logs/diffs/config. The child's
 initial environment omits `LAYA_API_KEY`, `TYPESAFE_API_KEY`,
-`TURNHELM_ALLOW_HOSTED_JEV`, and legacy `TURNHELM_CONFIG`, and redirects
+`TURNHELM_ALLOW_HOSTED_JEV`, legacy `TURNHELM_CONFIG`, and the
+startup-file keys `BASH_ENV`/`ENV`, and redirects
 `ZDOTDIR` to the managed `.turnhelm` root so a zsh descendant does not source
 the host `~/.zshenv` (a missing startup file there is zsh's skip state). This
 is still not host filesystem secret isolation: other shells' startup files,
@@ -97,7 +98,13 @@ settings to make a check pass.
 
 Worker output is on stdout; fixed diagnostics and one `turnhelm.receipt` JSON
 are on stderr **once classification starts**. Input/config/preflight rejection
-has no receipt. Read the exit code and routing/worker statuses, not stderr
+has no receipt. A failed worker turn prints exactly one fixed
+`turnhelm: worker-failed: <class>` line — class from a frozen taxonomy,
+never native error text. The receipt's `worker` object always carries
+`ownedShutdown`, a boolean action record (a parent-initiated stop ladder
+ran), not a causation claim, and a failed/cancelled worker adds
+`failureClass`, `errorSha256` (hash only), and the death `signal`. Read the
+exit code and routing/worker statuses, not stderr
 presence or a selected profile alone.
 
 Every run that reaches classification appends one JSON evidence line to
@@ -136,7 +143,9 @@ data to `invalid`/`unknown`, with one deliberate exception: each judged case
 retains its `oracleInput` — the exact oracle-judged stdout or summary bytes,
 bounded to 64 KiB, private to the claimed run; that is raw-content retention,
 not secret sanitization. Observed records also carry a whitelisted
-`workerUsage` projection whose scope is unverified. Exit `3` means a complete
+`workerUsage` projection whose scope is unverified, and a bounded
+`workerFailure` projection — frozen class, `ownedShutdown` boolean,
+optional correlation hash and death signal; no failure text. Exit `3` means a complete
 calibration roster with a band-policy mismatch; exit `4` means a complete
 worker roster with at least one engineering failure. A task-output failure
 (wrong or missing output, every integrity check true) fails the case and the
