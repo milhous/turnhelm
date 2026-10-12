@@ -109,5 +109,49 @@ The oracle never considers which profile produced the diff.
 
 ## Results (appended after execution)
 
-To be recorded per run: pair, arm, classifier profileId (journal), executed
-model/effort, task-result verdict, `durationMs`, usage snapshot, exit code.
+Executed 2026-10-12, in the predeclared order, one `turnhelm run --write` per
+row against the local Laya service (typed-decisions) with `jev.enabled=false`.
+All four worker runs completed; every run satisfied the objective diff oracle
+(exactly the allowed one-line change; only `README.md` modified besides
+turnhelm's own new `.turnhelm/routes.jsonl` journal, which the router writes
+before the worker starts).
+
+| # | Pair | Arm | Classifier (journal) | Executed | Verdict | durationMs | Usage snapshot (input/cached/output/reasoning) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | heading-en (dev) | A: selection | `frontier` (conf 0.0156) | gpt-6-astra / high | **pass** | 61061 | 55838 / 44416 / 223 / 15 |
+| 2 | heading-en (dev) | B: lightest | `frontier` (conf 0.0156, bound) | gpt-6-luna / low | **pass** | 56650 | 71420 / 58368 / 251 / 0 |
+| 3 | decoy-en (holdout) | A: selection | `balanced` (conf 0.0535) | gpt-6.1-sol / medium | **pass** | 55894 | 94308 / 76032 / 416 / 16 |
+| 4 | decoy-en (holdout) | B: lightest | `balanced` (conf 0.0535, bound) | gpt-6-luna / low | **pass** | 53528 | 53608 / 36096 / 174 / 0 |
+
+Exit code 0 on all four runs; `worker.status: "completed"` on all four.
+Classifier determinism held: both arms of each pair recorded the identical
+profileId and confidence as the frozen 2026-10-11 baseline appendix
+(`frontier` 0.0156 for heading-en, `balanced` 0.0535 for decoy-en). Usage
+snapshots are `unverified` scope, exactly as reported by the worker, never
+summed.
+
+## Interpretation (bounded to the predeclared limits)
+
+- On these two frozen single-line-edit tasks, the band's lightest profile
+  (gpt-6-luna/low) produced the exact required change, as did each classifier
+  selection — including `frontier` on heading-en, the RR-08 out-of-band
+  selection. Sufficiency of the lightest profile is claimed **only** for these
+  two tasks under this oracle.
+- Wall-clock: the lightest arm ran 4.4 s (heading) and 2.4 s (decoy) faster on
+  ~54–61 s runs. These are single observations dominated by fixed worker
+  overhead; no general speed claim is made.
+- Usage: reported token snapshots did not order with profile lightness —
+  luna/low consumed more input tokens than astra/high on heading (71420 vs
+  55838) and fewer on decoy (53608 vs 94308). Input-token counts include
+  per-model context assembly differences; no per-token, per-run, or percentage
+  cost or savings claim is made (ChatGPT-login runs; no API-bill basis).
+- Accounting: exactly 4 worker runs, within the predeclared cap; no reruns,
+  retries, or prompt edits occurred; no engineering failure arose.
+- Effect on open findings: the `routing-policy-calibration-cost-quality`
+  finding demanded exactly this predeclared comparative evidence; it now
+  exists for the two executable light pairs and is recorded here. It does not
+  generalize to the hard pairs (`race`, `auth`), other texts, or other task
+  classes, and heading-en's band-policy mismatch itself is unchanged — that is
+  routing-policy evidence held by the calibration round, not a quality fact.
+- Raw receipts, stdout captures, and consumer roots were retained under
+  `/tmp/turnhelm-d1/` during the round and are summarized above.
