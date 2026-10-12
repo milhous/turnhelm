@@ -423,6 +423,55 @@ test("unknown receipt fields never reach evidence", async t => {
   assert.equal(stopped.reason, "unknown");
 });
 
+test("workerFailure evidence is all-or-nothing on required fields and never throws", async t => {
+  const prepared = await prepareJev(t);
+  const run = await claimAcceptance(prepared.manifestPath, prepared.sha256);
+  t.after(() => run.handle.close());
+  const base = {
+    phase: "observed", caseId: "jev-default-readonly", backend: "jev", profileId: "default",
+    rootMatches: true, exitCode: 3, durationMs: 42, attempts: 1
+  };
+  const append = async (workerFailure: unknown): Promise<Record<string, unknown>> => {
+    await appendEvidence(run, { ...base, workerFailure } as unknown as SafeEvidence);
+    return JSON.parse((await readFile(run.evidencePath, "utf8")).trim().split("\n").at(-1)!);
+  };
+
+  // A complete projection survives exactly.
+  assert.deepEqual(
+    await append({ class: "rate-limit", errorSha256: "a".repeat(64), signal: "SIGTERM", ownedShutdown: true }),
+    { ...base, workerFailure: { class: "rate-limit", errorSha256: "a".repeat(64), signal: "SIGTERM", ownedShutdown: true } }
+  );
+  // A malformed optional field drops only that field.
+  assert.deepEqual(
+    await append({ class: "rate-limit", errorSha256: "not-hex", ownedShutdown: false }),
+    { ...base, workerFailure: { class: "rate-limit", ownedShutdown: false } }
+  );
+  assert.deepEqual(
+    await append({ class: "rate-limit", signal: "SIGABRT", ownedShutdown: false }),
+    { ...base, workerFailure: { class: "rate-limit", ownedShutdown: false } }
+  );
+  // A malformed required field drops the whole projection; so does a non-object.
+  for (const workerFailure of [
+    { class: "internal-error", ownedShutdown: false },
+    { class: "auth" },
+    { class: 7, ownedShutdown: false },
+    "turnhelm"
+  ]) {
+    const observed = await append(workerFailure);
+    assert.ok(!("workerFailure" in observed), JSON.stringify(workerFailure) + " must drop the whole projection");
+  }
+  // An unknown key inside a present projection rejects the record outright,
+  // the same strictness as oracleInput — and the raw text never lands.
+  await assert.rejects(
+    () => appendEvidence(run, {
+      ...base, workerFailure: { class: "auth", ownedShutdown: false, message: "password=p@ss.word!" }
+    } as unknown as SafeEvidence),
+    /workerFailure/
+  );
+  const raw = await readFile(run.evidencePath, "utf8");
+  assert.ok(!raw.includes("password=p@ss.word!"), "no failure-derived free text reaches the journal");
+});
+
 test("prepare is offline and freezes independent consumers", async t => {
   assert.equal(typeof prepareAcceptance, "function");
   const outcome = await runPreparesOffline(t);
@@ -657,6 +706,9 @@ const startClassifierFixture = async (t: TestContext, onRequest?: (count: number
 const HOSTILE_ANSWER = '"}\\n before {"count":4,"sum":17} after "'
   + String.fromCharCode(0x00, 0x2028, 0x0a);
 
+// A failure message whose text must never survive past the class+hash pair.
+const HOSTILE_FAILURE = "upstream rate limit exceeded while password=p@ss.word! stayed live for the caller";
+
 // Modes: ok-readonly, ok-write, write-readonly (writes despite read-only sandbox),
 // fail, hang, wrong-output, no-output, oversize, mutate-input, summary-invalid,
 // hostile-answer, usage-full, usage-mixed, usage-invalid, mixed-verdict (write
@@ -679,6 +731,12 @@ process.stdin.on("end", () => {
   const emit = event => process.stdout.write(JSON.stringify(event) + "\\n");
   const answer = JSON.stringify({ count: 4, sum: 17 });
   if (mode === "fail") process.exit(3);
+  if (mode === "rate-fail") {
+    const hostile = ${JSON.stringify(HOSTILE_FAILURE)};
+    emit({ type: "error", message: hostile });
+    emit({ type: "turn.failed", message: hostile });
+    process.exit(9);
+  }
   if (mode === "hang") { setInterval(() => {}, 3600); return; }
   if (mode === "wrong-output") {
     emit({ type: "item.completed", item: { type: "agent_message", text: "hello" } });
@@ -1085,6 +1143,37 @@ test("first real failure stops remaining cases", async t => {
   assert.equal(stopped?.caseId, "fails-first");
   assert.equal(classifier.state.requests, 1, "exactly one classify call");
   await assert.rejects(() => stat(join(run.runRoot, "consumers", "never-runs", ".turnhelm", "routes.jsonl")), { code: "ENOENT" });
+});
+
+test("observed evidence mirrors the receipt's bounded worker-failure attribution", async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+
+  // An eventless failed worker projects class unknown and a false boolean.
+  const eventless = await buildRun(t, "laya", classifier.url, [{ id: "fail-eventless", kind: "worker-readonly" }]);
+  await executeAcceptance(eventless.manifestPath, eventless.sha256, { env: workerEnv(fakeBin, "fail") });
+  const eventlessObserved = (await readEvidence(eventless.runRoot)).find(line => line.phase === "observed");
+  assert.deepEqual(eventlessObserved?.workerFailure, { class: "unknown", ownedShutdown: false });
+
+  // A classified failure mirrors the receipt's class and hash, nothing more.
+  const classified = await buildRun(t, "laya", classifier.url, [{ id: "fail-classified", kind: "worker-readonly" }]);
+  await executeAcceptance(classified.manifestPath, classified.sha256, { env: workerEnv(fakeBin, "rate-fail") });
+  const classifiedObserved = (await readEvidence(classified.runRoot)).find(line => line.phase === "observed");
+  assert.deepEqual(classifiedObserved?.workerFailure, {
+    class: "rate-limit", errorSha256: sha256hex(HOSTILE_FAILURE), ownedShutdown: false
+  });
+  const journal = await readFile(join(classified.runRoot, "evidence", "evidence.jsonl"), "utf8");
+  for (let i = 0; i + 20 <= HOSTILE_FAILURE.length; i++) {
+    assert.ok(!journal.includes(HOSTILE_FAILURE.slice(i, i + 20)), "raw failure window at " + i + " leaked into evidence");
+  }
+
+  // A completed worker carries no projection at all.
+  const completed = await buildRun(t, "laya", classifier.url, [{ id: "completed-none", kind: "worker-readonly" }]);
+  assert.equal(await executeAcceptance(completed.manifestPath, completed.sha256,
+    { env: workerEnv(fakeBin, "ok-readonly") }), 0);
+  const completedObserved = (await readEvidence(completed.runRoot)).find(line => line.phase === "observed");
+  assert.ok(!completedObserved || !("workerFailure" in completedObserved),
+    "a completed worker carries no workerFailure projection");
 });
 
 test("duplicate receipt after observation cannot pass", async t => {
