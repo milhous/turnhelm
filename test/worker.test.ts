@@ -118,6 +118,8 @@ type Recorded = {
   errorSha256?: string;
   signal?: string;
   postSettleKills?: number;
+  progressEvents?: number;
+  lastEventAgeMs?: number;
 };
 
 async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ recorded: Recorded; stdout: string; stderr: string; directory: string }> {
@@ -569,10 +571,12 @@ finish(() => {
 `
   });
   assert.equal(typeof recorded.durationMs, "number");
-  assert.deepEqual({ ...recorded, durationMs: 0 }, {
+  assert.deepEqual({ ...recorded, durationMs: 0, lastEventAgeMs: 0 }, {
     code: 0,
     status: "completed",
     durationMs: 0,
+    progressEvents: 2,
+    lastEventAgeMs: 0,
     usage: { input_tokens: 12, output_tokens: 5 },
     usageScope: "unverified",
     received: 0,
@@ -810,6 +814,63 @@ finish(() => { process.exit(3); });
   assert.equal(recorded.failureClass, "unknown");
   assert.equal(recorded.ownedShutdown, false);
   assert.equal(recorded.errorSha256, undefined);
+});
+
+test("decoded-event counters count every successfully decoded kind", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "counted" } });
+  emit({ type: "turn.completed", usage: { input_tokens: 1 } });
+  process.stdout.write(JSON.stringify({ type: "future.event" }) + "\\n");
+  emit({ type: "item.completed", item: { type: "command_execution", command: "ls", aggregated_output: "file", exit_code: 0 } });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(recorded.progressEvents, 4, "message, completed, unknown, and diagnostic kinds all count");
+  assert.equal(typeof recorded.lastEventAgeMs, "number");
+});
+
+test("a malformed frame stops counting but the decoded count ships on the failed result", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "counted" } });
+  emit({ type: "turn.completed" });
+  process.stdout.write("{not json}\\n");
+  process.stdout.write(JSON.stringify({ type: "future.event" }) + "\\n");
+  setTimeout(() => {}, 10000);
+});
+`
+  });
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "protocol");
+  assert.equal(recorded.progressEvents, 2, "malformed frames do not count");
+  assert.equal(typeof recorded.lastEventAgeMs, "number");
+});
+
+test("a pre-start abort carries zero decoded events and no age", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, { abortBeforeCall: true });
+  assert.equal(recorded.status, "cancelled");
+  assert.equal(recorded.progressEvents, 0);
+  assert.equal(recorded.lastEventAgeMs, undefined);
+});
+
+test("a cancelled mid-stream run keeps its decoded events and age", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    output: "blocker",
+    gate: "abort-received",
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "held" } });
+  setInterval(() => {}, 1000);
+});
+`
+  });
+  assert.equal(recorded.status, "cancelled");
+  assert.ok((recorded.progressEvents ?? 0) >= 1, "the decoded message before cancellation still counts, saw " + recorded.progressEvents);
+  assert.equal(typeof recorded.lastEventAgeMs, "number");
 });
 
 test("the failed dispatch writes exactly one class-only diagnostic line", { timeout: 30_000 }, async t => {
