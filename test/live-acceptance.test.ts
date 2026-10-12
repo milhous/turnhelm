@@ -3056,7 +3056,13 @@ test("RR05 terminal boundary is fail closed", async t => {
         closeWrapped = true;
         const descriptor = Object.getOwnPropertyDescriptor(this, "close");
         if (descriptor !== undefined) {
+          const handle = this;
           const originalCloseFn = descriptor.value as () => Promise<void>;
+          // The injected failure must not leak the real descriptor: a leaked
+          // evidence fd surfaces after the test as a file-level GC error and
+          // fails the whole suite. Closing during the run would race the
+          // post-failure stopped append, so release it at teardown instead.
+          t.after(() => originalCloseFn.call(handle).catch(() => {}));
           Object.defineProperty(this, "close", {
             configurable: true,
             writable: true,
@@ -3088,6 +3094,11 @@ test("RR05 terminal boundary is fail closed", async t => {
         workerCloseWrapped = true;
         const descriptor = Object.getOwnPropertyDescriptor(this, "close");
         if (descriptor !== undefined) {
+          const handle = this;
+          const originalCloseFn = descriptor.value as () => Promise<void>;
+          // Same discipline as above: fail the close, release the fd at
+          // teardown so no descriptor survives to a file-level GC error.
+          t.after(() => originalCloseFn.call(handle).catch(() => {}));
           Object.defineProperty(this, "close", {
             configurable: true,
             writable: true,
