@@ -64,11 +64,14 @@ export type StoppedReason =
   | "drift" | "output-limit" | "evidence-io" | "signal" | "timeout"
   | "worker-failure" | "verdict" | "cleanup-unverified" | "unknown";
 
+export type OracleInputEvidence =
+  Readonly<{ source: "stdout" | "summary-file"; text: string | null; bytes: number | null }>;
+
 export type SafeEvidence =
   | Readonly<{ phase: "prepared"; suite: LiveSuite; manifestSha256: string; startedAt: string }>
   | Readonly<{ phase: "reserved"; caseId: string; worker: number; backends: readonly AcceptanceBackend[] }>
   | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number }>
-  | Readonly<{ phase: "verified"; caseId: string; verdict: "pass" | "fail"; policy: "match" | "mismatch" | "not-applicable"; checks: Readonly<Record<string, boolean>> }>
+  | Readonly<{ phase: "verified"; caseId: string; verdict: "pass" | "fail"; policy: "match" | "mismatch" | "not-applicable"; checks: Readonly<Record<string, boolean>>; oracleInput?: OracleInputEvidence }>
   | Readonly<{ phase: "completed"; outcome: "pass" | "policy-mismatch"; cases: number; policyMatches: number; policyMismatches: number }>
   | Readonly<{ phase: "stopped"; caseId: string | null; reason: StoppedReason }>;
 
@@ -907,7 +910,34 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
       if (policy !== "match" && policy !== "mismatch" && policy !== "not-applicable") {
         throw evidenceReject("verified policy is unknown");
       }
-      return { phase: "verified", caseId: evidenceString(raw.caseId) ?? "", verdict: raw.verdict === "pass" ? "pass" : "fail", policy, checks };
+      // Retained oracle input is raw worker output: strict three-key shape,
+      // bounded on UTF-8 bytes (a character count would let multibyte content
+      // slip past) so the journal stays a bounded, replay-free record.
+      let oracleInput: OracleInputEvidence | undefined;
+      const input = raw.oracleInput;
+      if (input !== undefined) {
+        if (!isRecord(input)) throw evidenceReject("oracleInput must be a record");
+        for (const key of Object.keys(input)) {
+          if (key !== "source" && key !== "text" && key !== "bytes") {
+            throw evidenceReject("oracleInput must not contain unknown field " + JSON.stringify(key));
+          }
+        }
+        const { source, text, bytes } = input;
+        if (source !== "stdout" && source !== "summary-file") throw evidenceReject("oracleInput source is unknown");
+        if (typeof text !== "string" && text !== null) throw evidenceReject("oracleInput text is malformed");
+        if (bytes !== null && (typeof bytes !== "number" || !Number.isSafeInteger(bytes) || bytes < 0)) {
+          throw evidenceReject("oracleInput bytes is malformed");
+        }
+        if (text !== null && Buffer.byteLength(text, "utf8") > STDOUT_CAP_BYTES) {
+          throw evidenceReject("oracleInput text exceeds the 65536-byte bound");
+        }
+        oracleInput = { source, text, bytes };
+      }
+      return {
+        phase: "verified", caseId: evidenceString(raw.caseId) ?? "",
+        verdict: raw.verdict === "pass" ? "pass" : "fail", policy, checks,
+        ...(oracleInput !== undefined ? { oracleInput } : {})
+      };
     }
     case "completed": {
       // The commit-point fact is written only by the runner itself, so its
@@ -1396,6 +1426,7 @@ export async function executeAcceptance(
         let policy: "match" | "mismatch" | "not-applicable" = "not-applicable";
         let band: readonly string[] | null = null;
         let selectedProfileId = "unknown";
+        let oracleInput: OracleInputEvidence | undefined;
         let stopReason: StoppedReason | null = null;
         let stopExitCode = 1;
 
@@ -1523,9 +1554,17 @@ export async function executeAcceptance(
               let oracleOk = false;
               if (item.oracle.kind === "stdout-json") {
                 oracleOk = jsonEquals(stdoutText, item.oracle.expected);
+                oracleInput = { source: "stdout", text: stdoutText, bytes: supervision.stdout.length };
               } else if (item.oracle.kind === "summary-file") {
+                // The retained input reuses the same read the oracle judged —
+                // a second read could observe different bytes.
                 const summary = await readProjectFile(item.root, "out/summary.json", 65536);
-                oracleOk = summary !== undefined && jsonEquals(decodeBounded(summary), item.oracle.expected);
+                const summaryText = summary === undefined ? null : decodeBounded(summary);
+                oracleOk = summaryText !== null && jsonEquals(summaryText, item.oracle.expected);
+                oracleInput = {
+                  source: "summary-file", text: summaryText,
+                  bytes: summary === undefined ? null : summary.length
+                };
               }
               checks = {
                 "receipt-unique": journalUsable && receiptLine !== null,
@@ -1572,7 +1611,10 @@ export async function executeAcceptance(
             : "not-applicable";
         }
         try {
-          await appendEvidence(run, { phase: "verified", caseId: item.id, verdict, policy, checks });
+          await appendEvidence(run, {
+            phase: "verified", caseId: item.id, verdict, policy, checks,
+            ...(oracleInput !== undefined ? { oracleInput } : {})
+          });
         } catch {
           return 1;
         }

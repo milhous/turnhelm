@@ -652,8 +652,14 @@ const startClassifierFixture = async (t: TestContext, onRequest?: (count: number
   return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, state, scripted };
 };
 
+// RR+ hostile oracle input: quote, brace, backslash, NUL, line separator, and
+// newline — every character class that stresses JSONL serialization.
+const HOSTILE_ANSWER = '"}\\n before {"count":4,"sum":17} after "'
+  + String.fromCharCode(0x00, 0x2028, 0x0a);
+
 // Modes: ok-readonly, ok-write, write-readonly (writes despite read-only sandbox),
-// fail, hang, wrong-output, no-output, oversize, mutate-input.
+// fail, hang, wrong-output, no-output, oversize, mutate-input, summary-invalid,
+// hostile-answer.
 const FAKE_CODEX = `#!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
@@ -746,6 +752,15 @@ process.stdin.on("end", () => {
     fs.mkdirSync(path.join(process.cwd(), "out"), { recursive: true });
     fs.writeFileSync(path.join(process.cwd(), "out", "summary.real"), answer);
     fs.symlinkSync("summary.real", path.join(process.cwd(), "out", "summary.json"));
+  }
+  if (mode === "summary-invalid") {
+    fs.mkdirSync(path.join(process.cwd(), "out"), { recursive: true });
+    fs.writeFileSync(path.join(process.cwd(), "out", "summary.json"), Buffer.from([0xff, 0xfe, 0xfd, 0x0a]));
+  }
+  if (mode === "hostile-answer") {
+    emit({ type: "item.completed", item: { type: "agent_message", text: ${JSON.stringify(HOSTILE_ANSWER)} } });
+    emit({ type: "turn.completed" });
+    process.exit(0);
   }
   if (mode === "linger-forever") {
     // A descendant in its own process group that inherits stdout and never
@@ -1081,6 +1096,104 @@ test("malformed missing oversized and invalid utf8 outputs are finite", async t 
   }
 });
 
+test("judged oracle input is retained as bounded evidence", async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+
+  // A passing stdout-json case retains the exact judged payload.
+  const passing = await buildRun(t, "laya", classifier.url, [{ id: "retain-pass", kind: "worker-readonly" }]);
+  assert.equal(await executeAcceptance(passing.manifestPath, passing.sha256,
+    { env: workerEnv(fakeBin, "ok-readonly") }), 0);
+  const passVerified = (await readEvidence(passing.runRoot)).find(line => line.phase === "verified");
+  assert.ok(passVerified?.oracleInput, "a judged pass retains the oracle input");
+  const passInput = passVerified!.oracleInput as Record<string, unknown>;
+  assert.equal(passInput.source, "stdout");
+  assert.equal(passInput.bytes, Buffer.byteLength(passInput.text as string, "utf8"));
+  assert.deepEqual(JSON.parse(passInput.text as string), { count: 4, sum: 17 });
+
+  // A wrong-sum failure retains the text it failed on.
+  const wrong = await buildRun(t, "laya", classifier.url, [{ id: "retain-wrong", kind: "worker-readonly" }]);
+  await executeAcceptance(wrong.manifestPath, wrong.sha256, { env: workerEnv(fakeBin, "answer-wrong-numbers") });
+  const wrongVerified = (await readEvidence(wrong.runRoot)).find(line => line.phase === "verified");
+  const wrongInput = wrongVerified?.oracleInput as Record<string, unknown> | undefined;
+  assert.ok(wrongInput, "a failed oracle still retains its input");
+  assert.equal(wrongInput!.source, "stdout");
+  assert.deepEqual(JSON.parse(wrongInput!.text as string), { count: 5, sum: 18 });
+
+  // A summary-file pass retains the summary text; an absent file is recorded
+  // as unavailable bytes, never fabricated.
+  const summaryRun = await buildRun(t, "laya", classifier.url, [{ id: "retain-summary", kind: "worker-write" }]);
+  await executeAcceptance(summaryRun.manifestPath, summaryRun.sha256, { env: workerEnv(fakeBin, "ok-write") });
+  const summaryVerified = (await readEvidence(summaryRun.runRoot)).find(line => line.phase === "verified");
+  assert.deepEqual(summaryVerified?.oracleInput,
+    { source: "summary-file", text: '{"count":4,"sum":17}', bytes: 20 });
+
+  const absentRun = await buildRun(t, "laya", classifier.url, [{ id: "retain-absent", kind: "worker-write" }]);
+  await executeAcceptance(absentRun.manifestPath, absentRun.sha256, { env: workerEnv(fakeBin, "ok-readonly") });
+  const absentVerified = (await readEvidence(absentRun.runRoot)).find(line => line.phase === "verified");
+  assert.deepEqual(absentVerified?.oracleInput, { source: "summary-file", text: null, bytes: null },
+    "an absent summary is evidence of absence, not a fabricated payload");
+  assert.equal((absentVerified?.checks as Record<string, unknown>).oracle, false);
+
+  // Invalid UTF-8 in the summary records the byte count with null text.
+  const invalidRun = await buildRun(t, "laya", classifier.url, [{ id: "retain-invalid", kind: "worker-write" }]);
+  await executeAcceptance(invalidRun.manifestPath, invalidRun.sha256, { env: workerEnv(fakeBin, "summary-invalid") });
+  const invalidVerified = (await readEvidence(invalidRun.runRoot)).find(line => line.phase === "verified");
+  assert.deepEqual(invalidVerified?.oracleInput, { source: "summary-file", text: null, bytes: 4 });
+
+  // Hostile stdout content stays inside one valid JSON record per line.
+  const hostileRun = await buildRun(t, "laya", classifier.url, [{ id: "retain-hostile", kind: "worker-readonly" }]);
+  await executeAcceptance(hostileRun.manifestPath, hostileRun.sha256, { env: workerEnv(fakeBin, "hostile-answer") });
+  const hostileLines = (await readFile(join(hostileRun.runRoot, "evidence", "evidence.jsonl"), "utf8"))
+    .trim().split("\n");
+  const hostileVerified = hostileLines.map(line => JSON.parse(line) as Record<string, unknown>)
+    .find(line => line.phase === "verified");
+  const hostileText = (hostileVerified?.oracleInput as Record<string, unknown> | undefined)?.text;
+  assert.ok(typeof hostileText === "string", "hostile stdout is retained, not dropped");
+  assert.ok(hostileText!.includes(String.fromCharCode(0)), "the NUL byte survives into evidence");
+  assert.ok(hostileText!.includes(JSON.stringify({ count: 4, sum: 17 })));
+});
+
+test("the sanitizer bounds and shapes oracle input evidence", async t => {
+  const prepared = await prepareAcceptance("jev");
+  t.after(() => rm(dirname(prepared.manifestPath), { recursive: true, force: true }));
+  const run = await claimAcceptance(prepared.manifestPath, prepared.sha256);
+  t.after(() => run.handle.close());
+  const evidenceLines = async (): Promise<Record<string, unknown>[]> =>
+    (await readFile(run.evidencePath, "utf8")).trim().split("\n").map(line => JSON.parse(line) as Record<string, unknown>);
+  const shape = (over: Record<string, unknown>): Record<string, unknown> => ({ source: "stdout", text: "x", bytes: 1, ...over });
+
+  // Unknown keys and malformed field types reject.
+  for (const bad of [shape({ extra: 1 }), shape({ source: "ftp" }), shape({ text: 5 }),
+    shape({ bytes: "1" }), shape({ bytes: -1 }), { source: "stdout", text: "x" }]) {
+    await assert.rejects(() => appendEvidence(run, {
+      phase: "verified", caseId: "shape", verdict: "pass", policy: "not-applicable", checks: {},
+      oracleInput: bad
+    } as unknown as SafeEvidence), /invalid/);
+  }
+
+  // The bound is on UTF-8 bytes, not characters: multibyte text below the
+  // character bound but above the byte bound rejects; the exact size passes.
+  await assert.rejects(() => appendEvidence(run, {
+    phase: "verified", caseId: "bytes-over", verdict: "pass", policy: "not-applicable", checks: {},
+    oracleInput: { source: "stdout", text: "汉".repeat(32769), bytes: 98307 }
+  } as unknown as SafeEvidence), /invalid/);
+  await appendEvidence(run, {
+    phase: "verified", caseId: "bytes-exact", verdict: "pass", policy: "not-applicable", checks: {},
+    oracleInput: { source: "stdout", text: "汉".repeat(21845) + "x", bytes: 65536 }
+  } as unknown as SafeEvidence);
+  const exact = (await evidenceLines()).find(line => line.caseId === "bytes-exact");
+  assert.equal((exact?.oracleInput as Record<string, unknown>).bytes, 65536);
+
+  // A verified record without oracle input still round-trips (the
+  // classifier-only shape): none is invented.
+  await appendEvidence(run, {
+    phase: "verified", caseId: "bare", verdict: "pass", policy: "match", checks: {}
+  } as unknown as SafeEvidence);
+  const bare = (await evidenceLines()).find(line => line.caseId === "bare");
+  assert.ok(bare && !("oracleInput" in bare), "no oracle input is invented where none was judged");
+});
+
 test("worker and calibration cases have different pass criteria", async t => {
   const classifier = await startClassifierFixture(t);
   const fakeBin = await writeFakeCodex(t);
@@ -1109,6 +1222,7 @@ test("worker and calibration cases have different pass criteria", async t => {
     assert.deepEqual(record.checks, {
       "route-selected": true, "profile-legal": true, "backend-eligible": true, "attempts-made": true
     }, "calibration checks never mention receipts or workers");
+    assert.ok(!("oracleInput" in record), "classifier-only verdicts judge no worker output");
   }
 
   // An illegal classifier choice fails calibration on selection facts alone.
@@ -1578,6 +1692,7 @@ test("a verification error cannot discard the observation", async t => {
   const verified = evidence.find(line => line.phase === "verified");
   assert.ok(verified);
   assert.equal((verified.checks as Record<string, unknown>)["verifiable"], false);
+  assert.ok(!("oracleInput" in verified), "a refused read fabricates no oracle input");
   assert.equal(evidence.at(-1)?.phase, "stopped");
 });
 
