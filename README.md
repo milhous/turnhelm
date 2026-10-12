@@ -386,16 +386,18 @@ are historical design records, not current invocation instructions.
 Interactive, evidence-pinned diagrams live under [`.archify/`](.archify/).
 GitHub Markdown cannot embed interactive HTML, so the static captures below
 link to the artifacts; open the HTML files locally (for example
-`open .archify/architecture-turnhelm-20261009-130339/turnhelm-architecture.html`)
+`open .archify/architecture-turnhelm-20261012-090500/turnhelm-architecture.html`)
 for the interactive versions with zoom, guided views, and source links.
 
-[![Architecture diagram](.archify/architecture-turnhelm-20261009-130339/visual-check/turnhelm-architecture.visual-check.1440x900.light.png)](.archify/architecture-turnhelm-20261009-130339/turnhelm-architecture.html)
+[![Architecture diagram](.archify/architecture-turnhelm-20261012-090500/visual-check/turnhelm-architecture.visual-check.1440x900.light.png)](.archify/architecture-turnhelm-20261012-090500/turnhelm-architecture.html)
 
-[Architecture](.archify/architecture-turnhelm-20261009-130339/turnhelm-architecture.html)
-— components, the host-loopback boundary, and trust gates.
+[Architecture](.archify/architecture-turnhelm-20261012-090500/turnhelm-architecture.html)
+— components, the host-loopback boundary, and trust gates (pinned at
+`7167de1`, including the ZDOTDIR managed-root redirect).
 
 [![Routing workflow diagram](.archify/workflow-turnhelm-run-20261009-130339/visual-check/turnhelm-run-workflow.visual-check.1440x900.light.png)](.archify/workflow-turnhelm-run-20261009-130339/turnhelm-run-workflow.html)
 
 [Routing workflow](.archify/workflow-turnhelm-run-20261009-130339/turnhelm-run-workflow.html)
 — one `turnhelm run` from task submission to receipt, including rejection
-and fail-closed paths.
+and fail-closed paths (pinned at `d4d47f8`; the run flow is unchanged
+since, so the earlier pin remains flow-accurate).
