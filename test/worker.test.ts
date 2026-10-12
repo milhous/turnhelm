@@ -433,6 +433,8 @@ test("subprocess environment strips classifier credentials while preserving Code
     TURNHELM_ALLOW_HOSTED_JEV: "1",
     TURNHELM_CONFIG: "/tmp/turnhelm.json",
     NODE_V8_COVERAGE: "/tmp/node-coverage-shared",
+    BASH_ENV: "/tmp/host-bashenv",
+    ENV: "/tmp/host-shenv",
     CODEX_HOME: "/tmp/codex",
     PATH: "/bin"
   });
@@ -441,6 +443,8 @@ test("subprocess environment strips classifier credentials while preserving Code
   assert.equal(env.TURNHELM_ALLOW_HOSTED_JEV, undefined);
   assert.equal(env.TURNHELM_CONFIG, undefined);
   assert.equal(env.NODE_V8_COVERAGE, undefined);
+  assert.equal(env.BASH_ENV, undefined);
+  assert.equal(env.ENV, undefined);
   assert.equal(env.CODEX_HOME, "/tmp/codex");
   assert.equal(env.PATH, "/bin");
 });

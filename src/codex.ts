@@ -24,6 +24,11 @@ export function subprocessEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv
   delete copy.TYPESAFE_API_KEY;
   delete copy.TURNHELM_ALLOW_HOSTED_JEV;
   delete copy.TURNHELM_CONFIG;
+  // A non-interactive bash (or POSIX-shell) descendant sources these at
+  // startup, re-importing stripped material the same way zsh's startup files
+  // did before the ZDOTDIR redirect.
+  delete copy.BASH_ENV;
+  delete copy.ENV;
   // Coverage instrumentation belongs to this process, not to the external worker
   // binary; forwarding it lets test-spawned children write into the shared
   // coverage directory where a killed child leaves a truncated file behind.
