@@ -421,6 +421,32 @@ env -u TYPESAFE_API_KEY -u LAYA_API_KEY -u TURNHELM_ALLOW_HOSTED_JEV pnpm run te
 pnpm audit --audit-level high
 ```
 
+The checkout also carries a hermetic custom-round runner — `test/custom-round.ts`,
+exported through the built `dist/test` surface — for owner-defined validation
+rosters. The round input is a data-only JSON roster: nothing executable is
+trusted from it, and every referenced file is hashed into a frozen manifest as
+data. `prepareRound` validates the roster, re-verifies the pinned HEAD and
+consumed-file baseline, runs local sandboxed preflights, and writes the
+manifest with a human approval request while spending nothing — zero classifier
+requests and zero worker executions, asserted by the manifest's zero-spend
+block. `executeRound` runs only under the human-approved sha256: it re-verifies
+manifest bytes, evidence-root identity, runtime, HEAD, and baseline, claims the
+append-only evidence ledger exactly once (a replay refuses), and gates every
+case identity-before-spend — root dev/ino identity and frozen file hashes must
+re-verify before any launch. Task-output and contract-assertion failures fail
+their case and the roster continues to exit `4`; integrity failures (identity
+drift, timeout, output cap, cleanup, check infrastructure) and auth-, rate-
+limit-, or usage-limit-class worker receipts stop all remaining spend with exit
+`1`; a roster whose planned spend exceeds its frozen caps is refused before
+launch; the first SIGINT settles gracefully with `130` and SIGTERM with `143`.
+Worker-write contracts execute inside the runner's sandboxed check launcher,
+whose single marked outcome line replaces exit-code and stderr inference; the
+sandbox boundary is a path-injected fake on every platform, with a real
+seatbelt profile only in the macOS-gated test. Two harness pins landed with it:
+acceptance-style tests observe actual fake-worker invocations rather than
+reserved records, and the worker receipt's `lastEventAgeMs` is pinned positive
+through a post-drain settlement gap.
+
 The minimum Codex contract remains **0.160.0**. Compatibility evidence includes
 0.160.0 (official native binary:
 `--version` exit 0, `exec --help` advertising `--json`, `--ephemeral`,
