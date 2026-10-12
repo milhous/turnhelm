@@ -104,7 +104,12 @@ never native error text. The receipt's `worker` object always carries
 `ownedShutdown`, a boolean action record (a parent-initiated stop ladder
 ran), not a causation claim; a failed worker adds `failureClass` and
 `errorSha256` (hash only), and any death by SIGINT/SIGTERM/SIGKILL —
-failed or cancelled — adds the `signal`. Read the
+failed or cancelled — adds the `signal`. Every worker receipt also carries
+`progressEvents` — the count of event frames the parent successfully
+decoded, malformed frames excluded — and, once at least one decoded,
+`lastEventAgeMs`, the rounded milliseconds from that last decode to
+settlement; both are parent-observed, backpressure-bounded observations,
+never liveness or stall claims. Read the
 exit code and routing/worker statuses, not stderr
 presence or a selected profile alone.
 
@@ -146,7 +151,14 @@ bounded to 64 KiB, private to the claimed run; that is raw-content retention,
 not secret sanitization. Observed records also carry a whitelisted
 `workerUsage` projection whose scope is unverified, and a bounded
 `workerFailure` projection — frozen class, `ownedShutdown` boolean,
-optional correlation hash and death signal; no failure text. Exit `3` means a complete
+optional correlation hash and death signal; no failure text — plus
+`workerProgress`, the receipt's decoded-event count and, when one decoded,
+the last decode's age at settlement, the same parent-observed projection
+that never claims liveness. The harness also exports its shared oracle
+primitives — the payload-agnostic `envelopePayload` envelope fact and the
+root-parameterized `oracleSandboxPolicy` sandbox profile — so sealed-round
+tooling and tests judge against one frozen definition instead of two that
+drift. Exit `3` means a complete
 calibration roster with a band-policy mismatch; exit `4` means a complete
 worker roster with at least one engineering failure. A task-output failure
 (wrong or missing output, every integrity check true) fails the case and the

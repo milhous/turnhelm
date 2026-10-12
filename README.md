@@ -281,7 +281,12 @@ false on every natural path. A failed worker also carries the frozen
 `failureClass` (plus `errorSha256`, a SHA-256 over the native error bytes
 for cross-run correlation, when a native message existed); a worker that
 died by SIGINT/SIGTERM/SIGKILL — failed or cancelled — carries the death
-`signal`. The text behind that hash never crosses the diagnostic boundary.
+`signal`. Every worker receipt also carries `progressEvents` — the count of
+event frames the parent successfully decoded, malformed frames excluded —
+and, once at least one decoded, `lastEventAgeMs`, the rounded milliseconds
+from that last decode to settlement. Both are parent-observed,
+backpressure-bounded observations, never liveness or stall claims. The text
+behind that hash never crosses the diagnostic boundary.
 
 ## Usage evidence is honest, not authoritative
 
@@ -357,7 +362,14 @@ run and covered by the manifest approval, and never a license to put secrets
 in task output. Observed records also carry `workerUsage`, a whitelisted
 four-counter projection whose scope is unverified, and `workerFailure` —
 the frozen failure class plus the `ownedShutdown` action boolean, with an
-optional correlation hash and observed death signal; no failure text. Exit codes: `2` usage, `1`
+optional correlation hash and observed death signal; no failure text —
+plus `workerProgress`, the receipt's decoded-event count and, when one
+decoded, the last decode's age at settlement, the same parent-observed
+projection that never claims liveness. The harness also exports its shared
+oracle primitives — the payload-agnostic `envelopePayload` envelope fact
+and the root-parameterized `oracleSandboxPolicy` sandbox profile — so
+sealed-round tooling and tests judge against one frozen definition instead
+of two that drift. Exit codes: `2` usage, `1`
 failure or incomplete, `0` complete pass, `3` a complete calibration roster
 containing a band-policy mismatch, `4` a complete worker roster containing at
 least one engineering failure, `130`/`143` on interrupt. In the calibration
