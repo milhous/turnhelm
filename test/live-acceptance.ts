@@ -64,12 +64,20 @@ export type StoppedReason =
   | "drift" | "output-limit" | "evidence-io" | "signal" | "timeout"
   | "worker-failure" | "verdict" | "cleanup-unverified" | "unknown";
 
+export type OracleInputEvidence =
+  Readonly<{ source: "stdout" | "summary-file"; text: string | null; bytes: number | null }>;
+
+export type WorkerUsageEvidence =
+  Readonly<Partial<Record<"input_tokens" | "output_tokens" | "cached_input_tokens" | "reasoning_output_tokens", number>>>
+  | "unreported";
+
 export type SafeEvidence =
   | Readonly<{ phase: "prepared"; suite: LiveSuite; manifestSha256: string; startedAt: string }>
   | Readonly<{ phase: "reserved"; caseId: string; worker: number; backends: readonly AcceptanceBackend[] }>
-  | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number }>
-  | Readonly<{ phase: "verified"; caseId: string; verdict: "pass" | "fail"; policy: "match" | "mismatch" | "not-applicable"; checks: Readonly<Record<string, boolean>> }>
+  | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number; workerUsage?: WorkerUsageEvidence }>
+  | Readonly<{ phase: "verified"; caseId: string; verdict: "pass" | "fail"; policy: "match" | "mismatch" | "not-applicable"; checks: Readonly<Record<string, boolean>>; oracleInput?: OracleInputEvidence }>
   | Readonly<{ phase: "completed"; outcome: "pass" | "policy-mismatch"; cases: number; policyMatches: number; policyMismatches: number }>
+  | Readonly<{ phase: "completed"; outcome: "pass" | "fail"; cases: number; failed: number }>
   | Readonly<{ phase: "stopped"; caseId: string | null; reason: StoppedReason }>;
 
 export type ClaimedRun = Readonly<{
@@ -866,6 +874,22 @@ const evidenceString = (value: unknown): string | null => (typeof value === "str
 const evidenceCount = (value: unknown): number =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
 
+// Worker usage is a projection, never a promise: unknown or malformed counters
+// drop instead of throwing, and an absent snapshot, the CLI's literal
+// "unreported", and zero surviving counters all read as "unreported".
+const USAGE_COUNTERS = ["input_tokens", "output_tokens", "cached_input_tokens", "reasoning_output_tokens"] as const;
+const projectWorkerUsage = (usage: unknown): WorkerUsageEvidence => {
+  if (usage === "unreported" || typeof usage !== "object" || usage === null || Array.isArray(usage)) {
+    return "unreported";
+  }
+  const counters: Partial<Record<(typeof USAGE_COUNTERS)[number], number>> = {};
+  for (const field of USAGE_COUNTERS) {
+    const value = (usage as Record<string, unknown>)[field];
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) counters[field] = value;
+  }
+  return Object.keys(counters).length === 0 ? "unreported" : counters;
+};
+
 const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
   const raw = record as unknown as Record<string, unknown>;
   switch (raw.phase) {
@@ -894,7 +918,8 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
         rootMatches: typeof raw.rootMatches === "boolean" ? raw.rootMatches : "unknown",
         exitCode: typeof raw.exitCode === "number" && Number.isInteger(raw.exitCode) ? raw.exitCode : null,
         durationMs: evidenceCount(raw.durationMs),
-        attempts: evidenceCount(raw.attempts)
+        attempts: evidenceCount(raw.attempts),
+        ...(raw.workerUsage !== undefined ? { workerUsage: projectWorkerUsage(raw.workerUsage) } : {})
       };
     case "verified": {
       const checks: Record<string, boolean> = {};
@@ -907,12 +932,58 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
       if (policy !== "match" && policy !== "mismatch" && policy !== "not-applicable") {
         throw evidenceReject("verified policy is unknown");
       }
-      return { phase: "verified", caseId: evidenceString(raw.caseId) ?? "", verdict: raw.verdict === "pass" ? "pass" : "fail", policy, checks };
+      // Retained oracle input is raw worker output: strict three-key shape,
+      // bounded on UTF-8 bytes (a character count would let multibyte content
+      // slip past) so the journal stays a bounded, replay-free record.
+      let oracleInput: OracleInputEvidence | undefined;
+      const input = raw.oracleInput;
+      if (input !== undefined) {
+        if (!isRecord(input)) throw evidenceReject("oracleInput must be a record");
+        for (const key of Object.keys(input)) {
+          if (key !== "source" && key !== "text" && key !== "bytes") {
+            throw evidenceReject("oracleInput must not contain unknown field " + JSON.stringify(key));
+          }
+        }
+        const { source, text, bytes } = input;
+        if (source !== "stdout" && source !== "summary-file") throw evidenceReject("oracleInput source is unknown");
+        if (typeof text !== "string" && text !== null) throw evidenceReject("oracleInput text is malformed");
+        if (bytes !== null && (typeof bytes !== "number" || !Number.isSafeInteger(bytes) || bytes < 0)) {
+          throw evidenceReject("oracleInput bytes is malformed");
+        }
+        if (text !== null && Buffer.byteLength(text, "utf8") > STDOUT_CAP_BYTES) {
+          throw evidenceReject("oracleInput text exceeds the 65536-byte bound");
+        }
+        oracleInput = { source, text, bytes };
+      }
+      return {
+        phase: "verified", caseId: evidenceString(raw.caseId) ?? "",
+        verdict: raw.verdict === "pass" ? "pass" : "fail", policy, checks,
+        ...(oracleInput !== undefined ? { oracleInput } : {})
+      };
     }
     case "completed": {
       // The commit-point fact is written only by the runner itself, so its
       // shape is strict: an unknown field or an impossible count combination
-      // rejects rather than degrades.
+      // rejects rather than degrades. The two suite families never mix — the
+      // worker record reports failure counts, calibration policy counts.
+      if (Object.hasOwn(raw, "failed")) {
+        for (const key of Object.keys(raw)) {
+          if (key !== "phase" && key !== "outcome" && key !== "cases" && key !== "failed") {
+            throw evidenceReject("completed record must not contain unknown field " + JSON.stringify(key));
+          }
+        }
+        const outcome = raw.outcome;
+        if (outcome !== "pass" && outcome !== "fail") throw evidenceReject("completed outcome is unknown");
+        const counts = [raw.cases, raw.failed];
+        if (!counts.every(value => typeof value === "number" && Number.isSafeInteger(value) && value >= 0)) {
+          throw evidenceReject("completed counts must be non-negative safe integers");
+        }
+        const [cases, failed] = counts as [number, number];
+        if (failed > cases) throw evidenceReject("completed failures must not exceed the roster");
+        if (outcome === "pass" && failed !== 0) throw evidenceReject("a completed pass must report no failures");
+        if (outcome === "fail" && failed === 0) throw evidenceReject("a completed fail must report a failure");
+        return { phase: "completed", outcome, cases, failed };
+      }
       for (const key of Object.keys(raw)) {
         if (key !== "phase" && key !== "outcome" && key !== "cases" && key !== "policyMatches" && key !== "policyMismatches") {
           throw evidenceReject("completed record must not contain unknown field " + JSON.stringify(key));
@@ -1353,6 +1424,7 @@ export async function executeAcceptance(
       const isCalibration = run.manifest.suite === "calibration-dev" || run.manifest.suite === "calibration-holdout";
       let policyMatches = 0;
       let policyMismatches = 0;
+      let failedCases = 0;
       for (const item of run.manifest.cases) {
         if (abort?.aborted) {
           await appendEvidence(run, { phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
@@ -1396,6 +1468,7 @@ export async function executeAcceptance(
         let policy: "match" | "mismatch" | "not-applicable" = "not-applicable";
         let band: readonly string[] | null = null;
         let selectedProfileId = "unknown";
+        let oracleInput: OracleInputEvidence | undefined;
         let stopReason: StoppedReason | null = null;
         let stopExitCode = 1;
 
@@ -1479,11 +1552,17 @@ export async function executeAcceptance(
           const rootInfo = await stat(item.root).catch(() => null);
           const rootMatches = rootInfo !== null && rootInfo.dev === item.identity.dev && rootInfo.ino === item.identity.ino;
           const receiptFrame = lastJsonLine(decodeBounded(supervision.stderr) ?? "");
+          // The receipt's worker object is extracted before the observation is
+          // built: usage must be projected from the same durable observation,
+          // not from a second read taken after fallible verification.
+          const worker = receiptFrame !== null && typeof receiptFrame.worker === "object" && receiptFrame.worker !== null
+            ? receiptFrame.worker as Record<string, unknown> : null;
           const claimedRoot = receiptFrame !== null && typeof receiptFrame.root === "string" ? receiptFrame.root : null;
           const rootOk = claimedRoot !== null && await realpath(claimedRoot).catch(() => "") === item.root;
           observation = {
             phase: "observed", caseId: item.id, backend, profileId, rootMatches,
-            exitCode: supervision.exitCode, durationMs: supervision.durationMs, attempts
+            exitCode: supervision.exitCode, durationMs: supervision.durationMs, attempts,
+            workerUsage: projectWorkerUsage(worker?.usage)
           };
 
           // The observation is persisted before any fallible verification read
@@ -1518,14 +1597,20 @@ export async function executeAcceptance(
               const configUnchanged = configNow !== undefined && configNow.equals(canonicalConfigBytes(item.config));
               const gitClean = treeDiffClean(treeBefore, await hashTree(item.root), item.allowedChanges);
               const stdoutText = decodeBounded(supervision.stdout);
-              const worker = receiptFrame !== null && typeof receiptFrame.worker === "object" && receiptFrame.worker !== null
-                ? receiptFrame.worker as Record<string, unknown> : null;
               let oracleOk = false;
               if (item.oracle.kind === "stdout-json") {
                 oracleOk = jsonEquals(stdoutText, item.oracle.expected);
+                oracleInput = { source: "stdout", text: stdoutText, bytes: supervision.stdout.length };
               } else if (item.oracle.kind === "summary-file") {
+                // The retained input reuses the same read the oracle judged —
+                // a second read could observe different bytes.
                 const summary = await readProjectFile(item.root, "out/summary.json", 65536);
-                oracleOk = summary !== undefined && jsonEquals(decodeBounded(summary), item.oracle.expected);
+                const summaryText = summary === undefined ? null : decodeBounded(summary);
+                oracleOk = summaryText !== null && jsonEquals(summaryText, item.oracle.expected);
+                oracleInput = {
+                  source: "summary-file", text: summaryText,
+                  bytes: summary === undefined ? null : summary.length
+                };
               }
               checks = {
                 "receipt-unique": journalUsable && receiptLine !== null,
@@ -1534,6 +1619,7 @@ export async function executeAcceptance(
                   && receiptLine?.model === frozenPair.model && receiptLine?.effort === frozenPair.effort,
                 "receipt-task": receiptLine?.taskSha256 === item.taskHash && receiptLine?.taskBytes === item.taskBytes,
                 "receipt-root": rootOk,
+                "root-identity": rootMatches === true,
                 "exit-zero": supervision.exitCode === 0,
                 "worker-completed": worker?.status === "completed",
                 "input-unchanged": inputUnchanged,
@@ -1572,22 +1658,35 @@ export async function executeAcceptance(
             : "not-applicable";
         }
         try {
-          await appendEvidence(run, { phase: "verified", caseId: item.id, verdict, policy, checks });
+          await appendEvidence(run, {
+            phase: "verified", caseId: item.id, verdict, policy, checks,
+            ...(oracleInput !== undefined ? { oracleInput } : {})
+          });
         } catch {
           return 1;
         }
         if (isCalibration && policy === "match") policyMatches += 1;
         if (isCalibration && policy === "mismatch") policyMismatches += 1;
         if (verdict === "fail") {
-          await appendEvidence(run, { phase: "stopped", caseId: item.id, reason: "verdict" }).catch(() => {});
-          return 1;
+          // Integrity dominates: a case whose every check is true except the
+          // oracle failed on task output alone, so it is continuable — the
+          // roster runs on and the commit point counts it. Any other failure
+          // broke the chain and stops the run here.
+          const oracleOnly = Object.entries(checks).every(([name, value]) => value || name === "oracle");
+          if (oracleOnly) {
+            failedCases += 1;
+          } else {
+            await appendEvidence(run, { phase: "stopped", caseId: item.id, reason: "verdict" }).catch(() => {});
+            return 1;
+          }
         }
       }
 
       // §5.1 terminal boundary: after the last verified record is durable,
       // every suite re-checks the operator signal and the frozen corpus,
-      // source/dist, and host config before returning. Calibration alone
-      // reaches a commit point, and only through the completed protocol.
+      // source/dist, and host config before returning. Every suite reaches
+      // its commit point through the same completed protocol — calibration
+      // commits policy counts, worker suites commit failure counts.
       const stopTerminal = async (reason: StoppedReason, exitCode: number): Promise<number> => {
         await appendEvidence(run, { phase: "stopped", caseId: null, reason }).catch(() => {});
         return exitCode;
@@ -1599,26 +1698,28 @@ export async function executeAcceptance(
       } catch {
         return await stopTerminal("drift", 1);
       }
-      let outcome: "pass" | "policy-mismatch" = "pass";
-      if (isCalibration) {
-        outcome = policyMismatches === 0 ? "pass" : "policy-mismatch";
-        try {
-          await appendEvidence(run, {
-            phase: "completed", outcome, cases: run.manifest.cases.length,
+      const calibrationOutcome: "pass" | "policy-mismatch" = policyMismatches === 0 ? "pass" : "policy-mismatch";
+      try {
+        await appendEvidence(run, isCalibration
+          ? {
+            phase: "completed", outcome: calibrationOutcome, cases: run.manifest.cases.length,
             policyMatches, policyMismatches
+          }
+          : {
+            phase: "completed", outcome: failedCases === 0 ? "pass" : "fail",
+            cases: run.manifest.cases.length, failed: failedCases
           });
-        } catch {
-          return await stopTerminal("evidence-io", 1);
-        }
-        // The completed line may already be visible here; visibility alone is
-        // never completion — only the whole protocol below commits the run.
-        if (abort?.aborted) return await stopTerminal("signal", 130);
-        try {
-          await verifyRepoFrozen(run.manifest);
-          await verifyHostSnapshot(run.manifest);
-        } catch {
-          return await stopTerminal("drift", 1);
-        }
+      } catch {
+        return await stopTerminal("evidence-io", 1);
+      }
+      // The completed line may already be visible here; visibility alone is
+      // never completion — only the whole protocol below commits the run.
+      if (abort?.aborted) return await stopTerminal("signal", 130);
+      try {
+        await verifyRepoFrozen(run.manifest);
+        await verifyHostSnapshot(run.manifest);
+      } catch {
+        return await stopTerminal("drift", 1);
       }
       try {
         await run.handle.close();
@@ -1627,8 +1728,8 @@ export async function executeAcceptance(
       }
       // The FD is closed: a stop discovered now is reported, never appended.
       if (abort?.aborted) return 130;
-      if (isCalibration) return outcome === "pass" ? 0 : 3;
-      return 0;
+      if (isCalibration) return calibrationOutcome === "pass" ? 0 : 3;
+      return failedCases === 0 ? 0 : 4;
     } finally {
       if (fixtureServer !== null) {
         for (const socket of fixtureConnections) socket.destroy();

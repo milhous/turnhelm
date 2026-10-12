@@ -319,18 +319,31 @@ suite only; reservations never carry across suites. The manifest claims
 exactly once (a second execute refuses), so a run is never replayed or
 resumed; drift in the baseline, corpus, or any frozen case file stops it
 before further spend. Each case reserves its caps to the append-only evidence
-journal (mode 0600) before any call; the journal stores only bounded fixed
-fields — never task text, worker output, or environment values — and unknown
-receipt data degrades to fixed `invalid`/`unknown` markers. Exit codes: `2`
-usage, `1` failure or incomplete, `0` complete pass, `3` a complete
-calibration roster containing a band-policy mismatch, `130`/`143` on interrupt.
-In the calibration suites a legal-but-out-of-band selection is recorded as a
-policy mismatch and the roster continues to its full 12 calls — only that band
-mismatch continues; engineering, boundary, cancellation, and evidence-I/O
-failures still stop the round early — while worker suites stop at the first
-failing case. A visible `completed` journal record alone is not proof of
-completion: a failed
-terminal sync, close, or drift recheck after it still fails the run.
+journal (mode 0600) before any call; the journal stores bounded fixed fields —
+never task text or environment values — and unknown receipt data degrades to
+fixed `invalid`/`unknown` markers, with one deliberate exception: each judged
+case retains its `oracleInput`, the exact stdout or summary bytes the oracle
+judged, bounded to 64 KiB of UTF-8 before serialization. That is deliberate
+raw-content retention, not secret sanitization: it is private to the claimed
+run and covered by the manifest approval, and never a license to put secrets
+in task output. Observed records also carry `workerUsage`, a whitelisted
+four-counter projection whose scope is unverified. Exit codes: `2` usage, `1`
+failure or incomplete, `0` complete pass, `3` a complete calibration roster
+containing a band-policy mismatch, `4` a complete worker roster containing at
+least one engineering failure, `130`/`143` on interrupt. In the calibration
+suites a legal-but-out-of-band selection is recorded as a policy mismatch and
+the roster continues to its full 12 calls; in worker suites a task-output
+failure — wrong or missing output with every integrity check true — fails
+that case and the approved roster continues. Only those two classes continue:
+every other failure, including any integrity failure (a mid-case replacement
+of the consumer root is caught by the `root-identity` check), stops the round
+immediately. A visible `completed` journal record plus its exit code is a
+convenience status only: acceptance reconciles unique case IDs, per-case
+verdicts, the completed counts, the absence of a terminal `stopped` record,
+and the actual process exit before signing anything — a failed terminal sync,
+close, or drift recheck after the `completed` record still fails the run. The
+2026-10-12 routing-validation findings remain open until a fresh acceptance
+run passes them; nothing here claims their resolution.
 Cancellation signals only the owned CLI child (SIGINT, then SIGTERM after a
 fixed grace); descendants it leaves behind are not scanned or killed, and a
 child that still does not close stops the round as `cleanup-unverified` rather
