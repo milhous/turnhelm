@@ -85,9 +85,13 @@ opt-ins out of reusable defaults. Laya may require `LAYA_API_KEY`.
 The full task goes to the classifier: remove secrets and consider residency,
 cost, and consent first. Keep keys out of prompts/logs/diffs/config. The child's
 initial environment omits `LAYA_API_KEY`, `TYPESAFE_API_KEY`,
-`TURNHELM_ALLOW_HOSTED_JEV`, and legacy `TURNHELM_CONFIG`. This is not filesystem
-or shell-startup isolation: a shell can reload host secrets. Do not read key
-values or change authentication/shell settings to make a check pass.
+`TURNHELM_ALLOW_HOSTED_JEV`, and legacy `TURNHELM_CONFIG`, and redirects
+`ZDOTDIR` to the managed `.turnhelm` root so a zsh descendant does not source
+the host `~/.zshenv` (a missing startup file there is zsh's skip state). This
+is still not host filesystem secret isolation: other shells' startup files,
+absolute reads of host files, or a key exported by another mechanism remain
+outside this boundary. Do not read key values or change authentication/shell
+settings to make a check pass.
 
 ## Interpret results
 

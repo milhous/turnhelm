@@ -386,16 +386,20 @@ are historical design records, not current invocation instructions.
 Interactive, evidence-pinned diagrams live under [`.archify/`](.archify/).
 GitHub Markdown cannot embed interactive HTML, so the static captures below
 link to the artifacts; open the HTML files locally (for example
-`open .archify/architecture-turnhelm-20261009-130339/turnhelm-architecture.html`)
+`open .archify/architecture-turnhelm-20261012-090500/turnhelm-architecture.html`)
 for the interactive versions with zoom, guided views, and source links.
 
-[![Architecture diagram](.archify/architecture-turnhelm-20261009-130339/visual-check/turnhelm-architecture.visual-check.1440x900.light.png)](.archify/architecture-turnhelm-20261009-130339/turnhelm-architecture.html)
+[![Architecture diagram](.archify/architecture-turnhelm-20261012-090500/visual-check/turnhelm-architecture.visual-check.1440x900.light.png)](.archify/architecture-turnhelm-20261012-090500/turnhelm-architecture.html)
 
-[Architecture](.archify/architecture-turnhelm-20261009-130339/turnhelm-architecture.html)
-— components, the host-loopback boundary, and trust gates.
+[Architecture](.archify/architecture-turnhelm-20261012-090500/turnhelm-architecture.html)
+— components, the host-loopback boundary, and trust gates including the
+ZDOTDIR managed-root redirect.
 
-[![Routing workflow diagram](.archify/workflow-turnhelm-run-20261009-130339/visual-check/turnhelm-run-workflow.visual-check.1440x900.light.png)](.archify/workflow-turnhelm-run-20261009-130339/turnhelm-run-workflow.html)
+[![Routing workflow diagram](.archify/workflow-turnhelm-run-20261012-091500/visual-check/turnhelm-run-workflow.visual-check.1440x900.light.png)](.archify/workflow-turnhelm-run-20261012-091500/turnhelm-run-workflow.html)
 
-[Routing workflow](.archify/workflow-turnhelm-run-20261009-130339/turnhelm-run-workflow.html)
+[Routing workflow](.archify/workflow-turnhelm-run-20261012-091500/turnhelm-run-workflow.html)
 — one `turnhelm run` from task submission to receipt, including rejection
 and fail-closed paths.
+
+Both diagrams are pinned at `6a2f8dc`; earlier `.archify/` generations
+remain as historical evidence.
