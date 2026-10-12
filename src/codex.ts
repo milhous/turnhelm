@@ -244,6 +244,18 @@ export function executeWorker(
       }, GROUP_POLL_MS);
     };
 
+    // Group-cleanup obligation of a sticky failure: holds settlement until the
+    // owned group is gone — discharged silently when it already is, or through
+    // the TERM→KILL ladder when descendants survive the leader. Reached from
+    // the close handler and from a failed frame decoded after close.
+    const settleObligation = (): void => {
+      if (shutdownStarted || finished) return;
+      clearFailureDeadline();
+      shutdownDischarged = false;
+      if (!signalGroup(0)) { dischargeShutdown(); return; }
+      beginShutdown();
+    };
+
     // The first transport cause wins; consequences of our own shutdown are not
     // causes, and nothing after settlement changes the reported outcome.
     const recordFailure = (cause: "spawn" | "stdin" | "protocol" | "output"): void => {
@@ -390,8 +402,9 @@ export function executeWorker(
       cancelDiagWait = waitDiagDrain();
     };
 
-    // One fixed line per failed turn; the taxonomy class is the only
-    // failure-text derivative that ever reaches the diagnostics sink.
+    // One fixed line per failed run, written by its first failed turn; the
+    // taxonomy class is the only failure-text derivative that ever reaches
+    // the diagnostics sink.
     const reportWorkerFailed = (failureClass: FailureClass): void => {
       if (shutdownStarted || finished) return;
       const line = "turnhelm: worker-failed: " + failureClass + "\n";
@@ -422,14 +435,19 @@ export function executeWorker(
           return;
         case "failed":
           // Irreversible: a later completion cannot restore success. The first
-          // failure event owns the attribution; the deadline, not an immediate
-          // shutdown, now bounds the group-cleanup obligation.
+          // failure event owns the attribution and the single diagnostic line;
+          // the deadline, not an immediate shutdown, now bounds the
+          // group-cleanup obligation.
+          if (!stickyFailed) reportWorkerFailed(event.failureClass);
           stickyFailed = true;
           if (failureClass === undefined) {
             failureClass = event.failureClass;
             failureHash = event.errorSha256;
           }
-          reportWorkerFailed(event.failureClass);
+          // A frame held back by sink backpressure can only be decoded after
+          // the child closed; the close handler saw no sticky failure then, so
+          // the obligation discharges here — settlement cannot outrun cleanup.
+          if (closed) { settleObligation(); return; }
           startFailureDeadline();
           return;
         case "diagnostic":
@@ -494,16 +512,7 @@ export function executeWorker(
       closed = true;
       childCode = code;
       childSignal = signal;
-      if (stickyFailed && !shutdownStarted && !finished) {
-        // Group-cleanup obligation: a sticky failure with no shutdown yet holds
-        // settlement until the owned group is gone — discharged silently when
-        // it already is, or through the TERM→KILL ladder when descendants
-        // survive the leader.
-        clearFailureDeadline();
-        shutdownDischarged = false;
-        if (!signalGroup(0)) { dischargeShutdown(); return; }
-        beginShutdown();
-      }
+      if (stickyFailed) settleObligation();
       settle();
     });
   });

@@ -371,8 +371,10 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
         await new Promise(resolve => setTimeout(resolve, 50));
         lateErrAfter = lateSink.listenerCount("error");
       }` : ""}
+      // Sample post-settlement signals after the linger window, not before it:
+      // a late ladder attempt must land in postSettleKills, not after the read.
+      ${scenario.lingerMs ? `await sleep(${scenario.lingerMs});` : ""}
       await writeFile(resultFile, JSON.stringify({ ...result, received, maxPending, emitted: captured, outputAcked, diagAcked, diagWrites, diagMaxLength, diagFinalLength, outputErrBefore, outputErrAfter, tailWrites, lateErrBefore, lateErrAfter, ...(${scenario.trackFrameConcat ?? false} ? { maxFrameConcatBytes } : {}), ...(${scenario.trackKills ?? false} ? { postSettleKills } : {}), ...(${scenario.gate === "abort-after-shutdown"} ? { abortAfterShutdownReached } : {}) }));
-      ${scenario.lingerMs ? `setTimeout(() => {}, ${scenario.lingerMs});` : ""}
     } catch (error) {
       stopObservation();
       killOwned();
@@ -654,6 +656,36 @@ finish(() => {
   await waitForExit(Number(await readFile(join(directory, "owned.pid"), "utf8")));
 });
 
+test("a failed turn buffered past child close still discharges the cleanup obligation", { timeout: 30_000 }, async t => {
+  const { recorded, directory } = await runWorker(t, {
+    output: "blocker",
+    drainDelayMs: 800,
+    script: `
+const { spawn } = require("node:child_process");
+const child = spawn(process.execPath, ["-e", ${JSON.stringify(stubbornChild)}], { stdio: "ignore" });
+fs.writeFileSync(path.join(here, "descendant.pid"), String(child.pid));
+finish(() => {
+  setTimeout(() => {
+    // One write: the blocked sink stops the loop after the message frame, so
+    // the failed frame is only decoded after the drain — past child close.
+    process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "partial" } }) + "\\n" + JSON.stringify({ type: "turn.failed", message: "rate limit exceeded" }) + "\\n");
+    process.exit(7);
+  }, 400);
+});
+`
+  });
+  const descendant = Number(await fakeFile(directory, "descendant.pid"));
+  t.after(() => { try { process.kill(descendant, "SIGKILL"); } catch { /* already gone on the green path */ } });
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "worker");
+  assert.equal(recorded.code, 7);
+  assert.equal(recorded.failureClass, "rate-limit");
+  // The blocked sink holds the failed frame until after close: settlement
+  // must not outrun the group-cleanup obligation.
+  assert.equal(recorded.ownedShutdown, true, "the ladder must still run for a post-close failed turn");
+  await waitForExit(descendant);
+});
+
 test("failure deadline expiry escalates a still-alive leader", { timeout: 30_000 }, async t => {
   const { recorded } = await runWorker(t, {
     settlementGuardMs: 9000,
@@ -793,6 +825,21 @@ finish(() => {
   assert.equal(recorded.status, "failed");
   assert.equal(stderr, "turnhelm: worker-failed: rate-limit\n");
   forbid(stderr, "password=p@ss.word!");
+});
+
+test("repeated failed turns write exactly one diagnostic line with the first class", { timeout: 30_000 }, async t => {
+  const { recorded, stderr } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "turn.failed", message: "rate limit exceeded" });
+  emit({ type: "turn.failed", message: "request timed out after 60000ms" });
+  setTimeout(() => process.exit(5), 100);
+});
+`
+  });
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.failureClass, "rate-limit", "the first failure event wins attribution");
+  assert.equal(stderr, "turnhelm: worker-failed: rate-limit\n");
 });
 
 test("an error event is a fixed diagnostic and cannot undo a later completion", { timeout: 30_000 }, async t => {
