@@ -38,7 +38,9 @@ read), `TURNHELM_ALLOW_HOSTED_JEV=1`.
 ## Interpretation (predeclared limits)
 
 - Local resolution now matches the authoritative answer; the earlier
-  hosts-file A-record mismatch no longer reproduces. TCP and TLS to the
+  local-resolver A-record mismatch (resolver answers differed from the
+  authoritative set; the source of those answers was never identified) no
+  longer reproduces. TCP and TLS to the
   origin edge succeed, and the HTTP round trip completes in ~0.7 s.
 - The hosted failure mode changed from transport-level (`ETIMEDOUT`, 2026-10-11)
   to HTTP-level: the origin edge returns **451 Unavailable For Legal Reasons**

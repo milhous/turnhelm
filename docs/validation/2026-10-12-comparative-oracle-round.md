@@ -130,6 +130,18 @@ profileId and confidence as the frozen 2026-10-11 baseline appendix
 snapshots are `unverified` scope, exactly as reported by the worker, never
 summed.
 
+Protocol deviation (declared, not silently applied): the predeclared oracle's
+failure clause "new/removed files" did not anticipate turnhelm's own route
+journal — `run` appends `.turnhelm/routes.jsonl` **before** the worker starts
+(`src/journal.ts` via `src/cli.ts`), so every run necessarily leaves exactly
+one new untracked file in the consumer root regardless of worker behavior.
+The verdicts above treat that router-owned, pre-worker journal as run
+mechanics rather than a worker file change; the worker-attributable change in
+every run is exactly the one README line. Applied literally, the predicate
+would have recorded all four runs as predicate misses (not worker failures).
+The predeclaration is left as written; this paragraph is the recorded
+deviation.
+
 ## Interpretation (bounded to the predeclared limits)
 
 - On these two frozen single-line-edit tasks, the band's lightest profile
@@ -138,13 +150,14 @@ summed.
   selection. Sufficiency of the lightest profile is claimed **only** for these
   two tasks under this oracle.
 - Wall-clock: the lightest arm ran 4.4 s (heading) and 2.4 s (decoy) faster on
-  ~54–61 s runs. These are single observations dominated by fixed worker
-  overhead; no general speed claim is made.
+  ~54–61 s runs. These are single observations recorded without decomposition
+  into their causes; no general speed claim is made.
 - Usage: reported token snapshots did not order with profile lightness —
   luna/low consumed more input tokens than astra/high on heading (71420 vs
-  55838) and fewer on decoy (53608 vs 94308). Input-token counts include
-  per-model context assembly differences; no per-token, per-run, or percentage
-  cost or savings claim is made (ChatGPT-login runs; no API-bill basis).
+  55838) and fewer on decoy (53608 vs 94308). The counts are per-model
+  reported figures and are not decomposed further; no per-token, per-run, or
+  percentage cost or savings claim is made (ChatGPT-login runs; no API-bill
+  basis).
 - Accounting: exactly 4 worker runs, within the predeclared cap; no reruns,
   retries, or prompt edits occurred; no engineering failure arose.
 - Effect on open findings: the `routing-policy-calibration-cost-quality`
