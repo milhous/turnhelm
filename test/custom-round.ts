@@ -744,6 +744,32 @@ const receiptFailureClass = (stderr: Buffer): string | null => {
   return null;
 };
 
+// Spec §3.5: exactly one receipt per classified run. Zero receipts (a CLI
+// that died before classification) or several means the run's own attribution
+// is broken, so grading never proceeds on captured stdout alone.
+const receiptCount = (stderr: Buffer): number => {
+  let count = 0;
+  for (const line of stderr.toString("utf8").split("\n")) {
+    if (!line.includes("turnhelm.receipt")) continue;
+    try {
+      const parsed = JSON.parse(line) as { type?: unknown };
+      if (parsed.type === "turnhelm.receipt") count += 1;
+    } catch { /* not a receipt line */ }
+  }
+  return count;
+};
+
+// The ledger carries journal values only through a fixed whitelist: a forged
+// or malformed journal line degrades to null instead of reaching the evidence
+// record. Backend ids mirror config v1's two backends.
+const BACKEND_IDS = new Set(["laya", "jev"]);
+const journalString = (value: unknown, allowed: ReadonlySet<string>): string | null =>
+  typeof value === "string" && allowed.has(value) ? value : null;
+
+// The same bounded oracle-input retention the live harness froze (64 KiB of
+// UTF-8): each judged case keeps the bytes its grading consumed.
+const ORACLE_INPUT_CAP_BYTES = 1 << 16;
+
 // The gated run: approval hash, evidence-root identity, runtime and baseline
 // re-verification, an exclusive-create claim, then per case identity-before-
 // spend, one supervised CLI run, declarative grading, the sandboxed contract
@@ -753,16 +779,17 @@ const receiptFailureClass = (stderr: Buffer): string | null => {
 export async function executeRound(
   manifestPath: string,
   approvedSha256: string,
-  options?: Readonly<{ env?: NodeJS.ProcessEnv; signal?: AbortSignal; sandboxExecPath?: string; caseTimeoutMs?: number }>
+  options?: Readonly<{ env?: NodeJS.ProcessEnv; signal?: AbortSignal; sandboxExecPath?: string }>
 ): Promise<number> {
   // Signal ladder (spec §3.3): the first SIGINT stops gracefully — the owned
   // CLI child is signalled through its supervision abort path and the round
   // settles with 130 — while SIGTERM settles with 143 after the same child
   // cleanup. A caller-supplied signal feeds the same controller.
   const controller = new AbortController();
+  const relayAbort = (): void => { controller.abort(); };
   if (options?.signal !== undefined) {
     if (options.signal.aborted) controller.abort();
-    else options.signal.addEventListener("abort", () => controller.abort(), { once: true });
+    else options.signal.addEventListener("abort", relayAbort, { once: true });
   }
   let terminated = false;
   const onInterrupt = (): void => { controller.abort(); };
@@ -775,13 +802,22 @@ export async function executeRound(
   } finally {
     process.removeListener("SIGINT", onInterrupt);
     process.removeListener("SIGTERM", onTerminate);
+    options?.signal?.removeEventListener("abort", relayAbort);
   }
 }
+
+const baselineDrifted = async (manifest: RoundManifest): Promise<boolean> => {
+  for (const file of manifest.baseline.files) {
+    const fileBytes = await readFile(join(REPO_ROOT, file.path)).catch(() => null);
+    if (fileBytes === null || sha256hex(fileBytes) !== file.sha256) return true;
+  }
+  return false;
+};
 
 async function runGatedRound(
   manifestPath: string,
   approvedSha256: string,
-  options: Readonly<{ env?: NodeJS.ProcessEnv; sandboxExecPath?: string; caseTimeoutMs?: number }> | undefined,
+  options: Readonly<{ env?: NodeJS.ProcessEnv; sandboxExecPath?: string }> | undefined,
   signal: AbortSignal,
   terminated: () => boolean
 ): Promise<number> {
@@ -808,10 +844,7 @@ async function runGatedRound(
     return 1;
   }
   if (head !== manifest.head) return 1;
-  for (const file of manifest.baseline.files) {
-    const fileBytes = await readFile(join(REPO_ROOT, file.path)).catch(() => null);
-    if (fileBytes === null || sha256hex(fileBytes) !== file.sha256) return 1;
-  }
+  if (await baselineDrifted(manifest)) return 1;
   const ledgerPath = join(manifestDir, "custom-round-evidence.jsonl");
   const appendEvidence = async (record: Record<string, unknown>): Promise<void> => {
     await appendFile(ledgerPath, JSON.stringify(record) + "\n");
@@ -833,9 +866,19 @@ async function runGatedRound(
       await appendEvidence({ phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
       return terminated() ? 143 : 130;
     }
+    // The consumed baseline re-verifies before every reservation: executed
+    // code swapped mid-round is drift even when the running case booted first.
+    if (await baselineDrifted(manifest)) {
+      await appendEvidence({ phase: "stopped", caseId: item.id, reason: "baseline" }).catch(() => {});
+      return 1;
+    }
     // Identity before spend (spec §3.2(1)): canonical path plus dev/ino — the
-    // check that catches same-path replacement — and every pinned case file
-    // still hashes to its frozen bytes.
+    // check that catches same-path replacement — every pinned case file still
+    // hashes to its frozen bytes, and the consumer tree still matches its
+    // frozen snapshot (only the routing journal is exempt, and nothing may
+    // have changed yet: the worker that legitimately writes runs only after
+    // this gate).
+    const frozenTree = new Map(Object.entries(item.tree));
     let stopReason: string | null = null;
     const rootInfo = await stat(item.root.canonical).catch(() => null);
     if (rootInfo === null || rootInfo.dev !== item.root.dev || rootInfo.ino !== item.root.ino) {
@@ -853,6 +896,10 @@ async function runGatedRound(
       const hasRole = (role: string): boolean => item.files.some(file => file.role === role);
       if ((item.transport === "stdin-file" && !hasRole("taskFile"))
         || (item.kind === "worker-write" && !hasRole("contract"))) stopReason = "case-files";
+      const launchTree = await hashTree(item.root.canonical);
+      if (launchTree === null || treeChangedOutside(frozenTree, launchTree, []) !== null) {
+        stopReason = "case-files";
+      }
     }
     if (stopReason !== null) {
       await appendEvidence({ phase: "stopped", caseId: item.id, reason: stopReason }).catch(() => {});
@@ -862,7 +909,13 @@ async function runGatedRound(
       await appendEvidence({ phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
       return terminated() ? 143 : 130;
     }
-    await appendEvidence({ phase: "reserved", caseId: item.id }).catch(() => {});
+    // The reserved record is the spend gate's own evidence: if it cannot be
+    // written, no further case may launch (spec §3.3).
+    try {
+      await appendEvidence({ phase: "reserved", caseId: item.id });
+    } catch {
+      return 1;
+    }
 
     // Task transport: arg rides the CLI argv; stdin-file redirects the frozen
     // file into the CLI's stdin through an exec'ing shell (superviseCli wires
@@ -878,7 +931,7 @@ async function runGatedRound(
             "<", shQuote(taskFileEntry === undefined ? "" : taskFileEntry.path)].join(" ")]
         };
     const observation = await superviseCli(supervision.file, supervision.args,
-      { env, timeoutMs: options?.caseTimeoutMs ?? CASE_TIMEOUT_MS, signal });
+      { env, timeoutMs: CASE_TIMEOUT_MS, signal });
     if (observation.aborted || signal.aborted) {
       await appendEvidence({ phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
       return terminated() ? 143 : 130;
@@ -889,6 +942,12 @@ async function runGatedRound(
       await appendEvidence({
         phase: "stopped", caseId: item.id, reason: observation.timedOut ? "timeout" : "output-cap"
       }).catch(() => {});
+      return 1;
+    }
+    // Exactly one receipt (spec §3.5): a run that receipted zero or several
+    // times has no trustworthy attribution, so its stdout is never graded.
+    if (receiptCount(observation.stderr) !== 1) {
+      await appendEvidence({ phase: "stopped", caseId: item.id, reason: "receipt" }).catch(() => {});
       return 1;
     }
     // A stopping failure class on the CLI's receipt (spec §3.3) ends the
@@ -902,7 +961,13 @@ async function runGatedRound(
 
     const taskHash = sha256hex(item.task);
     const journal = await readCaseJournal(item.root.canonical, taskHash);
+    const backend = journalString(journal?.backend, BACKEND_IDS);
+    const profileId = journalString(journal?.profileId, PROFILE_SET);
     let passed = observation.exitCode === 0 && gradeOutput(item.grading.mode, observation.stdout.toString("utf8"), item.grading.expected);
+    // A legal profile outside the case's declared allowance is an engineering
+    // failure of the case (spec §3.6): the selection ran, so it is recorded,
+    // but the case fails without stopping the roster.
+    if (passed && profileId !== null && !item.allowedProfiles.includes(profileId)) passed = false;
 
     // The worker-write contract runs inside the frozen sandbox, but only for
     // a case whose run otherwise passed — a failed run already fails the case,
@@ -918,10 +983,21 @@ async function runGatedRound(
         contract = await runSandboxedCheck({
           sandboxExecPath, runtimeDir, cwd: item.root.canonical,
           entryScript: contractEntry === undefined ? "" : contractEntry.path,
-          allowReadSubpaths: [item.root.canonical], timeoutMs: CONTRACT_TIMEOUT_MS
+          // The contract file itself is consumed from wherever the roster
+          // froze it, which may sit outside the consumer root — the read
+          // grant matches the prepare-time preflight (F4's external-contract
+          // load path).
+          allowReadSubpaths: [item.root.canonical, ...contractEntry === undefined ? [] : [dirname(contractEntry.path)]],
+          timeoutMs: CONTRACT_TIMEOUT_MS, signal
         });
       } finally {
         await rm(runtimeDir, { recursive: true, force: true });
+      }
+      // A signal that lands mid-contract settles the round through the signal
+      // ladder, never as a contract infrastructure stop.
+      if (contract.status === "infrastructure" && contract.reason === "aborted") {
+        await appendEvidence({ phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
+        return terminated() ? 143 : 130;
       }
       if (contract.status === "infrastructure") {
         await appendEvidence({ phase: "stopped", caseId: item.id, reason: "contract-" + contract.reason }).catch(() => {});
@@ -929,13 +1005,31 @@ async function runGatedRound(
       }
       if (contract.status === "failed") passed = false;
     }
+    if (signal.aborted) {
+      await appendEvidence({ phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
+      return terminated() ? 143 : 130;
+    }
+
+    // Integrity over semantics (spec §3.3): every completed case re-verifies
+    // its consumer tree before the outcome counts — pass or fail — so a worker
+    // that wrote outside its allowance stops the round even when its output
+    // graded fine. An unfreezable tree (new symlink, oversize) is drift.
+    const settledTree = await hashTree(item.root.canonical);
+    if (settledTree === null || treeChangedOutside(frozenTree, settledTree, item.allowedChanges) !== null) {
+      await appendEvidence({ phase: "stopped", caseId: item.id, reason: "tree-drift" }).catch(() => {});
+      return 1;
+    }
 
     if (!passed) failedCases += 1;
+    // The case record fails open: the case already ran and its stop conditions
+    // were all checked; a dead ledger here surfaces at the next case's
+    // reserved append, which is a hard stop.
     await appendEvidence({
       phase: "case", caseId: item.id, outcome: passed ? "pass" : "failed",
       exitCode: observation.exitCode, durationMs: observation.durationMs, taskSha256: taskHash,
-      backend: journal?.backend ?? null, profileId: journal?.profileId ?? null
-    });
+      backend, profileId,
+      oracleInput: observation.stdout.subarray(0, ORACLE_INPUT_CAP_BYTES).toString("utf8")
+    }).catch(() => {});
   }
   return failedCases === 0 ? 0 : 4;
 }

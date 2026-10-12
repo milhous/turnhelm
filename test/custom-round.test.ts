@@ -6,12 +6,13 @@ import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
+import { getEventListeners } from "node:events";
 import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { executeRound, nodeReadClosure, prepareRound, runSandboxedCheck } from "./custom-round.js";
 import { executableFixture } from "./executable-fixture.js";
 
@@ -527,6 +528,7 @@ type ExecuteCaseSpec = {
   grading: Record<string, unknown>;
   outputLines: readonly string[];
   contractSource?: string;
+  allowedChanges?: readonly string[];
 };
 
 const scratchExecuteRound = async (
@@ -537,6 +539,8 @@ const scratchExecuteRound = async (
     caps?: { classifierRequests: number; workerExecutions: number };
     choice?: string;
     codex?: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string }>;
+    poisonJournal?: boolean;
+    baselineFiles?: readonly string[];
   }>
 ): Promise<{
   base: string;
@@ -587,13 +591,19 @@ const scratchExecuteRound = async (
     await mkdir(join(root, ".turnhelm"), { recursive: true });
     await writeFile(join(root, ".turnhelm", "config.json"), caseConfig(port));
     await writeFile(join(root, "codex-output.txt"), spec.outputLines.join("\n") + "\n");
+    if (options?.poisonJournal === true) {
+      // A forged journal line carrying the real task hash, with an object
+      // backend and an unknown profile: whatever reads it must whitelist.
+      await writeFile(join(root, ".turnhelm", "routes.jsonl"),
+        JSON.stringify({ taskSha256: sha256hex(taskText), backend: { evil: 1 }, profileId: "not-a-profile" }) + "\n");
+    }
     const contract = join(base, spec.id + "-contract.mjs");
     await writeFile(contract,
       spec.contractSource ?? "import assert from \"node:assert/strict\";\nassert.equal(1 + 1, 2);\n");
     cases.push({
       id: spec.id, kind: spec.kind, scope: spec.id + " scope", task: taskText,
       transport: spec.transport, root,
-      allowedChanges: [...(spec.kind === "worker-write" ? ["ledger.json"] : []), "worker-task.txt"],
+      allowedChanges: spec.allowedChanges ?? [...(spec.kind === "worker-write" ? ["ledger.json"] : []), "worker-task.txt"],
       allowedProfiles: ["fast", "balanced"],
       grading: spec.grading,
       files: spec.kind === "worker-write"
@@ -610,7 +620,8 @@ const scratchExecuteRound = async (
     cases
   }));
   const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
-  const prepared = await prepareRound(rosterPath, { sandboxExecPath: fake });
+  const prepared = await prepareRound(rosterPath,
+    { sandboxExecPath: fake, ...(options?.baselineFiles !== undefined ? { baselineFiles: options.baselineFiles } : {}) });
   const env: NodeJS.ProcessEnv = {
     PATH: bin,
     CODEX_HOME: join(base, "codex-home"),
@@ -650,6 +661,11 @@ test("execute runs both transports, grades both cases, and exits zero with an ev
     const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
     assert.deepEqual(ledger.filter(r => r.phase === "case").map(r => [r.caseId, r.outcome]).sort(),
       [["case-a", "pass"], ["case-b", "pass"]], "both cases are graded pass in the ledger");
+    const caseRecords = ledger.filter(r => r.phase === "case");
+    assert.ok(caseRecords.every(r => typeof r.oracleInput === "string" && r.oracleInput.length > 0),
+      "each case record retains the bounded oracle input it was graded on");
+    assert.deepEqual(caseRecords.map(r => [r.backend, r.profileId]).sort(),
+      [["laya", "balanced"], ["laya", "balanced"]], "journal values surface only through the whitelist");
     assert.ok(!ledger.some(r => r.phase === "stopped"), "no stop record on the happy path");
     assert.equal(await readFile(round.invocations, "utf8"), "11", "exactly one worker execution per case");
     for (const root of round.roots) {
@@ -768,27 +784,57 @@ test("a same-path replaced root with identical bytes is still refused, with zero
   assert.deepEqual(ledger.at(-1), { phase: "stopped", caseId: "case-a", reason: "root-identity" });
 });
 
-test("executed-code drift after prepare is a baseline refusal before any launch", { timeout: 90_000 }, async t => {
+// Baseline-drift fixtures pin the approved baseline to a scratch file in a
+// private temp dir: mutating a real dist file would race every parallel test
+// file whose sealed rounds hash dist.
+test("a baseline file mutated after prepare is a baseline refusal before any launch", { timeout: 90_000 }, async t => {
+  const consumed = await mkdtemp(join(tmpdir(), "turnhelm-consumed-"));
+  t.after(() => rm(consumed, { recursive: true, force: true }).catch(() => {}));
+  const target = join(consumed, "consumed-code.js");
+  await writeFile(target, "original consumed bytes\n");
   const round = await scratchExecuteRound(t, [
     {
       id: "case-a", kind: "worker-readonly", transport: "arg",
       grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
     }
-  ]);
-  const target = join(REPO_ROOT, "dist", "src", "doctor.js");
-  const original = await readFile(target);
-  try {
-    await writeFile(target, original + "\n// turnhelm test mutation\n");
-    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
-    const code = await executeRound(round.manifestPath, round.approvalSha256,
-      { env: round.env, sandboxExecPath: fake });
-    assert.equal(code, 1, "mutated executed code never reaches the claim");
-    await assert.rejects(readFile(round.invocations), { code: "ENOENT" }, "zero worker invocations");
-    assert.equal(round.classifierRequests(), 0, "zero classifier spend");
-  } finally {
-    await writeFile(target, original);
-  }
+  ], {}, { baselineFiles: [relative(REPO_ROOT, target)] });
+  await writeFile(target, "mutated consumed bytes\n");
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const code = await executeRound(round.manifestPath, round.approvalSha256,
+    { env: round.env, sandboxExecPath: fake });
+  assert.equal(code, 1, "mutated consumed code never reaches the claim");
+  await assert.rejects(readFile(round.invocations), { code: "ENOENT" }, "zero worker invocations");
+  assert.equal(round.classifierRequests(), 0, "zero classifier spend");
 });
+
+test("a baseline file mutated between cases stops the round at the next reservation",
+  { timeout: 90_000 }, async t => {
+    const consumed = await mkdtemp(join(tmpdir(), "turnhelm-consumed-"));
+    t.after(() => rm(consumed, { recursive: true, force: true }).catch(() => {}));
+    const target = join(consumed, "consumed-code.js");
+    await writeFile(target, "original consumed bytes\n");
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      },
+      {
+        id: "case-b", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ], {}, { codex: { stallMs: 1500 }, baselineFiles: [relative(REPO_ROOT, target)] });
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const pending = executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    // Mutate while case-a's stalled worker holds the round open: case-a may
+    // finish, but case-b's reservation must re-verify the consumed baseline.
+    await waitForFile(round.invocations);
+    await writeFile(target, "mutated consumed bytes\n");
+    assert.equal(await pending, 1, "baseline drift mid-round stops all remaining spend");
+    assert.equal(await readFile(round.invocations, "utf8"), "1", "the second case never launches");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    assert.deepEqual(ledger.at(-1), { phase: "stopped", caseId: "case-b", reason: "baseline" });
+  });
 
 test("a footer output fails strict-whole-json while envelope-equal tolerates it",
   { timeout: 90_000 }, async t => {
@@ -843,6 +889,130 @@ test("the CLI child env is scrubbed before it reaches the CLI and again the work
   });
 
 // ---------- Task 6: stop policy, lifecycle, and exit codes (spec §3.3) ----------
+
+test("a worker writing outside its allowedChanges stops the round", { timeout: 90_000 }, async t => {
+  const round = await scratchExecuteRound(t, [
+    {
+      id: "case-a", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+    },
+    {
+      id: "case-b", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+    }
+  ], {}, { codex: { extraWrite: "evil.txt" } });
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const code = await executeRound(round.manifestPath, round.approvalSha256,
+    { env: round.env, sandboxExecPath: fake });
+  assert.equal(code, 1, "an undeclared tree change is an integrity stop, even when the case's output graded fine");
+  assert.equal(await readFile(round.invocations, "utf8"), "1", "the second case never launches");
+  const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+  assert.deepEqual(ledger.at(-1), { phase: "stopped", caseId: "case-a", reason: "tree-drift" });
+});
+
+test("a CLI run that receipts nothing is an integrity stop", { timeout: 90_000 }, async t => {
+  const round = await scratchExecuteRound(t, [
+    {
+      id: "case-a", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+    }
+  ]);
+  // A PATH without the fake git: the CLI's own preflight fails before
+  // classification, so the run emits no receipt at all.
+  const gitlessBin = join(round.base, "bin-nogit");
+  await mkdir(gitlessBin);
+  await copyFile(join(round.base, "bin", "codex"), join(gitlessBin, "codex"));
+  await chmod(join(gitlessBin, "codex"), 0o755);
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const code = await executeRound(round.manifestPath, round.approvalSha256,
+    { env: { ...round.env, PATH: gitlessBin }, sandboxExecPath: fake });
+  assert.equal(code, 1, "a case without exactly one receipt never grades on stdout alone");
+  await assert.rejects(readFile(round.invocations), { code: "ENOENT" }, "the worker never runs");
+  assert.equal(round.classifierRequests(), 0, "the failure precedes classification");
+  const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+  assert.deepEqual(ledger.at(-1), { phase: "stopped", caseId: "case-a", reason: "receipt" });
+});
+
+test("a selection outside the case's allowed profiles fails the case", { timeout: 90_000 }, async t => {
+  const round = await scratchExecuteRound(t, [
+    {
+      id: "case-a", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+    }
+  ], {}, { choice: "frontier" });
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const code = await executeRound(round.manifestPath, round.approvalSha256,
+    { env: round.env, sandboxExecPath: fake });
+  assert.equal(code, 4, "an out-of-profile selection is an engineering failure of the case, not a stop");
+  const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+  const record = ledger.find(r => r.phase === "case");
+  assert.equal(record?.outcome, "failed");
+  assert.equal(record?.profileId, "frontier", "the selection is recorded even as it fails the case");
+});
+
+test("a reserved-record append failure stops before the next spend", { timeout: 90_000 }, async t => {
+  const round = await scratchExecuteRound(t, [
+    {
+      id: "case-a", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+    },
+    {
+      id: "case-b", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+    }
+  ], {}, { codex: { stallMs: 1500 } });
+  const ledgerPath = join(round.evidenceRoot, "custom-round-evidence.jsonl");
+  t.after(async () => { await chmod(ledgerPath, 0o600).catch(() => {}); });
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const pending = executeRound(round.manifestPath, round.approvalSha256,
+    { env: round.env, sandboxExecPath: fake });
+  // Wait until case-a's worker is mid-run (its 1.5s stall guarantees the
+  // window), then kill the ledger: case-a's own appends may still land, but
+  // case-b's reserved record must not.
+  await waitForFile(round.invocations);
+  await chmod(ledgerPath, 0o000);
+  assert.equal(await pending, 1, "a reserved record that cannot be written stops all remaining spend");
+  assert.equal(await readFile(round.invocations, "utf8"), "1", "only the already-running case executed");
+});
+
+test("journal values outside the whitelist degrade to null", { timeout: 90_000 }, async t => {
+  const round = await scratchExecuteRound(t, [
+    {
+      id: "case-a", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+    }
+  ], {}, { poisonJournal: true });
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const code = await executeRound(round.manifestPath, round.approvalSha256,
+    { env: round.env, sandboxExecPath: fake });
+  assert.equal(code, 0, "a poisoned journal line never fails the case by itself");
+  const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+  const record = ledger.find(r => r.phase === "case");
+  assert.equal(record?.backend, null, "an object backend never reaches the ledger");
+  assert.equal(record?.profileId, null, "an unknown profile id never reaches the ledger");
+});
+
+test("refused executions leave no abort listeners behind", { timeout: 90_000 }, async t => {
+  const round = await scratchExecuteRound(t, [
+    {
+      id: "case-a", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+    }
+  ]);
+  const elsewhere = join(round.base, "elsewhere");
+  await mkdir(elsewhere);
+  const copyPath = join(elsewhere, "custom-round-manifest.json");
+  await copyFile(round.manifestPath, copyPath);
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const external = new AbortController();
+  for (let index = 0; index < 3; index += 1) {
+    assert.equal(await executeRound(copyPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake, signal: external.signal }), 1);
+  }
+  assert.equal(getEventListeners(external.signal, "abort").length, 0,
+    "each refused execution removes the abort relay it registered");
+});
+
 
 const waitForFile = async (path: string): Promise<void> => {
   for (const deadline = Date.now() + 20_000; Date.now() < deadline;) {
@@ -985,3 +1155,31 @@ test("SIGTERM during a case exits 143", { timeout: 90_000 }, async t => {
   const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
   assert.equal(ledger.at(-1)?.phase, "stopped", "the signal stop is recorded");
 });
+
+test("SIGTERM during the contract check exits 143 without waiting out the contract timeout",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-write", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}'],
+        // Settles instantly on the pristine root (the prepare preflight must
+        // approve it) but stalls once the worker has run, so the signal lands
+        // mid-contract at execute time.
+        contractSource: "import { existsSync, writeFileSync } from \"node:fs\";\n"
+          + "if (existsSync(\"worker-task.txt\")) {\n"
+          + "  writeFileSync(\"contract-started\", \"1\");\n"
+          + "  setInterval(() => {}, 60_000);\n"
+          + "  await new Promise(() => {});\n"
+          + "}\n",
+        allowedChanges: ["ledger.json", "worker-task.txt", "contract-started"]
+      }
+    ]);
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const pending = executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    await waitForFile(join(round.roots[0], "contract-started"));
+    const signalledAt = Date.now();
+    process.kill(process.pid, "SIGTERM");
+    assert.equal(await pending, 143, "the contract check honours the round's abort, not its own 20s timeout");
+    assert.ok(Date.now() - signalledAt < 15_000, "settled by the signal, not the contract timeout");
+  });
