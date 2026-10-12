@@ -233,12 +233,19 @@ const runCommand = async (root: string, write: boolean, positionalTask: string |
         diagnostics: process.stderr
       });
       // Missing usage is explicitly unreported, never zero or omitted.
-      receipt.worker = {
+      const workerReceipt: Record<string, unknown> = {
         status: worker.status,
         code: worker.code,
         durationMs: worker.durationMs,
-        usage: worker.usage ?? "unreported"
+        usage: worker.usage ?? "unreported",
+        // Required boolean: an action record (a parent-initiated ladder ran),
+        // never a causation claim. False on natural paths.
+        ownedShutdown: worker.ownedShutdown
       };
+      if (worker.signal !== undefined) workerReceipt.signal = worker.signal;
+      if (worker.failureClass !== undefined) workerReceipt.failureClass = worker.failureClass;
+      if (worker.errorSha256 !== undefined) workerReceipt.errorSha256 = worker.errorSha256;
+      receipt.worker = workerReceipt;
       exitCode = workerExit(worker, signal);
     } else {
       exitCode = routing.status === "cancelled" ? signalExit(signal) : 1;
