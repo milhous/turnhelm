@@ -1359,6 +1359,27 @@ const jsonEquals = (raw: string | null, expected: Readonly<{ count: number; sum:
   }
 };
 
+// WH-2: the adjudicated stdout envelope — the contract object on line 1 plus
+// any number of inert trailer lines. A trailer is inert only when it parses
+// as no JSON value, opens with no object, array, or string (after optional
+// whitespace), and is no code-fence delimiter; anything else could carry a
+// second structured payload past the oracle.
+const inertTrailerLine = (line: string): boolean => {
+  const trimmed = line.trimStart();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[") || trimmed.startsWith("\"")) return false;
+  if (trimmed.startsWith("```")) return false;
+  try { JSON.parse(line); return false; } catch { return true; }
+};
+
+const envelope = (text: string, expected: Readonly<{ count: number; sum: number }>): boolean => {
+  const lines = text.split("\n");
+  return jsonEquals(lines[0], expected) && lines.slice(1).every(inertTrailerLine);
+};
+
+// stdout oracle: the exact whole payload, or that payload plus inert prose.
+const stdoutPayloadEquals = (raw: string | null, expected: Readonly<{ count: number; sum: number }>): boolean =>
+  raw !== null && (jsonEquals(raw, expected) || envelope(raw, expected));
+
 const withoutLayaKey = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
   const copy = { ...env };
   delete copy.LAYA_API_KEY;
@@ -1654,7 +1675,7 @@ export async function executeAcceptance(
               const stdoutText = decodeBounded(supervision.stdout);
               let oracleOk = false;
               if (item.oracle.kind === "stdout-json") {
-                oracleOk = jsonEquals(stdoutText, item.oracle.expected);
+                oracleOk = stdoutPayloadEquals(stdoutText, item.oracle.expected);
                 oracleInput = { source: "stdout", text: stdoutText, bytes: supervision.stdout.length };
               } else if (item.oracle.kind === "summary-file") {
                 // The retained input reuses the same read the oracle judged —
