@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { getEventListeners } from "node:events";
-import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -683,8 +683,13 @@ test("a same-path replaced root is refused at the identity gate before any launc
         grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
       }
     ]);
+    // Allocate the replacement's inode before freeing the original: ext4
+    // recycles a just-freed directory inode, so rm+mkdir can reproduce the
+    // same dev/ino and the identity gate correctly sees no replacement.
+    const replacement = join(round.base, "replacement-root");
+    await mkdir(replacement);
     await rm(round.roots[0], { recursive: true, force: true });
-    await mkdir(round.roots[0]);
+    await rename(replacement, round.roots[0]);
     const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
     const code = await executeRound(round.manifestPath, round.approvalSha256,
       { env: round.env, sandboxExecPath: fake });
@@ -768,12 +773,18 @@ test("a same-path replaced root with identical bytes is still refused, with zero
     }
   };
   await walk("");
-  await rm(root, { recursive: true, force: true });
-  await mkdir(root, { recursive: true });
+  // The replacement inode must be allocated while the original still exists
+  // (ext4 recycles a just-freed directory inode into an immediate mkdir,
+  // which would defeat the dev/ino identity check): restore its bytes into a
+  // sibling first, then swap it in with one rename.
+  const replacement = join(dirname(root), "replacement-root");
+  await mkdir(replacement);
   for (const [relative, bytes] of snapshot) {
-    await mkdir(dirname(join(root, relative)), { recursive: true });
-    await writeFile(join(root, relative), bytes);
+    await mkdir(dirname(join(replacement, relative)), { recursive: true });
+    await writeFile(join(replacement, relative), bytes);
   }
+  await rm(root, { recursive: true, force: true });
+  await rename(replacement, root);
   const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
   const code = await executeRound(round.manifestPath, round.approvalSha256,
     { env: round.env, sandboxExecPath: fake });

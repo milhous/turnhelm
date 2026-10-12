@@ -526,7 +526,10 @@ test("worker descendant zsh never sources host startup files", { timeout: 30_000
   // zsh lookup at the still-empty owned home (a missing file there is a skip).
   const probe = await execute("/bin/zsh", ["-c", "print -r -- ok"],
     { env: { PATH: process.env.PATH, ZDOTDIR: home } }).catch(error => error);
-  if ((probe as NodeJS.ErrnoException).code === "ENOENT") t.skip("/bin/zsh is not available");
+  // t.skip flags the test but does not halt this body: without the return,
+  // the descendant probe below runs anyway and turns the skip into a failure
+  // wherever /bin/zsh is absent (CI's ubuntu runner).
+  if ((probe as NodeJS.ErrnoException).code === "ENOENT") return t.skip("/bin/zsh is not available");
   await writeFile(join(home, ".zshenv"), "export TURNHELM_TEST_ZSHENV_MARKER=leaked\n");
   const { recorded, directory } = await runWorker(t, {
     parentEnv: { HOME: home },
