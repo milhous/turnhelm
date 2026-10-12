@@ -1494,6 +1494,26 @@ test("workerProgress evidence is all-or-nothing on events and per-field on age",
   assert.ok(!("workerProgress" in last), "no progress projection is invented where none was observed");
 });
 
+test("a routing failure never projects worker progress", async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+
+  // The classifier answers garbage: routing fails, the CLI emits its
+  // not-started receipt, and the round stops on the verdict — but the
+  // observed record is already durable. A worker that never ran must not
+  // be represented as one that decoded zero events.
+  classifier.scripted.push("not-json");
+  const run = await buildRun(t, "laya", classifier.url, [{ id: "route-fail", kind: "worker-readonly" }]);
+  assert.equal(await executeAcceptance(run.manifestPath, run.sha256,
+    { env: workerEnv(fakeBin, "ok-readonly") }), 1);
+  const evidence = await readEvidence(run.runRoot);
+  const observed = evidence.find(line => line.phase === "observed");
+  assert.ok(observed, "the not-started run still lands its observation");
+  assert.ok(!("workerProgress" in (observed as Record<string, unknown>)),
+    "a not-started worker carries no progress projection");
+  assert.equal(evidence.find(line => line.phase === "stopped")?.reason, "verdict");
+});
+
 test("envelopePayload extracts the line-1 value behind inert trailers only", () => {
   // A same-line object pair is not an envelope: line 1 must parse alone.
   assert.equal(envelopePayload('{"count":0,"sum":0} {"count":8,"sum":8}'), null);
@@ -1527,6 +1547,9 @@ test("oracleSandboxPolicy freezes the sealed round's SBPL, parameterized by its 
   assert.ok(first.includes("(deny file-write*)\n"));
   assert.ok(first.includes("(deny process-fork)\n"));
   assert.ok(first.includes("(deny signal)\n"));
+  // The read-isolation clause itself: without this pin, flipping the deny to
+  // an allow would slip past every path assertion above.
+  assert.ok(first.includes("(deny file-read-data (require-not (require-any "));
   assert.ok(first.endsWith('(literal "/dev/urandom"))))\n'), "the policy is a closed line list");
   assert.ok(first.includes(`(subpath ${JSON.stringify(options.runtimeDir)})`));
   for (const path of options.allowReadSubpaths) {

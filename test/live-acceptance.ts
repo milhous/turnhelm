@@ -1692,8 +1692,9 @@ export async function executeAcceptance(
             : undefined;
           // The decoded-event projection comes from the same durable receipt
           // frame: the parent-observed count and age, projected only when the
-          // count survives validation.
-          const workerProgress = worker !== null
+          // count survives validation — and never for a not-started worker,
+          // which decoded nothing because it never ran.
+          const workerProgress = worker !== null && worker.status !== "not-started"
             ? projectWorkerProgress({
               events: worker.progressEvents,
               ...(worker.lastEventAgeMs !== undefined ? { lastEventAgeMs: worker.lastEventAgeMs } : {})
