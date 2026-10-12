@@ -77,6 +77,7 @@ export type SafeEvidence =
   | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number; workerUsage?: WorkerUsageEvidence }>
   | Readonly<{ phase: "verified"; caseId: string; verdict: "pass" | "fail"; policy: "match" | "mismatch" | "not-applicable"; checks: Readonly<Record<string, boolean>>; oracleInput?: OracleInputEvidence }>
   | Readonly<{ phase: "completed"; outcome: "pass" | "policy-mismatch"; cases: number; policyMatches: number; policyMismatches: number }>
+  | Readonly<{ phase: "completed"; outcome: "pass" | "fail"; cases: number; failed: number }>
   | Readonly<{ phase: "stopped"; caseId: string | null; reason: StoppedReason }>;
 
 export type ClaimedRun = Readonly<{
@@ -963,7 +964,26 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
     case "completed": {
       // The commit-point fact is written only by the runner itself, so its
       // shape is strict: an unknown field or an impossible count combination
-      // rejects rather than degrades.
+      // rejects rather than degrades. The two suite families never mix — the
+      // worker record reports failure counts, calibration policy counts.
+      if (Object.hasOwn(raw, "failed")) {
+        for (const key of Object.keys(raw)) {
+          if (key !== "phase" && key !== "outcome" && key !== "cases" && key !== "failed") {
+            throw evidenceReject("completed record must not contain unknown field " + JSON.stringify(key));
+          }
+        }
+        const outcome = raw.outcome;
+        if (outcome !== "pass" && outcome !== "fail") throw evidenceReject("completed outcome is unknown");
+        const counts = [raw.cases, raw.failed];
+        if (!counts.every(value => typeof value === "number" && Number.isSafeInteger(value) && value >= 0)) {
+          throw evidenceReject("completed counts must be non-negative safe integers");
+        }
+        const [cases, failed] = counts as [number, number];
+        if (failed > cases) throw evidenceReject("completed failures must not exceed the roster");
+        if (outcome === "pass" && failed !== 0) throw evidenceReject("a completed pass must report no failures");
+        if (outcome === "fail" && failed === 0) throw evidenceReject("a completed fail must report a failure");
+        return { phase: "completed", outcome, cases, failed };
+      }
       for (const key of Object.keys(raw)) {
         if (key !== "phase" && key !== "outcome" && key !== "cases" && key !== "policyMatches" && key !== "policyMismatches") {
           throw evidenceReject("completed record must not contain unknown field " + JSON.stringify(key));
@@ -1404,6 +1424,7 @@ export async function executeAcceptance(
       const isCalibration = run.manifest.suite === "calibration-dev" || run.manifest.suite === "calibration-holdout";
       let policyMatches = 0;
       let policyMismatches = 0;
+      let failedCases = 0;
       for (const item of run.manifest.cases) {
         if (abort?.aborted) {
           await appendEvidence(run, { phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
@@ -1598,6 +1619,7 @@ export async function executeAcceptance(
                   && receiptLine?.model === frozenPair.model && receiptLine?.effort === frozenPair.effort,
                 "receipt-task": receiptLine?.taskSha256 === item.taskHash && receiptLine?.taskBytes === item.taskBytes,
                 "receipt-root": rootOk,
+                "root-identity": rootMatches === true,
                 "exit-zero": supervision.exitCode === 0,
                 "worker-completed": worker?.status === "completed",
                 "input-unchanged": inputUnchanged,
@@ -1646,15 +1668,25 @@ export async function executeAcceptance(
         if (isCalibration && policy === "match") policyMatches += 1;
         if (isCalibration && policy === "mismatch") policyMismatches += 1;
         if (verdict === "fail") {
-          await appendEvidence(run, { phase: "stopped", caseId: item.id, reason: "verdict" }).catch(() => {});
-          return 1;
+          // Integrity dominates: a case whose every check is true except the
+          // oracle failed on task output alone, so it is continuable — the
+          // roster runs on and the commit point counts it. Any other failure
+          // broke the chain and stops the run here.
+          const oracleOnly = Object.entries(checks).every(([name, value]) => value || name === "oracle");
+          if (oracleOnly) {
+            failedCases += 1;
+          } else {
+            await appendEvidence(run, { phase: "stopped", caseId: item.id, reason: "verdict" }).catch(() => {});
+            return 1;
+          }
         }
       }
 
       // §5.1 terminal boundary: after the last verified record is durable,
       // every suite re-checks the operator signal and the frozen corpus,
-      // source/dist, and host config before returning. Calibration alone
-      // reaches a commit point, and only through the completed protocol.
+      // source/dist, and host config before returning. Every suite reaches
+      // its commit point through the same completed protocol — calibration
+      // commits policy counts, worker suites commit failure counts.
       const stopTerminal = async (reason: StoppedReason, exitCode: number): Promise<number> => {
         await appendEvidence(run, { phase: "stopped", caseId: null, reason }).catch(() => {});
         return exitCode;
@@ -1666,26 +1698,28 @@ export async function executeAcceptance(
       } catch {
         return await stopTerminal("drift", 1);
       }
-      let outcome: "pass" | "policy-mismatch" = "pass";
-      if (isCalibration) {
-        outcome = policyMismatches === 0 ? "pass" : "policy-mismatch";
-        try {
-          await appendEvidence(run, {
-            phase: "completed", outcome, cases: run.manifest.cases.length,
+      const calibrationOutcome: "pass" | "policy-mismatch" = policyMismatches === 0 ? "pass" : "policy-mismatch";
+      try {
+        await appendEvidence(run, isCalibration
+          ? {
+            phase: "completed", outcome: calibrationOutcome, cases: run.manifest.cases.length,
             policyMatches, policyMismatches
+          }
+          : {
+            phase: "completed", outcome: failedCases === 0 ? "pass" : "fail",
+            cases: run.manifest.cases.length, failed: failedCases
           });
-        } catch {
-          return await stopTerminal("evidence-io", 1);
-        }
-        // The completed line may already be visible here; visibility alone is
-        // never completion — only the whole protocol below commits the run.
-        if (abort?.aborted) return await stopTerminal("signal", 130);
-        try {
-          await verifyRepoFrozen(run.manifest);
-          await verifyHostSnapshot(run.manifest);
-        } catch {
-          return await stopTerminal("drift", 1);
-        }
+      } catch {
+        return await stopTerminal("evidence-io", 1);
+      }
+      // The completed line may already be visible here; visibility alone is
+      // never completion — only the whole protocol below commits the run.
+      if (abort?.aborted) return await stopTerminal("signal", 130);
+      try {
+        await verifyRepoFrozen(run.manifest);
+        await verifyHostSnapshot(run.manifest);
+      } catch {
+        return await stopTerminal("drift", 1);
       }
       try {
         await run.handle.close();
@@ -1694,8 +1728,8 @@ export async function executeAcceptance(
       }
       // The FD is closed: a stop discovered now is reported, never appended.
       if (abort?.aborted) return 130;
-      if (isCalibration) return outcome === "pass" ? 0 : 3;
-      return 0;
+      if (isCalibration) return calibrationOutcome === "pass" ? 0 : 3;
+      return failedCases === 0 ? 0 : 4;
     } finally {
       if (fixtureServer !== null) {
         for (const socket of fixtureConnections) socket.destroy();

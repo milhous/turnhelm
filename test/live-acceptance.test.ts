@@ -659,7 +659,9 @@ const HOSTILE_ANSWER = '"}\\n before {"count":4,"sum":17} after "'
 
 // Modes: ok-readonly, ok-write, write-readonly (writes despite read-only sandbox),
 // fail, hang, wrong-output, no-output, oversize, mutate-input, summary-invalid,
-// hostile-answer, usage-full, usage-mixed, usage-invalid.
+// hostile-answer, usage-full, usage-mixed, usage-invalid, mixed-verdict (write
+// cases pass, every other case fails the oracle alone), swap-root (replaces the
+// consumer root with a same-path copy, then answers correctly).
 const FAKE_CODEX = `#!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
@@ -787,6 +789,31 @@ process.stdin.on("end", () => {
         pidFile], {
       detached: true, stdio: ["ignore", "inherit", "inherit"]
     }).unref();
+  }
+  if (mode === "mixed-verdict") {
+    // Per-case outcome control with no new plumbing: write cases run under
+    // --sandbox workspace-write and answer correctly; every other case emits
+    // wrong numbers, failing the oracle and nothing else.
+    if (!args.includes("workspace-write")) {
+      emit({ type: "item.completed", item: { type: "agent_message", text: '{"count":5,"sum":18}' } });
+      emit({ type: "turn.completed" });
+      process.exit(0);
+    }
+    fs.mkdirSync(path.join(process.cwd(), "out"), { recursive: true });
+    fs.writeFileSync(path.join(process.cwd(), "out", "summary.json"), answer);
+  }
+  if (mode === "swap-root") {
+    // Replace the consumer root with a same-path copy while the case runs:
+    // identical contents, a new dev/ino. The fake's own cwd holds the old
+    // inode alive, so the rename cannot recycle it.
+    const cwd = process.cwd();
+    const swap = path.join(path.dirname(cwd), ".root-swap-" + String(process.pid));
+    fs.mkdirSync(swap);
+    for (const entry of fs.readdirSync(cwd, { withFileTypes: true })) {
+      fs.cpSync(path.join(cwd, entry.name), path.join(swap, entry.name), { recursive: true });
+    }
+    fs.rmSync(cwd, { recursive: true, force: true });
+    fs.renameSync(swap, cwd);
   }
   if (mode === "ok-write" || mode === "write-readonly") {
     fs.mkdirSync(path.join(process.cwd(), "out"), { recursive: true });
@@ -1090,24 +1117,34 @@ test("duplicate receipt after observation cannot pass", async t => {
 test("malformed missing oversized and invalid utf8 outputs are finite", async t => {
   const classifier = await startClassifierFixture(t);
   const fakeBin = await writeFakeCodex(t);
+  // Wrong text and no text fail only the oracle, so the roster completes as a
+  // failure (exit 4); an oversized output and invalid UTF-8 frames are
+  // operational or protocol failures that stop the run (exit 1).
   for (const mode of ["wrong-output", "no-output", "oversize", "bad-utf8"] as const) {
     const run = await buildRun(t, "laya", classifier.url, [{ id: "finite-" + mode, kind: "worker-readonly" }]);
     const code = await executeAcceptance(run.manifestPath, run.sha256, { env: workerEnv(fakeBin, mode) });
-    assert.equal(code, 1, mode + " must fail the run");
     const evidence = await readEvidence(run.runRoot);
     const raw = await readFile(join(run.runRoot, "evidence", "evidence.jsonl"));
     assert.ok(raw.length < 8192, mode + " evidence stays finite");
     if (mode === "oversize") {
+      assert.equal(code, 1, mode + " breaches the output budget");
       assert.deepEqual(evidence.map(line => line.phase), ["prepared", "reserved", "observed", "stopped"],
         "an oversized output cancels the case before any verdict");
       assert.equal(evidence[3].reason, "output-limit");
       assert.equal(evidence[2].backend, "laya", "the bounded observation still lands first");
+      assert.equal(evidence.at(-1)?.caseId, "finite-" + mode);
+    } else if (mode === "wrong-output" || mode === "no-output") {
+      assert.equal(code, 4, mode + " fails only the oracle and completes the roster");
+      assert.deepEqual(evidence.map(line => line.phase), ["prepared", "reserved", "observed", "verified", "completed"]);
+      assert.equal(evidence[3].verdict, "fail", mode + " fails verification");
+      assert.deepEqual(evidence.at(-1), { phase: "completed", outcome: "fail", cases: 1, failed: 1 });
     } else {
+      assert.equal(code, 1, mode + " is an integrity stop");
       assert.deepEqual(evidence.map(line => line.phase), ["prepared", "reserved", "observed", "verified", "stopped"]);
       assert.equal(evidence[3].verdict, "fail", mode + " fails verification");
       assert.equal(evidence[4].reason, "verdict");
+      assert.equal(evidence.at(-1)?.caseId, "finite-" + mode);
     }
-    assert.equal(evidence.at(-1)?.caseId, "finite-" + mode);
   }
 });
 
@@ -1260,18 +1297,216 @@ test("the sanitizer projects worker usage without throwing", async t => {
   assert.ok(last && !("workerUsage" in last), "no worker usage is invented where none was observed");
 });
 
+test("oracle-only failures continue the roster to a failed completion", async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+
+  // A mid-roster oracle failure: the wrong readonly case fails on the oracle
+  // alone, the roster continues, the later write case still runs and passes,
+  // and the commit point counts exactly the one failure — exit 4.
+  const mixed = await buildRun(t, "laya", classifier.url, [
+    { id: "wrong-readonly", kind: "worker-readonly" },
+    { id: "right-write", kind: "worker-write" }
+  ]);
+  assert.equal(await executeAcceptance(mixed.manifestPath, mixed.sha256,
+    { env: workerEnv(fakeBin, "mixed-verdict") }), 4);
+  const mixedEvidence = await readEvidence(mixed.runRoot);
+  assert.deepEqual(mixedEvidence.filter(line => line.phase === "reserved").map(line => line.caseId),
+    ["wrong-readonly", "right-write"], "an oracle failure reserves the next case");
+  assert.deepEqual(mixedEvidence.filter(line => line.phase === "verified").map(line => line.verdict),
+    ["fail", "pass"], "the later case is still graded");
+  assert.ok(mixedEvidence.find(line => line.phase === "verified" && line.verdict === "fail")?.oracleInput,
+    "the continued failure record carries its oracle input");
+  assert.ok(!mixedEvidence.some(line => line.phase === "stopped"));
+  assert.deepEqual(mixedEvidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 1 });
+
+  // An all-pass roster commits the same protocol with zero failures.
+  const clean = await buildRun(t, "laya", classifier.url, [
+    { id: "clean-one", kind: "worker-readonly" },
+    { id: "clean-two", kind: "worker-readonly" }
+  ]);
+  assert.equal(await executeAcceptance(clean.manifestPath, clean.sha256,
+    { env: workerEnv(fakeBin, "ok-readonly") }), 0);
+  const cleanEvidence = await readEvidence(clean.runRoot);
+  assert.ok(!cleanEvidence.some(line => line.phase === "stopped"));
+  assert.deepEqual(cleanEvidence.at(-1), { phase: "completed", outcome: "pass", cases: 2, failed: 0 });
+
+  // Two oracle failures reconcile to failed: 2 — the count is the roster's
+  // actual failures, not a marker.
+  const double = await buildRun(t, "laya", classifier.url, [
+    { id: "double-one", kind: "worker-readonly" },
+    { id: "double-two", kind: "worker-readonly" }
+  ]);
+  assert.equal(await executeAcceptance(double.manifestPath, double.sha256,
+    { env: workerEnv(fakeBin, "answer-wrong-numbers") }), 4);
+  const doubleEvidence = await readEvidence(double.runRoot);
+  assert.deepEqual(doubleEvidence.filter(line => line.phase === "verified").map(line => line.verdict),
+    ["fail", "fail"]);
+  assert.ok(doubleEvidence.filter(line => line.phase === "verified")
+    .every(line => line.oracleInput), "every continued failure retains its input");
+  assert.deepEqual(doubleEvidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 2 });
+});
+
+test("integrity failures still stop even beside a failing oracle", async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  const corpus = JSON.parse(await readFile(CORPUS_PATH, "utf8")) as { workerReadonlyTask: string };
+  const taskBytes = Buffer.from(corpus.workerReadonlyTask, "utf8");
+  const seedLine = JSON.stringify({
+    type: "turnhelm.route", ts: "2026-10-11T00:00:00.000Z",
+    taskSha256: sha256hex(taskBytes), taskBytes: taskBytes.length, status: "selected",
+    routingMs: 5, attempts: [{ backend: "laya", outcome: "success", durationMs: 5 }],
+    backend: "laya", profileId: "fast", model: "gpt-6-luna", effort: "low"
+  });
+
+  // Oracle false AND receipt integrity false: the chain failure dominates and
+  // the run stops at the first case — continuation is for task output only.
+  const combined = await buildRun(t, "laya", classifier.url, [
+    { id: "combined", kind: "worker-readonly", journalSeed: [seedLine] },
+    { id: "never-again", kind: "worker-readonly" }
+  ]);
+  assert.equal(await executeAcceptance(combined.manifestPath, combined.sha256,
+    { env: workerEnv(fakeBin, "answer-wrong-numbers") }), 1);
+  const combinedEvidence = await readEvidence(combined.runRoot);
+  const combinedChecks = (combinedEvidence.find(line => line.phase === "verified")?.checks ?? {}) as Record<string, boolean>;
+  assert.equal(combinedChecks["receipt-unique"], false);
+  assert.equal(combinedChecks["oracle"], false);
+  assert.equal(combinedEvidence.at(-1)?.reason, "verdict");
+  assert.deepEqual(combinedEvidence.filter(line => line.phase === "reserved").map(line => line.caseId),
+    ["combined"], "an integrity failure reserves nothing further");
+  assert.ok(!combinedEvidence.some(line => line.phase === "completed"));
+
+  // A mid-case root replacement with a PASSING oracle is an integrity stop:
+  // identical contents do not restore the frozen identity.
+  const swapped = await buildRun(t, "laya", classifier.url, [
+    { id: "swapped", kind: "worker-readonly" },
+    { id: "after-swap", kind: "worker-readonly" }
+  ]);
+  assert.equal(await executeAcceptance(swapped.manifestPath, swapped.sha256,
+    { env: workerEnv(fakeBin, "swap-root") }), 1);
+  const swappedEvidence = await readEvidence(swapped.runRoot);
+  const swappedVerified = swappedEvidence.find(line => line.phase === "verified");
+  assert.equal(swappedVerified?.verdict, "fail");
+  const swapChecks = (swappedVerified?.checks ?? {}) as Record<string, boolean>;
+  assert.equal(swapChecks["root-identity"], false, "the replaced root fails the identity check");
+  assert.equal(swapChecks["oracle"], true, "the oracle itself passed — only the root identity failed");
+  assert.equal(swappedEvidence.at(-1)?.reason, "verdict");
+  assert.deepEqual(swappedEvidence.filter(line => line.phase === "reserved").map(line => line.caseId),
+    ["swapped"], "no reservation follows a replaced root");
+  assert.ok(!swappedEvidence.some(line => line.phase === "completed"));
+});
+
+test("the completed record family is strict per suite kind", async t => {
+  const prepared = await prepareAcceptance("jev");
+  t.after(() => rm(dirname(prepared.manifestPath), { recursive: true, force: true }));
+  const run = await claimAcceptance(prepared.manifestPath, prepared.sha256);
+  t.after(() => run.handle.close());
+
+  // The worker shape: exactly outcome/cases/failed with reconciling counts.
+  const workerShape = (over: Record<string, unknown>): Record<string, unknown> =>
+    ({ outcome: "fail", cases: 2, failed: 1, ...over });
+  for (const bad of [
+    workerShape({ extra: 1 }),
+    workerShape({ outcome: "excellent" }),
+    workerShape({ cases: -1 }),
+    workerShape({ cases: 1.5 }),
+    workerShape({ failed: 2 ** 53 }),
+    workerShape({ failed: 3 }),
+    workerShape({ outcome: "fail", failed: 0 }),
+    workerShape({ outcome: "pass", failed: 1 }),
+    workerShape({ policyMatches: 1 })
+  ]) {
+    await assert.rejects(() => appendEvidence(run, {
+      phase: "completed", ...bad
+    } as unknown as SafeEvidence), /invalid/);
+  }
+
+  // Legal worker records round-trip exactly.
+  await appendEvidence(run, { phase: "completed", outcome: "fail", cases: 2, failed: 2 } as unknown as SafeEvidence);
+  await appendEvidence(run, { phase: "completed", outcome: "pass", cases: 1, failed: 0 } as unknown as SafeEvidence);
+  const completed = (await readFile(run.evidencePath, "utf8")).trim().split("\n")
+    .map(line => JSON.parse(line) as Record<string, unknown>)
+    .filter(line => line.phase === "completed");
+  assert.deepEqual(completed, [
+    { phase: "completed", outcome: "fail", cases: 2, failed: 2 },
+    { phase: "completed", outcome: "pass", cases: 1, failed: 0 }
+  ]);
+
+  // The calibration rules stay untouched: a short calibration roster and a
+  // worker record dressed in calibration fields both reject.
+  await assert.rejects(() => appendEvidence(run, {
+    phase: "completed", outcome: "pass", cases: 11, policyMatches: 11, policyMismatches: 0
+  } as unknown as SafeEvidence), /invalid/);
+  await assert.rejects(() => appendEvidence(run, {
+    phase: "completed", outcome: "fail", cases: 2, failed: 1, policyMatches: 1, policyMismatches: 1
+  } as unknown as SafeEvidence), /invalid/);
+});
+
+test("a would-be-4 worker run keeps the terminal boundary fail closed", async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  const env = workerEnv(fakeBin, "answer-wrong-numbers");
+
+  const probeDirectory = await mkdtemp(join(tmpdir(), "turnhelm-terminal4-"));
+  t.after(() => rm(probeDirectory, { recursive: true, force: true }));
+  const probe = await open(join(probeDirectory, "probe"), "w");
+  const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+    appendFile: (this: FileHandle, data: Buffer) => Promise<void>;
+  };
+  await probe.close();
+  const originalAppend = fileHandlePrototype.appendFile;
+
+  // A completed append that throws is evidence-io, never a 4.
+  const failingCompleted = t.mock.method(fileHandlePrototype, "appendFile",
+    async function (this: FileHandle, data: Buffer) {
+      if (data.includes('"phase":"completed"')) throw new Error("injected completed append failure");
+      return originalAppend.call(this, data);
+    });
+  const appendFailure = await buildRun(t, "laya", classifier.url, [{ id: "io-gate", kind: "worker-readonly" }]);
+  assert.equal(await executeAcceptance(appendFailure.manifestPath, appendFailure.sha256, { env }), 1,
+    "a completed record that never appended is not a completion");
+  failingCompleted.mock.restore();
+  const appendFailureEvidence = await readEvidence(appendFailure.runRoot);
+  assert.ok(!appendFailureEvidence.some(line => line.phase === "completed"));
+  assert.equal(appendFailureEvidence.at(-1)?.reason, "evidence-io");
+  assert.equal(appendFailureEvidence.find(line => line.phase === "verified")?.verdict, "fail",
+    "the oracle failure itself is durable before the terminal fault");
+
+  // An abort discovered after the completed append is a signal, never a 4.
+  const controller = new AbortController();
+  const aborting = t.mock.method(fileHandlePrototype, "appendFile",
+    async function (this: FileHandle, data: Buffer) {
+      const result = originalAppend.call(this, data);
+      if (data.includes('"phase":"completed"')) controller.abort();
+      return result;
+    });
+  const aborted = await buildRun(t, "laya", classifier.url, [{ id: "abort-gate", kind: "worker-readonly" }]);
+  assert.equal(await executeAcceptance(aborted.manifestPath, aborted.sha256,
+    { env, signal: controller.signal }), 130,
+    "an abort after the completed record is still a signal stop");
+  aborting.mock.restore();
+  const abortedEvidence = await readEvidence(aborted.runRoot);
+  assert.ok(abortedEvidence.some(line => line.phase === "completed"),
+    "the completed line may already be visible");
+  assert.equal(abortedEvidence.at(-1)?.phase, "stopped");
+  assert.equal(abortedEvidence.at(-1)?.reason, "signal");
+});
+
 test("worker and calibration cases have different pass criteria", async t => {
   const classifier = await startClassifierFixture(t);
   const fakeBin = await writeFakeCodex(t);
-  // A failing worker oracle fails the run on the worker fact alone.
+  // A failing worker oracle fails the run on the worker fact alone — as a
+  // completed failure (exit 4), not a stop: the oracle judges task output.
   const workerBad = await buildRun(t, "laya", classifier.url, [{ id: "worker-bad", kind: "worker-readonly" }]);
   assert.equal(await executeAcceptance(workerBad.manifestPath, workerBad.sha256,
-    { env: workerEnv(fakeBin, "wrong-output") }), 1);
-  const workerVerified = (await readEvidence(workerBad.runRoot)).find(line => line.phase === "verified");
+    { env: workerEnv(fakeBin, "wrong-output") }), 4);
+  const workerBadEvidence = await readEvidence(workerBad.runRoot);
+  const workerVerified = workerBadEvidence.find(line => line.phase === "verified");
   assert.ok(workerVerified);
   assert.equal(workerVerified.verdict, "fail");
   assert.equal((workerVerified.checks as Record<string, unknown>)["oracle"], false,
     "the worker failure is caught by the stdout oracle");
+  assert.deepEqual(workerBadEvidence.at(-1), { phase: "completed", outcome: "fail", cases: 1, failed: 1 });
 
   // A full calibration roster whose every selection stays inside its frozen
   // band passes on routing facts alone: no receipts, no worker artifacts.
@@ -1353,32 +1588,33 @@ test("RR01 whole payload and exact keys", async t => {
     return { code, run };
   };
 
-  // The failing first case ends the run: the second case is never classified.
+  // An oracle-only preamble failure continues the roster: both cases classify,
+  // both fail the oracle, and the run completes as a failure — exit 4.
   const first = await buildRun(t, "laya", classifier.url, [
     { id: "chatty", kind: "worker-readonly" },
-    { id: "never-classified", kind: "worker-readonly" }
+    { id: "still-classified", kind: "worker-readonly" }
   ]);
   const codeWithPreamble = await executeAcceptance(first.manifestPath, first.sha256,
     { env: workerEnv(fakeBin, "answer-preamble") });
-  assert.equal(codeWithPreamble, 1, "prose before the JSON object fails the whole payload");
-  assert.equal(classifier.state.requests, 1, "the failing first case is the only classify call");
+  assert.equal(codeWithPreamble, 4, "prose before the JSON object fails the whole payload");
+  assert.equal(classifier.state.requests, 2, "the oracle failure still spends the second classify call");
   const evidence = await readEvidence(first.runRoot);
   assert.ok(evidence.findIndex(x => x.phase === "observed") < evidence.findIndex(x => x.phase === "verified"),
     "the observation is durable before the verdict");
-  assert.equal(evidence.at(-1)?.reason, "verdict");
-  assert.equal(evidence.at(-1)?.caseId, "chatty");
+  assert.ok(!evidence.some(line => line.phase === "stopped"));
+  assert.deepEqual(evidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 2 });
 
   // Every other malformed stdout payload fails on the oracle check itself.
   for (const mode of ["answer-suffix", "answer-fence", "answer-twice", "answer-missing-sum",
     "answer-array", "answer-null", "answer-wrong-numbers"] as const) {
     const { code, run } = await runOf(mode, "worker-readonly", "ro-" + mode);
-    assert.equal(code, 1, mode + " must fail the whole-payload oracle");
+    assert.equal(code, 4, mode + " fails the whole-payload oracle and completes");
     const verified = (await readEvidence(run.runRoot)).find(line => line.phase === "verified");
     assert.equal((verified?.checks as Record<string, unknown> | undefined)?.["oracle"], false, mode);
   }
   const extraKeyReadonly = await runOf("answer-extra-key", "worker-readonly", "ro-extra-key");
   const codeWithExtraKeyReadonly = extraKeyReadonly.code;
-  assert.equal(codeWithExtraKeyReadonly, 1, "an extra key in stdout fails even with both facts right");
+  assert.equal(codeWithExtraKeyReadonly, 4, "an extra key in stdout fails even with both facts right");
   assert.equal(((await readEvidence(extraKeyReadonly.run.runRoot)).find(line => line.phase === "verified")
     ?.checks as Record<string, unknown> | undefined)?.["oracle"], false, "the exact-keys oracle catches it");
 
@@ -1386,13 +1622,13 @@ test("RR01 whole payload and exact keys", async t => {
   for (const mode of ["summary-preamble", "summary-suffix", "summary-fence", "summary-twice",
     "summary-missing-sum", "summary-array", "summary-null", "summary-wrong-numbers"] as const) {
     const { code, run } = await runOf(mode, "worker-write", "wr-" + mode);
-    assert.equal(code, 1, mode + " must fail the summary-file oracle");
+    assert.equal(code, 4, mode + " fails the summary-file oracle and completes");
     const verified = (await readEvidence(run.runRoot)).find(line => line.phase === "verified");
     assert.equal((verified?.checks as Record<string, unknown> | undefined)?.["oracle"], false, mode);
   }
   const extraKeyWrite = await runOf("summary-extra-key", "worker-write", "wr-extra-key");
   const codeWithExtraKeyWrite = extraKeyWrite.code;
-  assert.equal(codeWithExtraKeyWrite, 1, "an extra key in the summary file fails even with both facts right");
+  assert.equal(codeWithExtraKeyWrite, 4, "an extra key in the summary file fails even with both facts right");
 
   // Legal JSON whitespace, indentation, and reordered keys pass on both paths.
   const looseReadonly = await runOf("answer-loose", "worker-readonly", "ro-loose");
@@ -2600,22 +2836,23 @@ test("RR04 protocol and policy are independent", async t => {
   assert.ok(!brokenEvidence.some(line => line.phase === "completed"));
   assert.equal(brokenEvidence.at(-1)?.reason, "verdict");
 
-  // Worker records are always policy not-applicable, a worker oracle failure
-  // still stops at the first case, and worker suites never gain completed.
+  // Worker records are always policy not-applicable; a worker oracle failure
+  // continues the roster to the worker completed record — exit 4.
   const workerRun = await buildRun(t, "laya", classifier.url, [
     { id: "worker-one", kind: "worker-readonly" },
     { id: "worker-two", kind: "worker-readonly" }
   ]);
   assert.equal(await executeAcceptance(workerRun.manifestPath, workerRun.sha256,
-    { env: workerEnv(fakeBin, "wrong-output") }), 1);
+    { env: workerEnv(fakeBin, "wrong-output") }), 4);
   const workerEvidence = await readEvidence(workerRun.runRoot);
   const workerVerified = workerEvidence.find(line => line.phase === "verified");
   assert.ok(workerVerified);
   assert.equal(workerVerified.policy, "not-applicable",
     "a worker case has no band to judge and never claims policy");
   assert.deepEqual(workerEvidence.filter(line => line.phase === "reserved").map(line => line.caseId),
-    ["worker-one"], "the worker failure still stops at the first case");
-  assert.ok(!workerEvidence.some(line => line.phase === "completed"));
+    ["worker-one", "worker-two"], "an oracle failure continues the worker roster");
+  assert.ok(workerEvidence.every(line => line.policy === undefined || line.policy === "not-applicable"));
+  assert.deepEqual(workerEvidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 2 });
 
   // The journal gate rejects illegal policy/outcome/counter shapes and keeps
   // raw canary fields off disk; a legal completed record round-trips exactly.
@@ -2840,8 +3077,8 @@ test("RR05 terminal boundary is fail closed", async t => {
   const closeEvidence = await readEvidence(closeFailure.runRoot);
   assert.equal(closeEvidence.at(-1)?.reason, "evidence-io");
 
-  // Worker suites reach 0 only through the same terminal tail: a failed
-  // evidence close is not a pass even without a completed record.
+  // Worker suites reach 0 only through the same terminal tail: the completed
+  // record now precedes the close, and a failed close is still not a pass.
   inBand(classifier);
   let workerCloseWrapped = false;
   const workerTracking = t.mock.method(fileHandlePrototype, "appendFile",
@@ -2866,7 +3103,9 @@ test("RR05 terminal boundary is fail closed", async t => {
   workerTracking.mock.restore();
   const workerCloseEvidence = await readEvidence(workerClose.runRoot);
   assert.equal(workerCloseEvidence.at(-1)?.reason, "evidence-io");
-  assert.ok(!workerCloseEvidence.some(line => line.phase === "completed"));
+  assert.deepEqual(workerCloseEvidence.find(line => line.phase === "completed"),
+    { phase: "completed", outcome: "pass", cases: 1, failed: 0 },
+    "the worker completed fact precedes the close");
 
   // An abort discovered after the worker close is carried by the exit code
   // alone: the FD is closed, no stop record can be appended.
