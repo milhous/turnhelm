@@ -81,10 +81,15 @@ export type WorkerFailureEvidence = Readonly<{
   ownedShutdown: boolean;
 }>;
 
+// The parent-observed decoded-event projection: the count of successfully
+// decoded events and, when at least one decoded, the rounded age from the last
+// decode to settlement. An observation, never a liveness or stall claim.
+export type WorkerProgressEvidence = Readonly<{ events: number; lastEventAgeMs?: number }>;
+
 export type SafeEvidence =
   | Readonly<{ phase: "prepared"; suite: LiveSuite; manifestSha256: string; startedAt: string }>
   | Readonly<{ phase: "reserved"; caseId: string; worker: number; backends: readonly AcceptanceBackend[] }>
-  | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number; workerUsage?: WorkerUsageEvidence; workerFailure?: WorkerFailureEvidence }>
+  | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number; workerUsage?: WorkerUsageEvidence; workerFailure?: WorkerFailureEvidence; workerProgress?: WorkerProgressEvidence }>
   | Readonly<{ phase: "verified"; caseId: string; verdict: "pass" | "fail"; policy: "match" | "mismatch" | "not-applicable"; checks: Readonly<Record<string, boolean>>; oracleInput?: OracleInputEvidence }>
   | Readonly<{ phase: "completed"; outcome: "pass" | "policy-mismatch"; cases: number; policyMatches: number; policyMismatches: number }>
   | Readonly<{ phase: "completed"; outcome: "pass" | "fail"; cases: number; failed: number }>
@@ -930,6 +935,25 @@ const projectWorkerFailure = (value: unknown): WorkerFailureEvidence | undefined
   return projection;
 };
 
+// All-or-nothing on events, per-field on lastEventAgeMs: a malformed count
+// drops the whole projection, a malformed age drops only itself. Nothing
+// throws except on an unknown key inside a present projection — the same
+// strictness as workerFailure.
+const projectWorkerProgress = (value: unknown): WorkerProgressEvidence | undefined => {
+  if (!isRecord(value)) return undefined;
+  for (const key of Object.keys(value)) {
+    if (key !== "events" && key !== "lastEventAgeMs") {
+      throw evidenceReject("workerProgress must not contain unknown field " + JSON.stringify(key));
+    }
+  }
+  if (typeof value.events !== "number" || !Number.isSafeInteger(value.events) || value.events < 0) return undefined;
+  const projection: { events: number; lastEventAgeMs?: number } = { events: value.events };
+  if (typeof value.lastEventAgeMs === "number" && Number.isSafeInteger(value.lastEventAgeMs) && value.lastEventAgeMs >= 0) {
+    projection.lastEventAgeMs = value.lastEventAgeMs;
+  }
+  return projection;
+};
+
 const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
   const raw = record as unknown as Record<string, unknown>;
   switch (raw.phase) {
@@ -951,6 +975,7 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
     }
     case "observed": {
       const workerFailure = raw.workerFailure === undefined ? undefined : projectWorkerFailure(raw.workerFailure);
+      const workerProgress = raw.workerProgress === undefined ? undefined : projectWorkerProgress(raw.workerProgress);
       return {
         phase: "observed",
         caseId: evidenceString(raw.caseId) ?? "",
@@ -961,7 +986,8 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
         durationMs: evidenceCount(raw.durationMs),
         attempts: evidenceCount(raw.attempts),
         ...(raw.workerUsage !== undefined ? { workerUsage: projectWorkerUsage(raw.workerUsage) } : {}),
-        ...(workerFailure !== undefined ? { workerFailure } : {})
+        ...(workerFailure !== undefined ? { workerFailure } : {}),
+        ...(workerProgress !== undefined ? { workerProgress } : {})
       };
     }
     case "verified": {
@@ -1344,16 +1370,18 @@ const lastJsonLine = (text: string): Record<string, unknown> | null => {
 // The whole payload is parsed once: exactly the two expected own keys with
 // safe-integer values. Prose, fences, a second object, extra or missing keys,
 // and non-integers all fail — only legal JSON whitespace/format/order varies.
+const payloadEquals = (value: unknown, expected: Readonly<{ count: number; sum: number }>): boolean => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (keys.length !== 2 || !("count" in record) || !("sum" in record)) return false;
+  return Number.isSafeInteger(record.count) && Number.isSafeInteger(record.sum)
+    && record.count === expected.count && record.sum === expected.sum;
+};
 const jsonEquals = (raw: string | null, expected: Readonly<{ count: number; sum: number }>): boolean => {
   if (raw === null) return false;
   try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return false;
-    const record = parsed as Record<string, unknown>;
-    const keys = Object.keys(record);
-    if (keys.length !== 2 || !("count" in record) || !("sum" in record)) return false;
-    return Number.isSafeInteger(record.count) && Number.isSafeInteger(record.sum)
-      && record.count === expected.count && record.sum === expected.sum;
+    return payloadEquals(JSON.parse(raw) as unknown, expected);
   } catch {
     return false;
   }
@@ -1371,14 +1399,44 @@ const inertTrailerLine = (line: string): boolean => {
   try { JSON.parse(line); return false; } catch { return true; }
 };
 
-const envelope = (text: string, expected: Readonly<{ count: number; sum: number }>): boolean => {
+// VH-5: the payload-agnostic envelope fact — line 1 must parse as a JSON
+// value, and every remaining line must be inert. The value is returned
+// unvalidated; each consumer applies its own predicate to it.
+export function envelopePayload(text: string): { value: unknown } | null {
   const lines = text.split("\n");
-  return jsonEquals(lines[0], expected) && lines.slice(1).every(inertTrailerLine);
+  let value: unknown;
+  try {
+    value = JSON.parse(lines[0]) as unknown;
+  } catch {
+    return null;
+  }
+  return lines.slice(1).every(inertTrailerLine) ? { value } : null;
+}
+
+const envelope = (text: string, expected: Readonly<{ count: number; sum: number }>): boolean => {
+  const payload = envelopePayload(text);
+  return payload !== null && payloadEquals(payload.value, expected);
 };
 
 // stdout oracle: the exact whole payload, or that payload plus inert prose.
 const stdoutPayloadEquals = (raw: string | null, expected: Readonly<{ count: number; sum: number }>): boolean =>
   raw !== null && (jsonEquals(raw, expected) || envelope(raw, expected));
+
+// VH-5: the sealed round's sandbox profile lifted verbatim from its freeze
+// tooling, parameterized by the runtime directory and the per-case readable
+// roots. No behavior of this harness consumes it; export keeps the round
+// tooling and the harness on one frozen policy instead of two that drift.
+export function oracleSandboxPolicy(options: { runtimeDir: string; allowReadSubpaths: readonly string[] }): string {
+  const readable = [
+    '(literal "/")',
+    '(subpath "/System")', '(subpath "/usr")', '(subpath "/bin")', '(subpath "/sbin")', '(subpath "/Library")',
+    `(subpath ${JSON.stringify(options.runtimeDir)})`,
+    ...options.allowReadSubpaths.map(path => `(subpath ${JSON.stringify(path)})`),
+    '(literal "/dev/null")', '(literal "/dev/random")', '(literal "/dev/urandom")'
+  ].join(" ");
+  return `(version 1)\n(allow default)\n(deny network*)\n(deny file-write*)\n(deny process-fork)\n(deny signal)\n`
+    + `(deny file-read-data (require-not (require-any ${readable})))\n`;
+}
 
 const withoutLayaKey = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
   const copy = { ...env };
@@ -1632,13 +1690,24 @@ export async function executeAcceptance(
               ...(worker.signal !== undefined ? { signal: worker.signal } : {})
             })
             : undefined;
+          // The decoded-event projection comes from the same durable receipt
+          // frame: the parent-observed count and age, projected only when the
+          // count survives validation — and never for a not-started worker,
+          // which decoded nothing because it never ran.
+          const workerProgress = worker !== null && worker.status !== "not-started"
+            ? projectWorkerProgress({
+              events: worker.progressEvents,
+              ...(worker.lastEventAgeMs !== undefined ? { lastEventAgeMs: worker.lastEventAgeMs } : {})
+            })
+            : undefined;
           const claimedRoot = receiptFrame !== null && typeof receiptFrame.root === "string" ? receiptFrame.root : null;
           const rootOk = claimedRoot !== null && await realpath(claimedRoot).catch(() => "") === item.root;
           observation = {
             phase: "observed", caseId: item.id, backend, profileId, rootMatches,
             exitCode: supervision.exitCode, durationMs: supervision.durationMs, attempts,
             workerUsage: projectWorkerUsage(worker?.usage),
-            ...(workerFailure !== undefined ? { workerFailure } : {})
+            ...(workerFailure !== undefined ? { workerFailure } : {}),
+            ...(workerProgress !== undefined ? { workerProgress } : {})
           };
 
           // The observation is persisted before any fallible verification read

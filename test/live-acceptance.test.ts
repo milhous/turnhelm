@@ -15,7 +15,8 @@ import { promisify } from "node:util";
 import { parseProjectConfig } from "../src/config.js";
 import { readProjectFile } from "../src/project.js";
 import {
-  appendEvidence, claimAcceptance, executeAcceptance, findOnPath, prepareAcceptance, superviseCli,
+  appendEvidence, claimAcceptance, envelopePayload, executeAcceptance, findOnPath, oracleSandboxPolicy,
+  prepareAcceptance, superviseCli,
   type AcceptanceManifest, type ClaimedRun, type SafeEvidence
 } from "./live-acceptance.js";
 
@@ -710,10 +711,13 @@ const HOSTILE_ANSWER = '"}\\n before {"count":4,"sum":17} after "'
 const HOSTILE_FAILURE = "upstream rate limit exceeded while password=p@ss.word! stayed live for the caller";
 
 // Modes: ok-readonly, ok-write, write-readonly (writes despite read-only sandbox),
-// fail, hang, wrong-output, no-output, oversize, mutate-input, summary-invalid,
+// fail, hang, emit-then-hang (one decoded event, then idles until cancelled),
+// wrong-output, no-output, oversize, mutate-input, summary-invalid,
 // hostile-answer, usage-full, usage-mixed, usage-invalid, mixed-verdict (write
-// cases pass, every other case fails the oracle alone), swap-root (replaces the
-// consumer root with a same-path copy, then answers correctly).
+// cases pass, every other case fails the oracle alone), absent-then-correct
+// (the absent-* write case writes no summary, the rest write correct ones),
+// swap-root (replaces the consumer root with a same-path copy, then answers
+// correctly).
 const FAKE_CODEX = `#!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
@@ -728,6 +732,13 @@ process.stdin.setEncoding("utf8");
 process.stdin.on("data", chunk => { task += chunk; });
 process.stdin.on("end", () => {
   const mode = process.env.TURNHELM_TEST_WORKER || "ok-readonly";
+  // TH-2: record real exec invocations only. Preflight probes (--version,
+  // exec --help) exit before stdin ends, so placing this here keeps probes
+  // out of the spawn count.
+  if (process.env.TURNHELM_TEST_INVOCATIONS) {
+    fs.appendFileSync(process.env.TURNHELM_TEST_INVOCATIONS,
+      JSON.stringify({ argv: process.argv.length }) + "\\n");
+  }
   const emit = event => process.stdout.write(JSON.stringify(event) + "\\n");
   const answer = JSON.stringify({ count: 4, sum: 17 });
   if (mode === "fail") process.exit(3);
@@ -738,6 +749,14 @@ process.stdin.on("end", () => {
     process.exit(9);
   }
   if (mode === "hang") { setInterval(() => {}, 3600); return; }
+  if (mode === "emit-then-hang") {
+    // One decoded event, then a gate file once it has flushed, then idle: the
+    // caller aborts after the gate, cancelling a run that already decoded.
+    emit({ type: "item.completed", item: { type: "agent_message", text: "partial" } });
+    setTimeout(() => fs.writeFileSync(process.env.TURNHELM_TEST_GATE_FILE, "1"), 150);
+    setInterval(() => {}, 3600);
+    return;
+  }
   if (mode === "wrong-output") {
     emit({ type: "item.completed", item: { type: "agent_message", text: "hello" } });
     emit({ type: "turn.completed" });
@@ -871,6 +890,18 @@ process.stdin.on("end", () => {
     fs.mkdirSync(path.join(process.cwd(), "out"), { recursive: true });
     fs.writeFileSync(path.join(process.cwd(), "out", "summary.json"), answer);
   }
+  if (mode === "absent-then-correct") {
+    // Per-case control by consumer id (both cases are write cases, so the
+    // sandbox flag cannot distinguish them): the absent case completes cleanly
+    // but writes no summary; every other case writes the correct one.
+    if (path.basename(process.cwd()).startsWith("absent")) {
+      emit({ type: "item.completed", item: { type: "agent_message", text: answer } });
+      emit({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 5 } });
+      process.exit(0);
+    }
+    fs.mkdirSync(path.join(process.cwd(), "out"), { recursive: true });
+    fs.writeFileSync(path.join(process.cwd(), "out", "summary.json"), answer);
+  }
   if (mode === "swap-root") {
     // Replace the consumer root with a same-path copy while the case runs:
     // identical contents, a new dev/ino. The fake's own cwd holds the old
@@ -915,10 +946,22 @@ const readEvidence = async (runRoot: string): Promise<Record<string, unknown>[]>
   (await readFile(join(runRoot, "evidence", "evidence.jsonl"), "utf8"))
     .trim().split("\n").map(line => JSON.parse(line) as Record<string, unknown>);
 
-const workerEnv = (fakeBin: string, mode: string): NodeJS.ProcessEnv => ({
+const workerEnv = (fakeBin: string, mode: string, invocations?: string): NodeJS.ProcessEnv => ({
   PATH: fakeBin + ":" + (process.env.PATH ?? ""),
-  TURNHELM_TEST_WORKER: mode
+  TURNHELM_TEST_WORKER: mode,
+  ...(invocations !== undefined ? { TURNHELM_TEST_INVOCATIONS: invocations } : {})
 });
+
+// The worker's self-recorded invocation log: absent means zero spawns, so a
+// run that never reached an exec leaves no file to count.
+const countInvocations = async (log: string): Promise<number> => {
+  try {
+    return (await readFile(log, "utf8")).trim().split("\n").filter(line => line !== "").length;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw error;
+  }
+};
 
 // A hand-built manifest that passes claim's strict parser and file checks while
 // pointing every laya case at the owned classifier fixture.
@@ -1397,6 +1440,149 @@ test("the sanitizer projects worker usage without throwing", async t => {
   assert.ok(last && !("workerUsage" in last), "no worker usage is invented where none was observed");
 });
 
+test("observed records carry the decoded-event progress projection", async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  const run = await buildRun(t, "laya", classifier.url, [{ id: "progress-completed", kind: "worker-readonly" }]);
+  await executeAcceptance(run.manifestPath, run.sha256, { env: workerEnv(fakeBin, "ok-readonly") });
+  const observed = (await readEvidence(run.runRoot)).find(line => line.phase === "observed");
+  const progress = observed?.workerProgress as { events: number; lastEventAgeMs?: number } | undefined;
+  assert.ok(progress, "a completed worker carries the progress projection");
+  assert.equal(progress.events, 2, "the fake stream decodes one message plus one completion");
+  assert.equal(typeof progress.lastEventAgeMs, "number",
+    "a positive count carries the age from the last decode to settlement");
+});
+
+test("a cancelled mid-stream worker keeps its decoded events in the observed record", async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  const run = await buildRun(t, "laya", classifier.url, [{ id: "progress-cancelled", kind: "worker-readonly" }]);
+  const gate = join(run.runRoot, "emit-gate");
+  const controller = new AbortController();
+  const executed = executeAcceptance(run.manifestPath, run.sha256,
+    { env: { ...workerEnv(fakeBin, "emit-then-hang"), TURNHELM_TEST_GATE_FILE: gate }, signal: controller.signal });
+  // The gate file appears only after the worker's event has flushed, so the
+  // abort lands on a run that has already decoded at least one event.
+  for (let round = 0; !(await stat(gate).then(() => true, () => false)); round++) {
+    assert.ok(round < 480, "the mid-stream worker never became observable");
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  controller.abort();
+  assert.equal(await executed, 130);
+  const evidence = await readEvidence(run.runRoot);
+  const progress = evidence.find(line => line.phase === "observed")?.workerProgress as
+    { events: number; lastEventAgeMs?: number } | undefined;
+  assert.ok(progress && progress.events >= 1, "the decoded message before cancellation still counts");
+  assert.equal(typeof progress?.lastEventAgeMs, "number");
+  assert.equal(evidence.at(-1)?.phase, "stopped");
+  assert.equal(evidence.at(-1)?.reason, "signal", "the terminal stopped record is still written");
+});
+
+test("workerProgress evidence is all-or-nothing on events and per-field on age", async t => {
+  const prepared = await prepareJev(t);
+  const run = await claimAcceptance(prepared.manifestPath, prepared.sha256);
+  t.after(() => run.handle.close());
+  const base = {
+    phase: "observed", caseId: "jev-default-readonly", backend: "jev", profileId: "default",
+    rootMatches: true, exitCode: 3, durationMs: 42, attempts: 1
+  };
+  const append = async (workerProgress: unknown): Promise<Record<string, unknown>> => {
+    await appendEvidence(run, { ...base, workerProgress } as unknown as SafeEvidence);
+    return JSON.parse((await readFile(run.evidencePath, "utf8")).trim().split("\n").at(-1)!);
+  };
+
+  // A complete projection survives exactly.
+  assert.deepEqual(await append({ events: 3, lastEventAgeMs: 250 }),
+    { ...base, workerProgress: { events: 3, lastEventAgeMs: 250 } });
+  // A malformed age drops only that field.
+  assert.deepEqual(await append({ events: 3, lastEventAgeMs: -1 }),
+    { ...base, workerProgress: { events: 3 } });
+  // A malformed count drops the whole projection; so does a non-object.
+  for (const workerProgress of [{ events: "3" }, { events: 1.5 }, { events: -2 }, "turnhelm"]) {
+    const observed = await append(workerProgress);
+    assert.ok(!("workerProgress" in observed), JSON.stringify(workerProgress) + " must drop the whole projection");
+  }
+  // An unknown key inside a present projection rejects the record outright.
+  await assert.rejects(
+    () => appendEvidence(run, { ...base, workerProgress: { events: 3, decodedBytes: 99 } } as unknown as SafeEvidence),
+    /workerProgress/
+  );
+  // An observed record without the projection invents none.
+  await appendEvidence(run, { ...base, caseId: "heading-en-trial-1" } as unknown as SafeEvidence);
+  const last = JSON.parse((await readFile(run.evidencePath, "utf8")).trim().split("\n").at(-1)!);
+  assert.ok(!("workerProgress" in last), "no progress projection is invented where none was observed");
+});
+
+test("a routing failure never projects worker progress", async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+
+  // The classifier answers garbage: routing fails, the CLI emits its
+  // not-started receipt, and the round stops on the verdict — but the
+  // observed record is already durable. A worker that never ran must not
+  // be represented as one that decoded zero events.
+  classifier.scripted.push("not-json");
+  const run = await buildRun(t, "laya", classifier.url, [{ id: "route-fail", kind: "worker-readonly" }]);
+  assert.equal(await executeAcceptance(run.manifestPath, run.sha256,
+    { env: workerEnv(fakeBin, "ok-readonly") }), 1);
+  const evidence = await readEvidence(run.runRoot);
+  const observed = evidence.find(line => line.phase === "observed");
+  assert.ok(observed, "the not-started run still lands its observation");
+  assert.ok(!("workerProgress" in (observed as Record<string, unknown>)),
+    "a not-started worker carries no progress projection");
+  assert.equal(evidence.find(line => line.phase === "stopped")?.reason, "verdict");
+});
+
+test("envelopePayload extracts the line-1 value behind inert trailers only", () => {
+  // A same-line object pair is not an envelope: line 1 must parse alone.
+  assert.equal(envelopePayload('{"count":0,"sum":0} {"count":8,"sum":8}'), null);
+  // An array wrapper wraps the payload in brackets, so line 1 is "[".
+  assert.equal(envelopePayload('[\n{"count":4,"sum":17}\n]'), null);
+  assert.equal(envelopePayload("not json at all"), null);
+  // The line-1 value is returned unvalidated, whatever shape it takes.
+  assert.deepEqual(envelopePayload('{"a":true,"b":false,"c":true}\nDone.'),
+    { value: { a: true, b: false, c: true } });
+  assert.deepEqual(envelopePayload("42"), { value: 42 });
+  // The inert-trailer rule binds regardless of the payload's shape.
+  assert.equal(envelopePayload('{"a":true}\n{"b":false}'), null);
+  assert.equal(envelopePayload('{"a":true}\n```'), null);
+});
+
+test("oracleSandboxPolicy freezes the sealed round's SBPL, parameterized by its roots", () => {
+  const options = {
+    runtimeDir: "/opt/node-v24.0.0/libexec",
+    allowReadSubpaths: ["/tmp/turnhelm-live-laya/consumers/admission-x", "/tmp/turnhelm-live-laya/references/x"]
+  };
+  const first = oracleSandboxPolicy(options);
+  // (a) deterministic: the same inputs freeze byte-identical output, twice.
+  assert.equal(oracleSandboxPolicy(options), first);
+  // (b) parameter sensitivity: every accepted root changes the bytes.
+  assert.notEqual(oracleSandboxPolicy({ ...options, allowReadSubpaths: ["/tmp/other-root"] }), first);
+  assert.notEqual(oracleSandboxPolicy({ ...options, runtimeDir: "/usr/local/node24/libexec" }), first);
+  // (c) shape: every clause of the round tooling's policy, one substring each.
+  assert.ok(first.startsWith("(version 1)\n"));
+  assert.ok(first.includes("(allow default)\n"));
+  assert.ok(first.includes("(deny network*)\n"));
+  assert.ok(first.includes("(deny file-write*)\n"));
+  assert.ok(first.includes("(deny process-fork)\n"));
+  assert.ok(first.includes("(deny signal)\n"));
+  // The read-isolation clause itself: without this pin, flipping the deny to
+  // an allow would slip past every path assertion above.
+  assert.ok(first.includes("(deny file-read-data (require-not (require-any "));
+  assert.ok(first.endsWith('(literal "/dev/urandom"))))\n'), "the policy is a closed line list");
+  assert.ok(first.includes(`(subpath ${JSON.stringify(options.runtimeDir)})`));
+  for (const path of options.allowReadSubpaths) {
+    assert.ok(first.includes(`(subpath ${JSON.stringify(path)})`));
+  }
+  assert.ok(first.includes('(literal "/")'));
+  for (const system of ["/System", "/usr", "/bin", "/sbin", "/Library"]) {
+    assert.ok(first.includes(`(subpath ${JSON.stringify(system)})`));
+  }
+  for (const device of ["/dev/null", "/dev/random", "/dev/urandom"]) {
+    assert.ok(first.includes(`(literal ${JSON.stringify(device)})`));
+  }
+});
+
 test("oracle-only failures continue the roster to a failed completion", async t => {
   const classifier = await startClassifierFixture(t);
   const fakeBin = await writeFakeCodex(t);
@@ -1445,6 +1631,46 @@ test("oracle-only failures continue the roster to a failed completion", async t 
   assert.ok(doubleEvidence.filter(line => line.phase === "verified")
     .every(line => line.oracleInput), "every continued failure retains its input");
   assert.deepEqual(doubleEvidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 2 });
+});
+
+test("an absent summary fails its oracle and continues the write roster", async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+
+  // TH-1 pin: both cases are worker-write; the first completes cleanly but
+  // writes no out/summary.json. The absent file fails the oracle alone, the
+  // roster continues, and the second write case still runs and passes.
+  const run = await buildRun(t, "laya", classifier.url, [
+    { id: "absent-write", kind: "worker-write" },
+    { id: "correct-write", kind: "worker-write" }
+  ]);
+  const invocations = join(run.runRoot, "fake-worker-invocations.log");
+  assert.equal(await executeAcceptance(run.manifestPath, run.sha256,
+    { env: workerEnv(fakeBin, "absent-then-correct", invocations) }), 4);
+  const evidence = await readEvidence(run.runRoot);
+  // TH-2: the spawn count is the worker's own recorded invocations, not the
+  // reserved records — a runner that reserves but never spawns must not pass.
+  assert.equal(await countInvocations(invocations), 2, "both write cases actually spawn their worker");
+  assert.ok(!evidence.some(line => line.phase === "stopped"));
+  assert.deepEqual(evidence.filter(line => line.phase === "verified").map(line => line.verdict),
+    ["fail", "pass"]);
+  const absent = evidence.find(line => line.phase === "verified" && line.caseId === "absent-write");
+  assert.deepEqual(absent?.oracleInput, { source: "summary-file", text: null, bytes: null },
+    "an absent summary is evidence of absence, not a fabricated payload");
+  assert.equal((absent?.checks as Record<string, unknown>).oracle, false);
+  assert.equal((evidence.find(line => line.phase === "verified" && line.caseId === "correct-write")
+    ?.checks as Record<string, unknown>).oracle, true);
+  assert.deepEqual(evidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 1 });
+
+  // A claim that refuses before the loop spends nothing: drifted frozen bytes
+  // stop the run at the claim with zero recorded worker invocations.
+  const zero = await buildRun(t, "laya", classifier.url, [{ id: "never-spawned", kind: "worker-readonly" }]);
+  const zeroLog = join(zero.runRoot, "fake-worker-invocations.log");
+  const zeroRoot = (await loadManifest(zero.manifestPath)).cases[0].root;
+  await writeFile(join(zeroRoot, "input.json"), JSON.stringify({ values: [1] }));
+  assert.equal(await executeAcceptance(zero.manifestPath, zero.sha256,
+    { env: workerEnv(fakeBin, "ok-readonly", zeroLog) }), 1);
+  assert.equal(await countInvocations(zeroLog), 0, "a refused claim spawns no worker");
 });
 
 test("integrity failures still stop even beside a failing oracle", async t => {

@@ -104,7 +104,12 @@ never native error text. The receipt's `worker` object always carries
 `ownedShutdown`, a boolean action record (a parent-initiated stop ladder
 ran), not a causation claim; a failed worker adds `failureClass` and
 `errorSha256` (hash only), and any death by SIGINT/SIGTERM/SIGKILL —
-failed or cancelled — adds the `signal`. Read the
+failed or cancelled — adds the `signal`. Every worker receipt also carries
+`progressEvents` — the count of event frames the parent successfully
+decoded, malformed frames excluded — and, once at least one decoded,
+`lastEventAgeMs`, the rounded milliseconds from that last decode to
+settlement; both are parent-observed, backpressure-bounded observations,
+never liveness or stall claims. Read the
 exit code and routing/worker statuses, not stderr
 presence or a selected profile alone.
 
@@ -146,7 +151,14 @@ bounded to 64 KiB, private to the claimed run; that is raw-content retention,
 not secret sanitization. Observed records also carry a whitelisted
 `workerUsage` projection whose scope is unverified, and a bounded
 `workerFailure` projection — frozen class, `ownedShutdown` boolean,
-optional correlation hash and death signal; no failure text. Exit `3` means a complete
+optional correlation hash and death signal; no failure text — plus
+`workerProgress`, the receipt's decoded-event count and, when one decoded,
+the last decode's age at settlement, the same parent-observed projection
+that never claims liveness. The harness also exports its shared oracle
+primitives — the payload-agnostic `envelopePayload` envelope fact and the
+root-parameterized `oracleSandboxPolicy` sandbox profile — so sealed-round
+tooling and tests judge against one frozen definition instead of two that
+drift. Exit `3` means a complete
 calibration roster with a band-policy mismatch; exit `4` means a complete
 worker roster with at least one engineering failure. A task-output failure
 (wrong or missing output, every integrity check true) fails the case and the
@@ -168,3 +180,41 @@ and `wholeRunUsageScope` is `"unverified"`. Snapshots are not whole-task costs
 or savings. Offline doctor/help evidence does not prove runtime config-key
 semantics, model entitlement, or paid benefit. A real worker using ChatGPT login
 is not API-key billing or invoice evidence.
+
+The checkout also carries a hermetic custom-round runner — `test/custom-round.ts`,
+exported through the built `dist/test` surface and invocable as
+`node dist/test/custom-round.js prepare <roster.json>` / `execute <manifest.json>
+<sha256>` — for owner-defined validation rosters. The round input is a
+data-only JSON roster: nothing executable is trusted from it, and every
+referenced file is hashed into a frozen manifest as data, alongside a per-case
+snapshot of the whole consumer tree. `prepareRound` validates the roster,
+re-verifies the pinned HEAD and the whole-consumption baseline (every built
+module the round executes), preflights the sandbox machinery and each roster
+contract's loadability, and writes the manifest with a human approval request
+while spending nothing — zero classifier requests and zero worker executions,
+asserted by the manifest's zero-spend block. `executeRound` runs only under
+the human-approved sha256: it re-verifies manifest bytes, evidence-root
+identity, runtime, HEAD, and baseline, claims the append-only evidence ledger
+exactly once (a replay refuses), and gates every case identity-before-spend —
+root dev/ino identity, frozen file hashes, the frozen tree, and the consumed
+baseline re-verify before each reservation, and a reserved record that cannot
+be written stops all remaining spend. A run must carry exactly one CLI receipt
+to be graded; journal backend/profileId values surface only through a fixed
+whitelist; a legal profile outside the case's allowedProfiles fails its case;
+and each judged case retains its bounded `oracleInput`. After the worker runs,
+the consumer tree re-verifies against the case's allowedChanges — a write
+outside them stops the round even when the output graded fine. Task-output and
+contract-assertion failures fail their case and the roster continues to exit
+`4`; integrity failures (identity, baseline, or tree drift, missing receipts,
+timeout, output cap, cleanup, check infrastructure) and auth-, rate-limit-, or
+usage-limit-class worker receipts stop all remaining spend with exit `1`; a
+roster whose planned spend exceeds its frozen caps is refused before launch;
+SIGINT anywhere in the round, including mid-contract, settles gracefully with
+`130` and SIGTERM with `143`. Worker-write contracts execute inside the
+runner's sandboxed check launcher, whose runner-owned fd-3 outcome record
+replaces exit-code and stdout inference; the sandbox boundary is a
+path-injected fake on every platform, with a real seatbelt profile only in the
+macOS-gated test. Two harness pins landed with it: acceptance-style tests
+observe actual fake-worker invocations rather than reserved records, and the
+worker receipt's `lastEventAgeMs` is pinned positive through a post-drain
+settlement gap.

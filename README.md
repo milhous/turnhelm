@@ -281,7 +281,12 @@ false on every natural path. A failed worker also carries the frozen
 `failureClass` (plus `errorSha256`, a SHA-256 over the native error bytes
 for cross-run correlation, when a native message existed); a worker that
 died by SIGINT/SIGTERM/SIGKILL — failed or cancelled — carries the death
-`signal`. The text behind that hash never crosses the diagnostic boundary.
+`signal`. Every worker receipt also carries `progressEvents` — the count of
+event frames the parent successfully decoded, malformed frames excluded —
+and, once at least one decoded, `lastEventAgeMs`, the rounded milliseconds
+from that last decode to settlement. Both are parent-observed,
+backpressure-bounded observations, never liveness or stall claims. The text
+behind that hash never crosses the diagnostic boundary.
 
 ## Usage evidence is honest, not authoritative
 
@@ -357,7 +362,14 @@ run and covered by the manifest approval, and never a license to put secrets
 in task output. Observed records also carry `workerUsage`, a whitelisted
 four-counter projection whose scope is unverified, and `workerFailure` —
 the frozen failure class plus the `ownedShutdown` action boolean, with an
-optional correlation hash and observed death signal; no failure text. Exit codes: `2` usage, `1`
+optional correlation hash and observed death signal; no failure text —
+plus `workerProgress`, the receipt's decoded-event count and, when one
+decoded, the last decode's age at settlement, the same parent-observed
+projection that never claims liveness. The harness also exports its shared
+oracle primitives — the payload-agnostic `envelopePayload` envelope fact
+and the root-parameterized `oracleSandboxPolicy` sandbox profile — so
+sealed-round tooling and tests judge against one frozen definition instead
+of two that drift. Exit codes: `2` usage, `1`
 failure or incomplete, `0` complete pass, `3` a complete calibration roster
 containing a band-policy mismatch, `4` a complete worker roster containing at
 least one engineering failure, `130`/`143` on interrupt. In the calibration
@@ -408,6 +420,44 @@ env -u TYPESAFE_API_KEY -u LAYA_API_KEY -u TURNHELM_ALLOW_HOSTED_JEV pnpm run te
 # Dependency audit.
 pnpm audit --audit-level high
 ```
+
+The checkout also carries a hermetic custom-round runner — `test/custom-round.ts`,
+exported through the built `dist/test` surface and invocable as
+`node dist/test/custom-round.js prepare <roster.json>` / `execute <manifest.json>
+<sha256>` — for owner-defined validation rosters. The round input is a
+data-only JSON roster: nothing executable is trusted from it, and every
+referenced file is hashed into a frozen manifest as data, alongside a per-case
+snapshot of the whole consumer tree. `prepareRound` validates the roster,
+re-verifies the pinned HEAD and the whole-consumption baseline (every built
+module the round executes), preflights the sandbox machinery and each roster
+contract's loadability, and writes the manifest with a human approval request
+while spending nothing — zero classifier requests and zero worker executions,
+asserted by the manifest's zero-spend block. `executeRound` runs only under
+the human-approved sha256: it re-verifies manifest bytes, evidence-root
+identity, runtime, HEAD, and baseline, claims the append-only evidence ledger
+exactly once (a replay refuses), and gates every case identity-before-spend —
+root dev/ino identity, frozen file hashes, the frozen tree, and the consumed
+baseline re-verify before each reservation, and a reserved record that cannot
+be written stops all remaining spend. A run must carry exactly one CLI receipt
+to be graded; journal backend/profileId values surface only through a fixed
+whitelist; a legal profile outside the case's allowedProfiles fails its case;
+and each judged case retains its bounded `oracleInput`. After the worker runs,
+the consumer tree re-verifies against the case's allowedChanges — a write
+outside them stops the round even when the output graded fine. Task-output and
+contract-assertion failures fail their case and the roster continues to exit
+`4`; integrity failures (identity, baseline, or tree drift, missing receipts,
+timeout, output cap, cleanup, check infrastructure) and auth-, rate-limit-, or
+usage-limit-class worker receipts stop all remaining spend with exit `1`; a
+roster whose planned spend exceeds its frozen caps is refused before launch;
+SIGINT anywhere in the round, including mid-contract, settles gracefully with
+`130` and SIGTERM with `143`. Worker-write contracts execute inside the
+runner's sandboxed check launcher, whose runner-owned fd-3 outcome record
+replaces exit-code and stdout inference; the sandbox boundary is a
+path-injected fake on every platform, with a real seatbelt profile only in the
+macOS-gated test. Two harness pins landed with it: acceptance-style tests
+observe actual fake-worker invocations rather than reserved records, and the
+worker receipt's `lastEventAgeMs` is pinned positive through a post-drain
+settlement gap.
 
 The minimum Codex contract remains **0.160.0**. Compatibility evidence includes
 0.160.0 (official native binary:

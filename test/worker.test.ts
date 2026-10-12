@@ -88,6 +88,7 @@ type WorkerScenario = {
   trackFrameConcat?: boolean;
   trackKills?: boolean;
   settlementGuardMs?: number;
+  ackMessageDecode?: boolean;
 };
 
 type Recorded = {
@@ -118,6 +119,8 @@ type Recorded = {
   errorSha256?: string;
   signal?: string;
   postSettleKills?: number;
+  progressEvents?: number;
+  lastEventAgeMs?: number;
 };
 
 async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ recorded: Recorded; stdout: string; stderr: string; directory: string }> {
@@ -239,7 +242,17 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
                 ? "// Accepted write whose completion callback never arrives."
               : `setTimeout(() => { pending -= 1; callback(); }, ${scenario.drainDelayMs ?? 30});`}
       }
-    });` : "output = process.stdout;"}
+    })` : "output = process.stdout;"}
+    ${scenario.ackMessageDecode ? `
+    // Parent-observed decode sync point: the forwarded agent message is
+    // written synchronously inside dispatch, so this sink's write proves the
+    // frame already decoded.
+    output = new Writable({
+      write(_chunk, _encoding, callback) {
+        writeFileSync(${JSON.stringify(join(directory, "decode-ack"))}, String(Date.now()));
+        callback();
+      }
+    });` : ""}
     ${scenario.tail?.target === "diag" ? "diagSink = tailSink;" : ""}
     ${scenario.diag === "stall" ? `
     diagSink = new Writable({
@@ -513,7 +526,10 @@ test("worker descendant zsh never sources host startup files", { timeout: 30_000
   // zsh lookup at the still-empty owned home (a missing file there is a skip).
   const probe = await execute("/bin/zsh", ["-c", "print -r -- ok"],
     { env: { PATH: process.env.PATH, ZDOTDIR: home } }).catch(error => error);
-  if ((probe as NodeJS.ErrnoException).code === "ENOENT") t.skip("/bin/zsh is not available");
+  // t.skip flags the test but does not halt this body: without the return,
+  // the descendant probe below runs anyway and turns the skip into a failure
+  // wherever /bin/zsh is absent (CI's ubuntu runner).
+  if ((probe as NodeJS.ErrnoException).code === "ENOENT") return t.skip("/bin/zsh is not available");
   await writeFile(join(home, ".zshenv"), "export TURNHELM_TEST_ZSHENV_MARKER=leaked\n");
   const { recorded, directory } = await runWorker(t, {
     parentEnv: { HOME: home },
@@ -569,10 +585,12 @@ finish(() => {
 `
   });
   assert.equal(typeof recorded.durationMs, "number");
-  assert.deepEqual({ ...recorded, durationMs: 0 }, {
+  assert.deepEqual({ ...recorded, durationMs: 0, lastEventAgeMs: 0 }, {
     code: 0,
     status: "completed",
     durationMs: 0,
+    progressEvents: 2,
+    lastEventAgeMs: 0,
     usage: { input_tokens: 12, output_tokens: 5 },
     usageScope: "unverified",
     received: 0,
@@ -810,6 +828,98 @@ finish(() => { process.exit(3); });
   assert.equal(recorded.failureClass, "unknown");
   assert.equal(recorded.ownedShutdown, false);
   assert.equal(recorded.errorSha256, undefined);
+});
+
+test("decoded-event counters count every successfully decoded kind", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "counted" } });
+  emit({ type: "turn.completed", usage: { input_tokens: 1 } });
+  process.stdout.write(JSON.stringify({ type: "future.event" }) + "\\n");
+  emit({ type: "item.completed", item: { type: "command_execution", command: "ls", aggregated_output: "file", exit_code: 0 } });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(recorded.progressEvents, 4, "message, completed, unknown, and diagnostic kinds all count");
+  assert.equal(typeof recorded.lastEventAgeMs, "number");
+});
+
+test("a settlement gap after decode quiescence makes lastEventAgeMs positive", { timeout: 30_000 }, async t => {
+  // The gap must start after the parent DECODED the frames, not after the
+  // child emitted them: a descheduled parent decodes everything at close and
+  // the age collapses to zero (the bare emit-then-sleep construction reports
+  // exactly 0 under that schedule). The child therefore refuses to exit
+  // until the parent's output sink observes the forwarded message — written
+  // synchronously inside dispatch — and only then runs the hold-open gap.
+  const { recorded, directory } = await runWorker(t, {
+    ackMessageDecode: true,
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "gap" } });
+  emit({ type: "turn.completed", usage: { input_tokens: 1 } });
+  const ack = path.join(here, "decode-ack");
+  const poll = deadline => {
+    if (fs.existsSync(ack)) {
+      fs.writeFileSync(path.join(here, "gap-started"), String(Date.now()));
+      setTimeout(() => process.exit(0), 50);
+    } else if (Date.now() < deadline) setTimeout(() => poll(deadline), 10);
+    else process.exit(0); // broken protocol: the assertions below fail fast
+  };
+  poll(Date.now() + 10000);
+});
+`
+  });
+  const ackAt = Number(await readFile(join(directory, "decode-ack"), "utf8"));
+  const gapAt = Number(await readFile(join(directory, "gap-started"), "utf8"));
+  assert.ok(Number.isFinite(ackAt) && Number.isFinite(gapAt) && gapAt >= ackAt,
+    "the parent decoded before the gap began: ack " + ackAt + ", gap " + gapAt);
+  assert.equal(recorded.status, "completed");
+  assert.equal(recorded.progressEvents, 2, "both frames decode before the gap");
+  assert.ok(recorded.lastEventAgeMs !== undefined && recorded.lastEventAgeMs > 0,
+    "the hold-open gap lands after the last decode: saw " + recorded.lastEventAgeMs);
+});
+
+test("a malformed frame stops counting but the decoded count ships on the failed result", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "counted" } });
+  emit({ type: "turn.completed" });
+  process.stdout.write("{not json}\\n");
+  process.stdout.write(JSON.stringify({ type: "future.event" }) + "\\n");
+  setTimeout(() => {}, 10000);
+});
+`
+  });
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "protocol");
+  assert.equal(recorded.progressEvents, 2, "malformed frames do not count");
+  assert.equal(typeof recorded.lastEventAgeMs, "number");
+});
+
+test("a pre-start abort carries zero decoded events and no age", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, { abortBeforeCall: true });
+  assert.equal(recorded.status, "cancelled");
+  assert.equal(recorded.progressEvents, 0);
+  assert.equal(recorded.lastEventAgeMs, undefined);
+});
+
+test("a cancelled mid-stream run keeps its decoded events and age", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    output: "blocker",
+    gate: "abort-received",
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "held" } });
+  setInterval(() => {}, 1000);
+});
+`
+  });
+  assert.equal(recorded.status, "cancelled");
+  assert.ok((recorded.progressEvents ?? 0) >= 1, "the decoded message before cancellation still counts, saw " + recorded.progressEvents);
+  assert.equal(typeof recorded.lastEventAgeMs, "number");
 });
 
 test("the failed dispatch writes exactly one class-only diagnostic line", { timeout: 30_000 }, async t => {

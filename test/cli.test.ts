@@ -562,6 +562,8 @@ test("a worker terminal failure fails the run despite exit zero", async t => {
     status: "failed",
     code: 0,
     durationMs: (receipt.worker as { durationMs: number }).durationMs,
+    progressEvents: 1,
+    lastEventAgeMs: (receipt.worker as { lastEventAgeMs?: number }).lastEventAgeMs,
     usage: "unreported",
     ownedShutdown: false,
     failureClass: "unknown"
@@ -634,7 +636,7 @@ test("routing exhaustion launches zero workers and emits one receipt without a s
     [{ backend: "laya", outcome: "failed" }]);
   assert.deepEqual(routing.requestCounts, { laya: 1, jev: 0 });
   assert.equal("selection" in receipt, false);
-  assert.deepEqual(receipt.worker, { status: "not-started", durationMs: 0, usage: "unreported" });
+  assert.deepEqual(receipt.worker, { status: "not-started", durationMs: 0, progressEvents: 0, usage: "unreported" });
   assert.equal(receipt.classifierUsage, "unreported");
   assert.equal(receipt.wholeRunUsageScope, "unverified");
   assert.equal(await workerRecords(f).then(records => records.runs), 0);
@@ -649,6 +651,8 @@ test("a completed run without usage reports it explicitly unreported", async t =
     status: "completed",
     code: 0,
     durationMs: (receipt.worker as { durationMs: number }).durationMs,
+    progressEvents: 2,
+    lastEventAgeMs: (receipt.worker as { lastEventAgeMs?: number }).lastEventAgeMs,
     usage: "unreported",
     ownedShutdown: false
   });
@@ -671,6 +675,8 @@ for (const [name, expectedCode] of [["SIGINT", 130], ["SIGTERM", 143]] as const)
       status: "cancelled",
       code: (receipt.worker as { code: number }).code,
       durationMs: (receipt.worker as { durationMs: number }).durationMs,
+      // The hang fixture never emits an event: zero decoded events, no age.
+      progressEvents: 0,
       usage: "unreported",
       // Cancellation runs the parent-owned ladder; the worker dies by our TERM.
       ownedShutdown: true,
@@ -720,7 +726,7 @@ test("SIGINT during routing keeps one cancelled attempt and launches no worker",
   assert.equal((receipt.routing as { status: string }).status, "cancelled");
   assert.equal((receipt.routing as { attempts: { outcome: string }[] }).attempts[0].outcome, "cancelled");
   assert.equal("selection" in receipt, false);
-  assert.deepEqual(receipt.worker, { status: "not-started", durationMs: 0, usage: "unreported" });
+  assert.deepEqual(receipt.worker, { status: "not-started", durationMs: 0, progressEvents: 0, usage: "unreported" });
   assert.equal(await workerRecords(f).then(records => records.runs), 0);
 });
 

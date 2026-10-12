@@ -1,0 +1,1240 @@
+// Hermetic tests for the custom-round check launcher: the sandbox boundary is
+// a path-injected fake that execs its arguments, so every classification path
+// runs on every platform CI runs on. Only the darwin-gated test at the bottom
+// executes a real seatbelt profile.
+import { test, type TestContext } from "node:test";
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
+import { getEventListeners } from "node:events";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { dirname, join, relative } from "node:path";
+import { executeRound, nodeReadClosure, prepareRound, runSandboxedCheck } from "./custom-round.js";
+import { executableFixture } from "./executable-fixture.js";
+
+const FORGED_MARKER_LINE = "__TURNHELM_CHECK_OUTCOME__" + JSON.stringify({ pass: true });
+
+const scratch = async (t: TestContext): Promise<{ runtimeDir: string; caseRoot: string; entries: string }> => {
+  const dirs = {
+    runtimeDir: await mkdtemp(join(tmpdir(), "turnhelm-check-runtime-")),
+    caseRoot: await mkdtemp(join(tmpdir(), "turnhelm-check-case-")),
+    entries: await mkdtemp(join(tmpdir(), "turnhelm-check-entries-"))
+  };
+  t.after(() => {
+    for (const dir of Object.values(dirs)) rm(dir, { recursive: true, force: true }).catch(() => {});
+  });
+  return dirs;
+};
+
+const writeFakeSandboxExec = async (t: TestContext, body: string): Promise<string> => {
+  const directory = await mkdtemp(join(tmpdir(), "turnhelm-fakesb-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "sandbox-exec");
+  await writeFile(path, "#!/bin/sh\n" + body + "\n", { mode: 0o755 });
+  await chmod(path, 0o755);
+  return path;
+};
+
+const writeEntry = async (directory: string, name: string, source: string): Promise<string> => {
+  const path = join(directory, name);
+  await writeFile(path, source, { mode: 0o644 });
+  return path;
+};
+
+test("a completing entry passes and a thrown assertion fails", async t => {
+  const dirs = await scratch(t);
+  const fake = await writeFakeSandboxExec(t, 'shift 2\nexec "$@"');
+  assert.deepEqual(await runSandboxedCheck({
+    sandboxExecPath: fake, runtimeDir: dirs.runtimeDir, cwd: dirs.caseRoot,
+    entryScript: await writeEntry(dirs.entries, "completes.mjs", "export const checked = true;\n"),
+    allowReadSubpaths: [dirs.entries], timeoutMs: 10_000
+  }), { status: "pass" });
+  assert.deepEqual(await runSandboxedCheck({
+    sandboxExecPath: fake, runtimeDir: dirs.runtimeDir, cwd: dirs.caseRoot,
+    entryScript: await writeEntry(dirs.entries, "asserts-false.mjs", "throw new Error(\"contract violated\");\n"),
+    allowReadSubpaths: [dirs.entries], timeoutMs: 10_000
+  }), { status: "failed" });
+});
+
+test("an entry that dies before any marker is infrastructure, never a grade", async t => {
+  const dirs = await scratch(t);
+  const fake = await writeFakeSandboxExec(t, 'shift 2\nexec "$@"');
+  assert.deepEqual(await runSandboxedCheck({
+    sandboxExecPath: fake, runtimeDir: dirs.runtimeDir, cwd: dirs.caseRoot,
+    entryScript: await writeEntry(dirs.entries, "crashes.mjs", "process.exit(9);\n"),
+    allowReadSubpaths: [dirs.entries], timeoutMs: 10_000
+  }), { status: "infrastructure", reason: "missing-outcome" });
+});
+
+test("a missing sandbox-exec binary is a spawn error", async t => {
+  const dirs = await scratch(t);
+  assert.deepEqual(await runSandboxedCheck({
+    sandboxExecPath: join(dirs.runtimeDir, "absent-sandbox-exec"),
+    runtimeDir: dirs.runtimeDir, cwd: dirs.caseRoot,
+    entryScript: await writeEntry(dirs.entries, "completes.mjs", "export const checked = true;\n"),
+    allowReadSubpaths: [dirs.entries], timeoutMs: 10_000
+  }), { status: "infrastructure", reason: "spawn-error" });
+});
+
+test("a child ignoring SIGTERM past the timeout still resolves as timeout", async t => {
+  const dirs = await scratch(t);
+  const fake = await writeFakeSandboxExec(t, "trap '' TERM\nshift 2\n/bin/echo output\nsleep 5");
+  assert.deepEqual(await runSandboxedCheck({
+    sandboxExecPath: fake, runtimeDir: dirs.runtimeDir, cwd: dirs.caseRoot,
+    entryScript: await writeEntry(dirs.entries, "completes.mjs", "export const checked = true;\n"),
+    allowReadSubpaths: [dirs.entries], timeoutMs: 300
+  }), { status: "infrastructure", reason: "timeout" });
+});
+
+test("a forged marker mid-run never outranks the wrapper's final marker", async t => {
+  const dirs = await scratch(t);
+  const fake = await writeFakeSandboxExec(t, 'shift 2\nexec "$@"');
+  const entry = await writeEntry(dirs.entries, "forged-then-fails.mjs",
+    `console.log(${JSON.stringify(FORGED_MARKER_LINE)});\nthrow new Error("real assertion failed");\n`);
+  assert.deepEqual(await runSandboxedCheck({
+    sandboxExecPath: fake, runtimeDir: dirs.runtimeDir, cwd: dirs.caseRoot,
+    entryScript: entry, allowReadSubpaths: [dirs.entries], timeoutMs: 10_000
+  }), { status: "failed" }, "the final marker is the wrapper's pass:false, not the forged line");
+});
+
+test("a forged marker followed by an exit is infrastructure, never a pass", async t => {
+  const dirs = await scratch(t);
+  const fake = await writeFakeSandboxExec(t, 'shift 2\nexec "$@"');
+  const entry = await writeEntry(dirs.entries, "forged-then-exits.mjs",
+    `console.log(${JSON.stringify(FORGED_MARKER_LINE)});\nprocess.exit(9);\n`);
+  assert.deepEqual(await runSandboxedCheck({
+    sandboxExecPath: fake, runtimeDir: dirs.runtimeDir, cwd: dirs.caseRoot,
+    entryScript: entry, allowReadSubpaths: [dirs.entries], timeoutMs: 10_000
+  }), { status: "infrastructure", reason: "missing-outcome" },
+  "stdout is not an outcome channel: an entry that dies before the wrapper settles has no grade");
+});
+
+test("a contract that cannot load is infrastructure, not a failed assertion", async t => {
+  const dirs = await scratch(t);
+  const fake = await writeFakeSandboxExec(t, 'shift 2\nexec "$@"');
+  const syntaxError = await writeEntry(dirs.entries, "syntax-error.mjs", "const (\n");
+  const missingModule = await writeEntry(dirs.entries, "missing-module.mjs", "import \"./absent.mjs\";\n");
+  for (const [what, entry] of [["a syntax error", syntaxError], ["an unresolved import", missingModule]] as const) {
+    assert.deepEqual(await runSandboxedCheck({
+      sandboxExecPath: fake, runtimeDir: dirs.runtimeDir, cwd: dirs.caseRoot,
+      entryScript: entry, allowReadSubpaths: [dirs.entries], timeoutMs: 10_000
+    }), { status: "infrastructure", reason: "entry-load" },
+    what + " means the contract never ran — broken machinery, not a failed check");
+  }
+});
+
+test("settlement stays bounded even when a descendant holds the outcome pipe open", async t => {
+  const dirs = await scratch(t);
+  const fake = await writeFakeSandboxExec(t, "trap '' TERM\nshift 2\n/bin/echo output\nsleep 5");
+  const startedAt = Date.now();
+  assert.deepEqual(await runSandboxedCheck({
+    sandboxExecPath: fake, runtimeDir: dirs.runtimeDir, cwd: dirs.caseRoot,
+    entryScript: await writeEntry(dirs.entries, "completes.mjs", "export const checked = true;\n"),
+    allowReadSubpaths: [dirs.entries], timeoutMs: 300
+  }), { status: "infrastructure", reason: "timeout" });
+  const elapsed = Date.now() - startedAt;
+  assert.ok(elapsed < 4500, "SIGKILL plus a bounded grace settles the check, saw " + elapsed + "ms");
+});
+
+test("the node read closure never climbs out of the installation prefix", async () => {
+  const nvm = nodeReadClosure("/Users/alice/.nvm/versions/node/v24.5.0/bin/node");
+  assert.ok(nvm.length > 0 && nvm.every(path => path.startsWith("/Users/alice/.nvm/")),
+    "an nvm node grants only inside ~/.nvm, never the home directory: " + JSON.stringify(nvm));
+  const downloaded = nodeReadClosure("/Users/alice/Downloads/node-v24/bin/node");
+  assert.ok(downloaded.every(path => path.startsWith("/Users/alice/Downloads/node-v24")),
+    "a home-downloaded node grants only its own extracted tree: " + JSON.stringify(downloaded));
+  const cellar = nodeReadClosure("/opt/homebrew/Cellar/node/24.5.0/bin/node");
+  assert.ok(cellar.some(path => path.endsWith("/Cellar")) && !cellar.includes("/opt"),
+    "a homebrew node's dyld closure stays inside the brew layout: " + JSON.stringify(cellar));
+  assert.ok(nodeReadClosure("/usr/local/bin/node").includes("/usr/local"),
+    "the conventional /usr/local prefix is still granted in full");
+});
+
+test("an aborted signal settles the check as aborted without waiting out its timeout", async t => {
+  const dirs = await scratch(t);
+  const fake = await writeFakeSandboxExec(t, 'shift 2\nexec "$@"');
+  // A bare never-settling top-level await lets node's loop drain and exit 13
+  // (unsettled TLA); a live interval keeps the check genuinely open so the
+  // abort — not an early close — is what settles it.
+  const entry = await writeEntry(dirs.entries, "stalls.mjs", "setInterval(() => {}, 60_000);\nawait new Promise(() => {});\n");
+  const controller = new AbortController();
+  const pending = runSandboxedCheck({
+    sandboxExecPath: fake, runtimeDir: dirs.runtimeDir, cwd: dirs.caseRoot,
+    entryScript: entry, allowReadSubpaths: [dirs.entries], timeoutMs: 20_000, signal: controller.signal
+  });
+  await new Promise(resolve => setTimeout(resolve, 250));
+  controller.abort();
+  const abortedAt = Date.now();
+  assert.deepEqual(await pending, { status: "infrastructure", reason: "aborted" });
+  assert.ok(Date.now() - abortedAt < 2000, "an aborted check settles now, not at its own timeout");
+});
+
+test("the check child receives the fresh allowlist env, never the runner's", async t => {
+  const dirs = await scratch(t);
+  const dump = join(dirs.entries, "env-dump.txt");
+  const fake = await writeFakeSandboxExec(t, `shift 2\nenv > "${dump}"\nexec "$@"`);
+  const poison = {
+    NODE_OPTIONS: process.env.NODE_OPTIONS,
+    NODE_PATH: process.env.NODE_PATH,
+    TURNHELM_TEST_SYNTHETIC_SECRET: process.env.TURNHELM_TEST_SYNTHETIC_SECRET
+  };
+  process.env.NODE_OPTIONS = "--max-old-space-size=999";
+  process.env.NODE_PATH = "/synthetic/node-modules";
+  process.env.TURNHELM_TEST_SYNTHETIC_SECRET = "synthetic-secret";
+  t.after(() => {
+    for (const [key, original] of Object.entries(poison)) {
+      if (original === undefined) delete process.env[key];
+      else process.env[key] = original;
+    }
+  });
+  const outcome = await runSandboxedCheck({
+    sandboxExecPath: fake, runtimeDir: dirs.runtimeDir, cwd: dirs.caseRoot,
+    entryScript: await writeEntry(dirs.entries, "completes.mjs", "export const checked = true;\n"),
+    allowReadSubpaths: [dirs.entries], timeoutMs: 10_000
+  });
+  assert.deepEqual(outcome, { status: "pass" });
+  const dumped = new Map((await readFile(dump, "utf8")).trim().split("\n")
+    .map(line => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)] as const));
+  assert.equal(dumped.get("HOME"), dirs.caseRoot);
+  assert.equal(dumped.get("TMPDIR"), dirs.caseRoot);
+  assert.equal(dumped.get("ZDOTDIR"), join(dirs.caseRoot, ".turnhelm"));
+  assert.equal(dumped.get("LANG"), "C");
+  assert.equal(dumped.get("TZ"), "UTC");
+  assert.equal(dumped.get("PATH"), dirname(process.execPath) + ":/usr/bin:/bin");
+  assert.ok(!dumped.has("NODE_OPTIONS"), "NODE_OPTIONS must not reach the check");
+  assert.ok(!dumped.has("NODE_PATH"), "NODE_PATH must not reach the check");
+  assert.ok(!dumped.has("TURNHELM_TEST_SYNTHETIC_SECRET"), "runner secrets must not reach the check");
+});
+
+test("launcher-managed profile and wrapper artifacts never outlive the check", async t => {
+  const dirs = await scratch(t);
+  const fake = await writeFakeSandboxExec(t, 'shift 2\nexec "$@"');
+  await runSandboxedCheck({
+    sandboxExecPath: fake, runtimeDir: dirs.runtimeDir, cwd: dirs.caseRoot,
+    entryScript: await writeEntry(dirs.entries, "completes.mjs", "export const checked = true;\n"),
+    allowReadSubpaths: [dirs.entries], timeoutMs: 10_000
+  });
+  assert.deepEqual(await readdir(dirs.runtimeDir), [], "profile and wrapper temp files are deleted");
+});
+
+test("real SBPL admits allowed reads and refuses the sentinel outside them",
+  { skip: process.platform !== "darwin" }, async t => {
+    const dirs = await scratch(t);
+    const sentinelDir = await mkdtemp(join(tmpdir(), "turnhelm-check-sentinel-"));
+    t.after(() => rm(sentinelDir, { recursive: true, force: true }));
+    await writeFile(join(dirs.entries, "data.json"), JSON.stringify({ ok: true }), { mode: 0o644 });
+    await writeFile(join(sentinelDir, "sentinel.txt"), "SENTINEL", { mode: 0o644 });
+    // A denied read leaves no honest outcome: the entry crashes without a
+    // marker so the launcher grades infrastructure, never a forged grade.
+    const sentinelEntry = await writeEntry(dirs.entries, "reads-sentinel.mjs",
+      `import { readFileSync } from "node:fs";\n`
+      + `try {\n  readFileSync(${JSON.stringify(join(sentinelDir, "sentinel.txt"))});\n`
+      + `} catch {\n  process.exit(9);\n}\nthrow new Error("sentinel readable");\n`);
+    const allowedEntry = await writeEntry(dirs.entries, "reads-allowed.mjs",
+      `import { readFileSync } from "node:fs";\n`
+      + `if (JSON.parse(readFileSync(${JSON.stringify(join(dirs.entries, "data.json"))}, "utf8")).ok !== true) {\n`
+      + `  throw new Error("unexpected bytes");\n}\n`);
+    assert.deepEqual(await runSandboxedCheck({
+      sandboxExecPath: "/usr/bin/sandbox-exec", runtimeDir: dirs.runtimeDir, cwd: dirs.caseRoot,
+      entryScript: allowedEntry, allowReadSubpaths: [dirs.entries], timeoutMs: 20_000
+    }), { status: "pass" });
+    assert.deepEqual(await runSandboxedCheck({
+      sandboxExecPath: "/usr/bin/sandbox-exec", runtimeDir: dirs.runtimeDir, cwd: dirs.caseRoot,
+      entryScript: sentinelEntry, allowReadSubpaths: [dirs.entries], timeoutMs: 20_000
+    }), { status: "infrastructure", reason: "missing-outcome" });
+  });
+
+// ---------- prepareRound: roster validation and manifest freeze ----------
+
+const sha256hex = (data: string | Buffer): string => createHash("sha256").update(data).digest("hex");
+// assert.rejects with a RegExp tests String(error), prefix "Error:" included;
+// this validator pins the message itself instead.
+const messageStartingWith = (prefix: string) => (error: unknown): boolean => {
+  assert.ok(error instanceof Error && error.message.startsWith(prefix),
+    "expected a message starting with " + JSON.stringify(prefix) + ", saw: " + String(error));
+  return true;
+};
+const REPO_ROOT = join(import.meta.dirname, "..", "..");
+
+// The prepare fakes: a passthrough that emulates sandbox denial for the
+// sentinel preflight (the one check a real sandbox enforces and a fake must
+// act out), and a liar that grades everything failed.
+const PREPARE_PASSTHROUGH = 'shift 2\ncase "$*" in *sentinel*) exit 9;; *) exec "$@";; esac';
+const PREPARE_ALL_FAIL = `shift 2\nprintf '%s\\n' '__TURNHELM_CHECK_OUTCOME__{"pass":false}' >&3`;
+
+type ScratchRoster = {
+  rosterPath: string;
+  evidenceRoot: string;
+  roster: Record<string, unknown>;
+  write: (variant: (roster: Record<string, unknown>) => void) => string;
+};
+
+const scratchRoster = async (t: TestContext): Promise<ScratchRoster> => {
+  const base = await mkdtemp(join(tmpdir(), "turnhelm-round-"));
+  t.after(() => rm(base, { recursive: true, force: true }).catch(() => {}));
+  const evidenceRoot = join(base, "evidence");
+  const rootA = join(base, "case-a");
+  const rootB = join(base, "case-b");
+  await mkdir(evidenceRoot);
+  await mkdir(join(rootA, ".turnhelm"), { recursive: true });
+  await mkdir(rootB);
+  await writeFile(join(rootA, ".turnhelm", "config.json"), "{}\n");
+  const taskText = "Sum the ledger rows and print the JSON result.";
+  const taskFile = join(base, "task-b.txt");
+  await writeFile(taskFile, taskText);
+  const contract = join(base, "contract-b.mjs");
+  await writeFile(contract, "import assert from \"node:assert/strict\";\nassert.equal(1 + 1, 2);\n");
+  const roster = {
+    version: 1,
+    head: execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT }).toString().trim(),
+    evidenceRoot,
+    caps: { classifierRequests: 4, workerExecutions: 4 },
+    cases: [
+      {
+        id: "case-a", kind: "worker-readonly", scope: "readonly sum", task: taskText,
+        transport: "arg", root: rootA, allowedChanges: [], allowedProfiles: ["fast", "balanced"],
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, files: {}
+      },
+      {
+        id: "case-b", kind: "worker-write", scope: "write envelope", task: taskText,
+        transport: "stdin-file", root: rootB, allowedChanges: ["ledger.json"], allowedProfiles: ["deep"],
+        grading: { mode: "envelope-equal", expected: { count: 1, sum: 2 } },
+        files: { contract, taskFile }
+      }
+    ]
+  };
+  const write = (variant: (value: Record<string, unknown>) => void): string => {
+    const copy = structuredClone(roster) as Record<string, unknown>;
+    variant(copy);
+    const path = join(base, "roster-" + randomBytes(4).toString("hex") + ".json");
+    writeFileSync(path, JSON.stringify(copy));
+    return path;
+  };
+  return {
+    rosterPath: write(() => {}),
+    evidenceRoot,
+    roster: roster as Record<string, unknown>,
+    write
+  };
+};
+
+test("a valid roster freezes a manifest with the exact baseline and zero spend", async t => {
+  const scratch = await scratchRoster(t);
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const result = await prepareRound(scratch.rosterPath, { sandboxExecPath: fake });
+  const manifestPath = join(scratch.evidenceRoot, "custom-round-manifest.json");
+  assert.equal(result.manifestPath, manifestPath);
+  const bytes = await readFile(manifestPath);
+  assert.equal(sha256hex(bytes), result.approvalSha256, "the approval hash is the manifest bytes' hash");
+  const manifest = JSON.parse(bytes.toString()) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(manifest).sort(),
+    ["baseline", "caps", "cases", "evidenceRoot", "head", "kind", "runtime", "spend", "version"]);
+  assert.equal(manifest.kind, "custom-round");
+  assert.equal(manifest.version, 1);
+  assert.equal(manifest.head, scratch.roster.head);
+  const baselineFiles = manifest.baseline as { files: { path: string; sha256: string }[] };
+  const baselinePaths = baselineFiles.files.map(file => file.path);
+  assert.ok(baselinePaths.includes("dist/test/custom-round.js") && baselinePaths.includes("dist/test/live-acceptance.js"),
+    "the runner and shared-primitive modules stay in the baseline");
+  assert.ok(baselinePaths.includes("dist/src/cli.js") && baselinePaths.includes("dist/src/task.js"),
+    "the executed code itself is baseline-hashed, not just the harness around it");
+  assert.ok(baselinePaths.every(path => path.startsWith("dist/")), "the baseline covers only built consumed code");
+  for (const file of baselineFiles.files) {
+    assert.equal(file.sha256, sha256hex(await readFile(join(REPO_ROOT, file.path))), file.path + " hashes its live bytes");
+  }
+  assert.deepEqual(manifest.runtime, {
+    node: process.version, execPath: await realpath(process.execPath)
+  });
+  assert.deepEqual(manifest.spend, { classifierRequests: 0, workerExecutions: 0 },
+    "prepare spends nothing: zero classifier requests and zero worker executions");
+  assert.deepEqual(manifest.caps, scratch.roster.caps);
+  const evidence = manifest.evidenceRoot as { canonical: string; dev: number; ino: number };
+  assert.equal(evidence.canonical, await realpath(scratch.evidenceRoot));
+  assert.ok(Number.isInteger(evidence.dev) && evidence.dev > 0);
+  assert.ok(Number.isInteger(evidence.ino) && evidence.ino > 0);
+  const cases = manifest.cases as Record<string, unknown>[];
+  assert.equal(cases.length, 2);
+  for (const item of cases) {
+    assert.deepEqual(Object.keys(item).sort(),
+      ["allowedChanges", "allowedProfiles", "files", "grading", "id", "kind", "root", "scope", "task", "transport", "tree"]);
+    const root = item.root as { canonical: string; dev: number; ino: number };
+    assert.ok(Number.isInteger(root.ino) && root.ino > 0, "the case root is pinned by dev/ino identity");
+  }
+  assert.deepEqual(cases[0].tree,
+    { ".turnhelm/config.json": sha256hex(await readFile(join((scratch.roster.cases as { root: string }[])[0].root, ".turnhelm", "config.json"))) },
+    "the consumer tree is snapshotted file-by-file into the manifest");
+  assert.deepEqual(cases[1].tree, {}, "an empty consumer root freezes an empty tree");
+  assert.deepEqual((cases[1].files as { role: string; sha256: string }[]).map(f => f.role).sort(),
+    ["contract", "taskFile"]);
+  const contract = (scratch.roster.cases as Record<string, unknown>[])[1];
+  const files = contract.files as { contract: string; taskFile: string };
+  const manifestFiles = cases[1].files as { role: string; path: string; sha256: string }[];
+  for (const role of ["contract", "taskFile"] as const) {
+    const entry = manifestFiles.find(f => f.role === role);
+    assert.equal(entry?.sha256, sha256hex(await readFile(files[role])), role + " bytes are hashed into the manifest");
+  }
+  const approval = await readFile(join(scratch.evidenceRoot, "custom-round-approval.txt"), "utf8");
+  assert.ok(approval.includes(result.approvalSha256), "the approval request carries the hash a human approves");
+  assert.ok(approval.includes(manifestPath));
+});
+
+test("an invalid roster is refused with no manifest written", async t => {
+  const scratch = await scratchRoster(t);
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const variants: readonly [string, (roster: Record<string, unknown>) => void][] = [
+    ["unknown top-level key", roster => { (roster as Record<string, unknown>).extra = 1; }],
+    ["oversize task", roster => {
+      (roster as { cases: { task: string }[] }).cases[0].task = "x".repeat(9000);
+    }],
+    ["blank task", roster => {
+      (roster as { cases: { task: string }[] }).cases[0].task = "   ";
+    }],
+    ["missing consumer root", roster => {
+      (roster as { cases: { root: string }[] }).cases[0].root = join(scratch.evidenceRoot, "absent");
+    }]
+  ];
+  for (const [what, mutate] of variants) {
+    const path = scratch.write(mutate);
+    await assert.rejects(prepareRound(path, { sandboxExecPath: fake }), messageStartingWith("roster: "), what);
+  }
+  assert.deepEqual(await readdir(scratch.evidenceRoot), [], "no refusal path leaves manifest artifacts");
+});
+
+test("a preflight whose reference machinery misgrades is refused, not silently frozen", async t => {
+  const scratch = await scratchRoster(t);
+  const fake = await writeFakeSandboxExec(t, PREPARE_ALL_FAIL);
+  await assert.rejects(prepareRound(scratch.rosterPath, { sandboxExecPath: fake }),
+    messageStartingWith("preflight: reference"), "a sandbox that grades the known-good fixture failed is broken");
+  assert.deepEqual(await readdir(scratch.evidenceRoot), []);
+});
+
+test("a preflight infrastructure failure is not a roster validation error", async t => {
+  const scratch = await scratchRoster(t);
+  await assert.rejects(
+    prepareRound(scratch.rosterPath, { sandboxExecPath: join(scratch.evidenceRoot, "absent-sandbox-exec") }),
+    (error: Error) => {
+      assert.match(error.message, /^preflight: infrastructure/);
+      assert.doesNotMatch(error.message, /^roster: /);
+      return true;
+    }
+  );
+});
+
+test("a moved HEAD or an unreadable consumed file is a baseline refusal", async t => {
+  const scratch = await scratchRoster(t);
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const movedHead = scratch.write(roster => { roster.head = "a".repeat(40); });
+  await assert.rejects(prepareRound(movedHead, { sandboxExecPath: fake }), messageStartingWith("baseline: "), "HEAD moved past the roster");
+  await assert.rejects(
+    prepareRound(scratch.rosterPath, {
+      sandboxExecPath: fake,
+      baselineFiles: ["dist/test/live-acceptance.js", "dist/test/absent-consumed.js"]
+    }),
+    messageStartingWith("baseline: "), "a consumed baseline file is unreadable"
+  );
+  assert.deepEqual(await readdir(scratch.evidenceRoot), []);
+});
+
+test("a baseline override that hashes nothing is refused", async t => {
+  const scratch = await scratchRoster(t);
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  await assert.rejects(
+    prepareRound(scratch.rosterPath, { sandboxExecPath: fake, baselineFiles: [] }),
+    messageStartingWith("baseline: "), "an empty baseline silently approves any later code state"
+  );
+  assert.deepEqual(await readdir(scratch.evidenceRoot), []);
+});
+
+test("a roster contract that cannot load is refused at prepare, not frozen", async t => {
+  const scratch = await scratchRoster(t);
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  await writeFile(join((scratch.roster.cases as { files: { contract: string } }[])[1].files.contract), "const (\n");
+  await assert.rejects(prepareRound(scratch.rosterPath, { sandboxExecPath: fake }),
+    messageStartingWith("preflight: contract "),
+    "a manifest must never approve a contract the machinery cannot even load");
+  assert.deepEqual(await readdir(scratch.evidenceRoot), [], "the refusal leaves no manifest artifacts");
+});
+
+// ---------- executeRound: gated execute (spec §3.2(1), §3.4, §3.5) ----------
+
+// The hermetic execute fakes: one local classifier fixture answering a fixed
+// balanced choice, one fake codex that records its own env, counts its real
+// executions (the preflight --version probe exits before the counter), and
+// prints each line of the case root's codex-output.txt as an agent message,
+// and one fake git that dumps the CLI child's own environment — the direct
+// observation of the runner's scrubbed constructor — before answering the
+// work-tree probe.
+// The fake worker's exit path varies per scenario: the default prints the case
+// root's codex-output.txt lines and completes, a failureMessage emits one
+// turn.failed frame and exits 9 (the CLI classifies and receipts it), and a
+// stallMs holds the turn open so a signal test can land mid-case.
+const fakeCodexBody = (options: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string }> = {}): string => `
+const argv = process.argv.slice(2);
+if (argv[0] === "--version") { process.stdout.write("codex-cli 0.160.2\\n"); process.exit(0); }
+if (argv[0] === "exec" && argv[1] === "--help") { process.stdout.write("--json\\n--ephemeral\\n--sandbox <MODE>\\n-\\n"); process.exit(0); }
+const fs = require("node:fs");
+const path = require("node:path");
+fs.writeFileSync(path.join(__dirname, "worker-env.json"), JSON.stringify({
+  PATH: process.env.PATH,
+  CODEX_HOME: process.env.CODEX_HOME,
+  LAYA_API_KEY: Object.hasOwn(process.env, "LAYA_API_KEY"),
+  TYPESAFE_API_KEY: Object.hasOwn(process.env, "TYPESAFE_API_KEY"),
+  OPENAI_API_KEY: Object.hasOwn(process.env, "OPENAI_API_KEY"),
+  TURNHELM_ALLOW_HOSTED_JEV: Object.hasOwn(process.env, "TURNHELM_ALLOW_HOSTED_JEV"),
+  TURNHELM_CONFIG: Object.hasOwn(process.env, "TURNHELM_CONFIG"),
+  BASH_ENV: Object.hasOwn(process.env, "BASH_ENV"),
+  ENV: Object.hasOwn(process.env, "ENV")
+}));
+let task = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => { task += chunk; });
+process.stdin.on("end", () => {
+  fs.appendFileSync(path.join(__dirname, "invocations"), "1");
+  fs.writeFileSync(path.join(process.cwd(), "worker-task.txt"), task);
+` + (options.extraWrite !== undefined
+    ? `  fs.writeFileSync(path.join(process.cwd(), ${JSON.stringify(options.extraWrite)}), "unauthorized outside allowedChanges\\n");\n`
+    : "") + `  const finish = () => {
+` + (options.failureMessage !== undefined
+    ? `    process.stdout.write(JSON.stringify({ type: "turn.failed", message: ${JSON.stringify(options.failureMessage)} }) + "\\n");\n    process.exit(9);`
+    : `    const lines = fs.readFileSync(path.join(process.cwd(), "codex-output.txt"), "utf8").split("\\n").filter(Boolean);\n    for (const line of lines) {\n      process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: line } }) + "\\n");\n    }\n    process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1 } }) + "\\n");\n    process.exit(0);`)
+  + `
+  };
+` + (options.stallMs !== undefined ? `  setTimeout(finish, ${options.stallMs});` : "  finish();") + `
+});
+`;
+
+const caseConfig = (port: number): string => JSON.stringify({
+  version: 1,
+  routingTimeoutMs: 4000,
+  backends: { laya: { enabled: true, url: `http://127.0.0.1:${port}` }, jev: { enabled: false } },
+  profiles: {
+    fast: { model: "gpt-6-luna", effort: "low" },
+    balanced: { model: "gpt-6.1-sol", effort: "medium" },
+    deep: { model: "gpt-6.1-sol", effort: "high" },
+    frontier: { model: "gpt-6-astra", effort: "high" },
+    frontier_xhigh: { model: "gpt-6-astra", effort: "xhigh" },
+    frontier_max: { model: "gpt-6-astra", effort: "max" }
+  }
+}, null, 2) + "\n";
+
+type ExecuteCaseSpec = {
+  id: string;
+  kind: "worker-readonly" | "worker-write";
+  transport: "arg" | "stdin-file";
+  grading: Record<string, unknown>;
+  outputLines: readonly string[];
+  contractSource?: string;
+  allowedChanges?: readonly string[];
+};
+
+const scratchExecuteRound = async (
+  t: TestContext,
+  specs: readonly ExecuteCaseSpec[],
+  envExtra: Record<string, string> = {},
+  options?: Readonly<{
+    caps?: { classifierRequests: number; workerExecutions: number };
+    choice?: string;
+    codex?: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string }>;
+    poisonJournal?: boolean;
+    baselineFiles?: readonly string[];
+  }>
+): Promise<{
+  base: string;
+  evidenceRoot: string;
+  manifestPath: string;
+  approvalSha256: string;
+  roots: string[];
+  taskFile: string;
+  invocations: string;
+  gitEnv: string;
+  workerEnv: string;
+  env: NodeJS.ProcessEnv;
+  classifierRequests: () => number;
+}> => {
+  const base = await mkdtemp(join(tmpdir(), "turnhelm-exec-"));
+  t.after(() => rm(base, { recursive: true, force: true }).catch(() => {}));
+  const evidenceRoot = join(base, "evidence");
+  await mkdir(evidenceRoot);
+  let classifierRequests = 0;
+  const server = createServer((request, response) => {
+    classifierRequests += 1;
+    request.resume();
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ answers: { route: { type: "choice", choice: options?.choice ?? "balanced" } } }));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close(error => (error ? reject(error) : resolve())));
+  });
+  const port = (server.address() as AddressInfo).port;
+  const bin = join(base, "bin");
+  await mkdir(bin);
+  const invocations = join(bin, "invocations");
+  const gitEnv = join(base, "git-env.txt");
+  const workerEnv = join(bin, "worker-env.json");
+  await executableFixture(join(bin, "codex"), fakeCodexBody(options?.codex), "node");
+  await executableFixture(join(bin, "git"),
+    `/usr/bin/env > '${gitEnv}'\nif [ "$1" = "-C" ]; then echo true; exit 0; fi\nexit 64\n`, "shell");
+  const taskText = "Sum the ledger rows and print the JSON result.";
+  const taskFile = join(base, "task.txt");
+  await writeFile(taskFile, taskText);
+  const roots: string[] = [];
+  const cases = [];
+  for (const spec of specs) {
+    const root = join(base, spec.id);
+    roots.push(root);
+    await mkdir(join(root, ".turnhelm"), { recursive: true });
+    await writeFile(join(root, ".turnhelm", "config.json"), caseConfig(port));
+    await writeFile(join(root, "codex-output.txt"), spec.outputLines.join("\n") + "\n");
+    if (options?.poisonJournal === true) {
+      // A forged journal line carrying the real task hash, with an object
+      // backend and an unknown profile: whatever reads it must whitelist.
+      await writeFile(join(root, ".turnhelm", "routes.jsonl"),
+        JSON.stringify({ taskSha256: sha256hex(taskText), backend: { evil: 1 }, profileId: "not-a-profile" }) + "\n");
+    }
+    const contract = join(base, spec.id + "-contract.mjs");
+    await writeFile(contract,
+      spec.contractSource ?? "import assert from \"node:assert/strict\";\nassert.equal(1 + 1, 2);\n");
+    cases.push({
+      id: spec.id, kind: spec.kind, scope: spec.id + " scope", task: taskText,
+      transport: spec.transport, root,
+      allowedChanges: spec.allowedChanges ?? [...(spec.kind === "worker-write" ? ["ledger.json"] : []), "worker-task.txt"],
+      allowedProfiles: ["fast", "balanced"],
+      grading: spec.grading,
+      files: spec.kind === "worker-write"
+        ? (spec.transport === "stdin-file" ? { contract, taskFile } : { contract })
+        : (spec.transport === "stdin-file" ? { taskFile } : {})
+    });
+  }
+  const rosterPath = join(base, "roster.json");
+  writeFileSync(rosterPath, JSON.stringify({
+    version: 1,
+    head: execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT }).toString().trim(),
+    evidenceRoot,
+    caps: options?.caps ?? { classifierRequests: 8, workerExecutions: 8 },
+    cases
+  }));
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const prepared = await prepareRound(rosterPath,
+    { sandboxExecPath: fake, ...(options?.baselineFiles !== undefined ? { baselineFiles: options.baselineFiles } : {}) });
+  const env: NodeJS.ProcessEnv = {
+    PATH: bin,
+    CODEX_HOME: join(base, "codex-home"),
+    LAYA_API_KEY: "TEST_LAYA_SENTINEL",
+    ...envExtra
+  };
+  return {
+    base, evidenceRoot, manifestPath: prepared.manifestPath, approvalSha256: prepared.approvalSha256,
+    roots, taskFile, invocations, gitEnv, workerEnv, env, classifierRequests: () => classifierRequests
+  };
+};
+
+const readLedger = async (path: string): Promise<Record<string, unknown>[]> =>
+  (await readFile(path, "utf8")).trim().split("\n").filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>);
+
+const envLines = async (path: string): Promise<Map<string, string>> => new Map(
+  (await readFile(path, "utf8")).trim().split("\n")
+    .map(line => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)] as const));
+
+test("execute runs both transports, grades both cases, and exits zero with an evidence ledger",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      },
+      {
+        id: "case-b", kind: "worker-write", transport: "stdin-file",
+        grading: { mode: "envelope-equal", expected: { count: 1, sum: 2 } },
+        outputLines: ['{"count":1,"sum":2}', "trailer: inert footer"]
+      }
+    ]);
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 0, "an all-pass round exits zero");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    assert.deepEqual(ledger.filter(r => r.phase === "case").map(r => [r.caseId, r.outcome]).sort(),
+      [["case-a", "pass"], ["case-b", "pass"]], "both cases are graded pass in the ledger");
+    const caseRecords = ledger.filter(r => r.phase === "case");
+    assert.ok(caseRecords.every(r => typeof r.oracleInput === "string" && r.oracleInput.length > 0),
+      "each case record retains the bounded oracle input it was graded on");
+    assert.deepEqual(caseRecords.map(r => [r.backend, r.profileId]).sort(),
+      [["laya", "balanced"], ["laya", "balanced"]], "journal values surface only through the whitelist");
+    assert.ok(!ledger.some(r => r.phase === "stopped"), "no stop record on the happy path");
+    assert.equal(await readFile(round.invocations, "utf8"), "11", "exactly one worker execution per case");
+    for (const root of round.roots) {
+      await readFile(join(root, ".turnhelm", "routes.jsonl"), "utf8");
+      assert.equal(await readFile(join(root, "worker-task.txt"), "utf8"),
+        "Sum the ledger rows and print the JSON result.", "the task text reaches the worker via " + root);
+    }
+  });
+
+test("a same-path replaced root is refused at the identity gate before any launch",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ]);
+    // Allocate the replacement's inode before freeing the original: ext4
+    // recycles a just-freed directory inode, so rm+mkdir can reproduce the
+    // same dev/ino and the identity gate correctly sees no replacement.
+    const replacement = join(round.base, "replacement-root");
+    await mkdir(replacement);
+    await rm(round.roots[0], { recursive: true, force: true });
+    await rename(replacement, round.roots[0]);
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 1, "a replaced root is a structural refusal");
+    await assert.rejects(readFile(round.invocations), { code: "ENOENT" }, "zero worker invocations");
+    await assert.rejects(readFile(join(round.roots[0], ".turnhelm", "routes.jsonl")), { code: "ENOENT" },
+      "zero journals written");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    assert.deepEqual(ledger.at(-1), { phase: "stopped", caseId: "case-a", reason: "root-identity" });
+  });
+
+test("a copied manifest outside the evidence root is refused without a claim",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ]);
+    const elsewhere = join(round.base, "elsewhere");
+    await mkdir(elsewhere);
+    const copyPath = join(elsewhere, "custom-round-manifest.json");
+    await copyFile(round.manifestPath, copyPath);
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(copyPath, round.approvalSha256, { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 1, "a relocated manifest never reaches the claim");
+    assert.deepEqual(await readdir(elsewhere), ["custom-round-manifest.json"], "no ledger is created next to the copy");
+    await assert.rejects(readFile(join(round.evidenceRoot, "custom-round-evidence.jsonl")), { code: "ENOENT" },
+      "the canonical evidence root is never claimed by a relocated copy");
+    await assert.rejects(readFile(round.invocations), { code: "ENOENT" });
+  });
+
+test("a second execute of a claimed manifest cannot claim again",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ]);
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    assert.equal(await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake }), 0);
+    assert.equal(await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake }), 1, "the exclusive-create ledger refuses the replay");
+    assert.equal(await readFile(round.invocations, "utf8"), "1", "the replay launches nothing");
+  });
+
+test("a task file mutated after prepare is a hash refusal before any launch",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "stdin-file",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ]);
+    await writeFile(round.taskFile, "Mutated task text that was never approved.");
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 1, "a mutated transport file is a structural refusal");
+    await assert.rejects(readFile(round.invocations), { code: "ENOENT" }, "zero worker invocations");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    assert.deepEqual(ledger.at(-1), { phase: "stopped", caseId: "case-a", reason: "case-files" });
+  });
+
+test("a same-path replaced root with identical bytes is still refused, with zero spend", { timeout: 90_000 }, async t => {
+  const round = await scratchExecuteRound(t, [
+    {
+      id: "case-a", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+    }
+  ]);
+  const root = round.roots[0];
+  const snapshot: [string, Buffer][] = [];
+  const walk = async (relative: string): Promise<void> => {
+    for (const entry of await readdir(join(root, relative), { withFileTypes: true })) {
+      const child = relative === "" ? entry.name : relative + "/" + entry.name;
+      if (entry.isDirectory()) await walk(child);
+      else snapshot.push([child, await readFile(join(root, child))]);
+    }
+  };
+  await walk("");
+  // The replacement inode must be allocated while the original still exists
+  // (ext4 recycles a just-freed directory inode into an immediate mkdir,
+  // which would defeat the dev/ino identity check): restore its bytes into a
+  // sibling first, then swap it in with one rename.
+  const replacement = join(dirname(root), "replacement-root");
+  await mkdir(replacement);
+  for (const [relative, bytes] of snapshot) {
+    await mkdir(dirname(join(replacement, relative)), { recursive: true });
+    await writeFile(join(replacement, relative), bytes);
+  }
+  await rm(root, { recursive: true, force: true });
+  await rename(replacement, root);
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const code = await executeRound(round.manifestPath, round.approvalSha256,
+    { env: round.env, sandboxExecPath: fake });
+  assert.equal(code, 1, "identical bytes in a new inode are still a structural refusal");
+  await assert.rejects(readFile(round.invocations), { code: "ENOENT" }, "zero worker invocations");
+  assert.equal(round.classifierRequests(), 0, "the identity gate fires before any classifier spend");
+  const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+  assert.deepEqual(ledger.at(-1), { phase: "stopped", caseId: "case-a", reason: "root-identity" });
+});
+
+// Baseline-drift fixtures pin the approved baseline to a scratch file in a
+// private temp dir: mutating a real dist file would race every parallel test
+// file whose sealed rounds hash dist.
+test("a baseline file mutated after prepare is a baseline refusal before any launch", { timeout: 90_000 }, async t => {
+  const consumed = await mkdtemp(join(tmpdir(), "turnhelm-consumed-"));
+  t.after(() => rm(consumed, { recursive: true, force: true }).catch(() => {}));
+  const target = join(consumed, "consumed-code.js");
+  await writeFile(target, "original consumed bytes\n");
+  const round = await scratchExecuteRound(t, [
+    {
+      id: "case-a", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+    }
+  ], {}, { baselineFiles: [relative(REPO_ROOT, target)] });
+  await writeFile(target, "mutated consumed bytes\n");
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const code = await executeRound(round.manifestPath, round.approvalSha256,
+    { env: round.env, sandboxExecPath: fake });
+  assert.equal(code, 1, "mutated consumed code never reaches the claim");
+  await assert.rejects(readFile(round.invocations), { code: "ENOENT" }, "zero worker invocations");
+  assert.equal(round.classifierRequests(), 0, "zero classifier spend");
+});
+
+test("a baseline file mutated between cases stops the round at the next reservation",
+  { timeout: 90_000 }, async t => {
+    const consumed = await mkdtemp(join(tmpdir(), "turnhelm-consumed-"));
+    t.after(() => rm(consumed, { recursive: true, force: true }).catch(() => {}));
+    const target = join(consumed, "consumed-code.js");
+    await writeFile(target, "original consumed bytes\n");
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      },
+      {
+        id: "case-b", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ], {}, { codex: { stallMs: 1500 }, baselineFiles: [relative(REPO_ROOT, target)] });
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const pending = executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    // Mutate while case-a's stalled worker holds the round open: case-a may
+    // finish, but case-b's reservation must re-verify the consumed baseline.
+    await waitForFile(round.invocations);
+    await writeFile(target, "mutated consumed bytes\n");
+    assert.equal(await pending, 1, "baseline drift mid-round stops all remaining spend");
+    assert.equal(await readFile(round.invocations, "utf8"), "1", "the second case never launches");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    assert.deepEqual(ledger.at(-1), { phase: "stopped", caseId: "case-b", reason: "baseline" });
+  });
+
+test("a footer output fails strict-whole-json while envelope-equal tolerates it",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-whole-json", expected: { count: 1, sum: 2 } },
+        outputLines: ['{"count":1,"sum":2}', "trailer: inert footer"]
+      }
+    ]);
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 4, "a completed round with one failed case exits four");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    assert.equal(ledger.find(r => r.phase === "case")?.outcome, "failed",
+      "the strict-only contract rejects the envelope shape");
+    assert.equal(await readFile(round.invocations, "utf8"), "1", "the case did run; grading is the failure");
+  });
+
+test("the CLI child env is scrubbed before it reaches the CLI and again the worker",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ], {
+      TYPESAFE_API_KEY: "TEST_JEV_SENTINEL",
+      OPENAI_API_KEY: "TEST_OPENAI_SENTINEL",
+      TURNHELM_ALLOW_HOSTED_JEV: "1",
+      TURNHELM_CONFIG: "/synthetic/turnhelm.json",
+      BASH_ENV: "/tmp/host-bashenv",
+      ENV: "/tmp/host-shenv"
+    });
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 0);
+    const cli = await envLines(round.gitEnv);
+    for (const key of ["LAYA_API_KEY", "TYPESAFE_API_KEY", "OPENAI_API_KEY", "TURNHELM_ALLOW_HOSTED_JEV",
+      "TURNHELM_CONFIG", "BASH_ENV", "ENV"]) {
+      assert.ok(!cli.has(key), "the CLI child env must not carry " + key);
+    }
+    assert.equal(cli.get("PATH"), round.env.PATH, "the scrubbed env is the runner's env minus the denylist, not a fresh allowlist");
+    const worker = JSON.parse(await readFile(round.workerEnv, "utf8")) as Record<string, unknown>;
+    for (const key of ["LAYA_API_KEY", "TYPESAFE_API_KEY", "OPENAI_API_KEY", "TURNHELM_ALLOW_HOSTED_JEV",
+      "TURNHELM_CONFIG", "BASH_ENV", "ENV"]) {
+      assert.equal(worker[key], false, "the worker env must not carry " + key);
+    }
+    assert.equal(worker.PATH, round.env.PATH);
+  });
+
+// ---------- command entry modes (spec §3.1): prepare and execute ----------
+
+const runEntry = (args: readonly string[]): { code: number; stdout: string; stderr: string } => {
+  try {
+    const stdout = execFileSync(process.execPath,
+      [join(REPO_ROOT, "dist", "test", "custom-round.js"), ...args], { encoding: "utf8" });
+    return { code: 0, stdout, stderr: "" };
+  } catch (error) {
+    const failure = error as { status?: number; stdout?: string; stderr?: string };
+    return { code: failure.status ?? -1, stdout: failure.stdout ?? "", stderr: failure.stderr ?? "" };
+  }
+};
+
+test("the command entry prints usage and exits 1 with no subcommand", async () => {
+  const result = runEntry([]);
+  assert.equal(result.code, 1, "an argument-less invocation is a usage error, not a silent success");
+  assert.ok(result.stderr.includes("usage:"), "the usage line names both entry modes");
+  assert.equal(result.stdout, "");
+});
+
+test("prepare mode refuses an unreadable roster with the reason on stderr", async () => {
+  const result = runEntry(["prepare", join(tmpdir(), "turnhelm-absent-roster.json")]);
+  assert.equal(result.code, 1, "a refused prepare exits 1");
+  assert.ok(result.stderr.includes("prepare refused:"), "the refusal carries the validation error");
+});
+
+test("execute mode exits with the round code for a mismatched approval hash", async t => {
+  const round = await scratchExecuteRound(t, [
+    {
+      id: "case-a", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+    }
+  ]);
+  const result = runEntry(["execute", round.manifestPath, "0".repeat(64)]);
+  assert.equal(result.code, 1, "a wrong sha256 is the structural refusal, surfaced through the entry mode");
+});
+
+test("prepare mode prints the manifest path and approval hash", { skip: process.platform !== "darwin" }, async t => {
+  const scratch = await scratchRoster(t);
+  const result = runEntry(["prepare", scratch.rosterPath]);
+  assert.equal(result.code, 0);
+  assert.ok(result.stdout.includes("manifest: " + join(scratch.evidenceRoot, "custom-round-manifest.json")),
+    "stdout names the frozen manifest");
+  assert.ok(/sha256: [0-9a-f]{64}/.test(result.stdout), "stdout carries the approval hash");
+});
+
+test("a worker writing outside its allowedChanges stops the round", { timeout: 90_000 }, async t => {
+  const round = await scratchExecuteRound(t, [
+    {
+      id: "case-a", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+    },
+    {
+      id: "case-b", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+    }
+  ], {}, { codex: { extraWrite: "evil.txt" } });
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const code = await executeRound(round.manifestPath, round.approvalSha256,
+    { env: round.env, sandboxExecPath: fake });
+  assert.equal(code, 1, "an undeclared tree change is an integrity stop, even when the case's output graded fine");
+  assert.equal(await readFile(round.invocations, "utf8"), "1", "the second case never launches");
+  const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+  assert.deepEqual(ledger.at(-1), { phase: "stopped", caseId: "case-a", reason: "tree-drift" });
+});
+
+test("a CLI run that receipts nothing is an integrity stop", { timeout: 90_000 }, async t => {
+  const round = await scratchExecuteRound(t, [
+    {
+      id: "case-a", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+    }
+  ]);
+  // A PATH without the fake git: the CLI's own preflight fails before
+  // classification, so the run emits no receipt at all.
+  const gitlessBin = join(round.base, "bin-nogit");
+  await mkdir(gitlessBin);
+  await copyFile(join(round.base, "bin", "codex"), join(gitlessBin, "codex"));
+  await chmod(join(gitlessBin, "codex"), 0o755);
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const code = await executeRound(round.manifestPath, round.approvalSha256,
+    { env: { ...round.env, PATH: gitlessBin }, sandboxExecPath: fake });
+  assert.equal(code, 1, "a case without exactly one receipt never grades on stdout alone");
+  await assert.rejects(readFile(round.invocations), { code: "ENOENT" }, "the worker never runs");
+  assert.equal(round.classifierRequests(), 0, "the failure precedes classification");
+  const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+  assert.deepEqual(ledger.at(-1), { phase: "stopped", caseId: "case-a", reason: "receipt" });
+});
+
+test("a selection outside the case's allowed profiles fails the case", { timeout: 90_000 }, async t => {
+  const round = await scratchExecuteRound(t, [
+    {
+      id: "case-a", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+    }
+  ], {}, { choice: "frontier" });
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const code = await executeRound(round.manifestPath, round.approvalSha256,
+    { env: round.env, sandboxExecPath: fake });
+  assert.equal(code, 4, "an out-of-profile selection is an engineering failure of the case, not a stop");
+  const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+  const record = ledger.find(r => r.phase === "case");
+  assert.equal(record?.outcome, "failed");
+  assert.equal(record?.profileId, "frontier", "the selection is recorded even as it fails the case");
+});
+
+test("a reserved-record append failure stops before the next spend", { timeout: 90_000 }, async t => {
+  const round = await scratchExecuteRound(t, [
+    {
+      id: "case-a", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+    },
+    {
+      id: "case-b", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+    }
+  ], {}, { codex: { stallMs: 1500 } });
+  const ledgerPath = join(round.evidenceRoot, "custom-round-evidence.jsonl");
+  t.after(async () => { await chmod(ledgerPath, 0o600).catch(() => {}); });
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const pending = executeRound(round.manifestPath, round.approvalSha256,
+    { env: round.env, sandboxExecPath: fake });
+  // Wait until case-a's worker is mid-run (its 1.5s stall guarantees the
+  // window), then kill the ledger: case-a's own appends may still land, but
+  // case-b's reserved record must not.
+  await waitForFile(round.invocations);
+  await chmod(ledgerPath, 0o000);
+  assert.equal(await pending, 1, "a reserved record that cannot be written stops all remaining spend");
+  assert.equal(await readFile(round.invocations, "utf8"), "1", "only the already-running case executed");
+});
+
+test("journal values outside the whitelist degrade to null", { timeout: 90_000 }, async t => {
+  const round = await scratchExecuteRound(t, [
+    {
+      id: "case-a", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+    }
+  ], {}, { poisonJournal: true });
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const code = await executeRound(round.manifestPath, round.approvalSha256,
+    { env: round.env, sandboxExecPath: fake });
+  assert.equal(code, 0, "a poisoned journal line never fails the case by itself");
+  const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+  const record = ledger.find(r => r.phase === "case");
+  assert.equal(record?.backend, null, "an object backend never reaches the ledger");
+  assert.equal(record?.profileId, null, "an unknown profile id never reaches the ledger");
+});
+
+test("refused executions leave no abort listeners behind", { timeout: 90_000 }, async t => {
+  const round = await scratchExecuteRound(t, [
+    {
+      id: "case-a", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+    }
+  ]);
+  const elsewhere = join(round.base, "elsewhere");
+  await mkdir(elsewhere);
+  const copyPath = join(elsewhere, "custom-round-manifest.json");
+  await copyFile(round.manifestPath, copyPath);
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const external = new AbortController();
+  for (let index = 0; index < 3; index += 1) {
+    assert.equal(await executeRound(copyPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake, signal: external.signal }), 1);
+  }
+  assert.equal(getEventListeners(external.signal, "abort").length, 0,
+    "each refused execution removes the abort relay it registered");
+});
+
+
+const waitForFile = async (path: string): Promise<void> => {
+  for (const deadline = Date.now() + 20_000; Date.now() < deadline;) {
+    if (await stat(path).then(() => true, () => false)) return;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.fail("timed out waiting for " + path);
+};
+
+test("an ordinary contract failure fails its case and the roster continues",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-write", transport: "stdin-file",
+        grading: { mode: "envelope-equal", expected: { count: 1, sum: 2 } },
+        outputLines: ['{"count":1,"sum":2}'],
+        contractSource: "throw new Error(\"contract violated\");\n"
+      },
+      {
+        id: "case-b", kind: "worker-write", transport: "stdin-file",
+        grading: { mode: "envelope-equal", expected: { count: 1, sum: 2 } },
+        outputLines: ['{"count":1,"sum":2}']
+      }
+    ]);
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 4, "a complete round with one failed case exits four");
+    assert.equal(await readFile(round.invocations, "utf8"), "11",
+      "an ordinary assertion failure never stops the roster");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    assert.deepEqual(ledger.filter(r => r.phase === "case").map(r => [r.caseId, r.outcome]),
+      [["case-a", "failed"], ["case-b", "pass"]]);
+    assert.ok(!ledger.some(r => r.phase === "stopped"));
+  });
+
+test("a contract-check infrastructure failure stops the round before the next spend",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-write", transport: "stdin-file",
+        grading: { mode: "envelope-equal", expected: { count: 1, sum: 2 } },
+        outputLines: ['{"count":1,"sum":2}']
+      },
+      {
+        id: "case-b", kind: "worker-write", transport: "stdin-file",
+        grading: { mode: "envelope-equal", expected: { count: 1, sum: 2 } },
+        outputLines: ['{"count":1,"sum":2}']
+      }
+    ]);
+    const broken = await writeFakeSandboxExec(t, "shift 2\nexit 9");
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: broken });
+    assert.equal(code, 1, "an infrastructure failure is an integrity stop");
+    assert.equal(await readFile(round.invocations, "utf8"), "1",
+      "case one ran; case two never launches");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    assert.deepEqual(ledger.at(-1),
+      { phase: "stopped", caseId: "case-a", reason: "contract-missing-outcome" });
+  });
+
+test("an auth-class worker failure stops the round",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } },
+        outputLines: ['{"count":3,"sum":6}']
+      },
+      {
+        id: "case-b", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } },
+        outputLines: ['{"count":3,"sum":6}']
+      }
+    ], {}, { codex: { failureMessage: "invalid api key rejected" } });
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 1, "auth-class failures stop all remaining spend");
+    assert.equal(await readFile(round.invocations, "utf8"), "1", "the second case never launches");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    assert.deepEqual(ledger.at(-1), { phase: "stopped", caseId: "case-a", reason: "worker-auth" });
+  });
+
+test("a roster exceeding its declared caps is refused before any spend",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } },
+        outputLines: ['{"count":3,"sum":6}']
+      },
+      {
+        id: "case-b", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } },
+        outputLines: ['{"count":3,"sum":6}']
+      }
+    ], {}, { caps: { classifierRequests: 1, workerExecutions: 1 } });
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 1, "planned spend above the frozen caps is refused");
+    await assert.rejects(readFile(round.invocations), { code: "ENOENT" }, "zero worker invocations");
+    await assert.rejects(readFile(join(round.evidenceRoot, "custom-round-evidence.jsonl")), { code: "ENOENT" },
+      "a refused roster never claims the ledger");
+  });
+
+test("SIGINT during a case closes gracefully with exit 130", { timeout: 90_000 }, async t => {
+  const round = await scratchExecuteRound(t, [
+    {
+      id: "case-a", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } },
+      outputLines: ['{"count":3,"sum":6}']
+    }
+  ], {}, { codex: { stallMs: 30_000 } });
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const pending = executeRound(round.manifestPath, round.approvalSha256,
+    { env: round.env, sandboxExecPath: fake });
+  await waitForFile(round.invocations);
+  process.kill(process.pid, "SIGINT");
+  assert.equal(await pending, 130, "SIGINT maps to the graceful-stop exit code");
+  const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+  assert.equal(ledger.at(-1)?.phase, "stopped", "the signal stop is recorded");
+});
+
+test("SIGTERM during a case exits 143", { timeout: 90_000 }, async t => {
+  const round = await scratchExecuteRound(t, [
+    {
+      id: "case-a", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } },
+      outputLines: ['{"count":3,"sum":6}']
+    }
+  ], {}, { codex: { stallMs: 30_000 } });
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const pending = executeRound(round.manifestPath, round.approvalSha256,
+    { env: round.env, sandboxExecPath: fake });
+  await waitForFile(round.invocations);
+  process.kill(process.pid, "SIGTERM");
+  assert.equal(await pending, 143, "SIGTERM maps to the immediate-stop exit code");
+  const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+  assert.equal(ledger.at(-1)?.phase, "stopped", "the signal stop is recorded");
+});
+
+test("SIGTERM during the contract check exits 143 without waiting out the contract timeout",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-write", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}'],
+        // Settles instantly on the pristine root (the prepare preflight must
+        // approve it) but stalls once the worker has run, so the signal lands
+        // mid-contract at execute time.
+        contractSource: "import { existsSync, writeFileSync } from \"node:fs\";\n"
+          + "if (existsSync(\"worker-task.txt\")) {\n"
+          + "  writeFileSync(\"contract-started\", \"1\");\n"
+          + "  setInterval(() => {}, 60_000);\n"
+          + "  await new Promise(() => {});\n"
+          + "}\n",
+        allowedChanges: ["ledger.json", "worker-task.txt", "contract-started"]
+      }
+    ]);
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const pending = executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    await waitForFile(join(round.roots[0], "contract-started"));
+    const signalledAt = Date.now();
+    process.kill(process.pid, "SIGTERM");
+    assert.equal(await pending, 143, "the contract check honours the round's abort, not its own 20s timeout");
+    assert.ok(Date.now() - signalledAt < 15_000, "settled by the signal, not the contract timeout");
+  });

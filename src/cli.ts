@@ -210,7 +210,7 @@ const runCommand = async (root: string, write: boolean, positionalTask: string |
         attempts,
         requestCounts: counts
       },
-      worker: { status: "not-started", durationMs: 0, usage: "unreported" },
+      worker: { status: "not-started", durationMs: 0, progressEvents: 0, usage: "unreported" },
       classifierUsage: "unreported",
       wholeRunUsageScope: "unverified"
     };
@@ -237,11 +237,13 @@ const runCommand = async (root: string, write: boolean, positionalTask: string |
         status: worker.status,
         code: worker.code,
         durationMs: worker.durationMs,
+        progressEvents: worker.progressEvents,
         usage: worker.usage ?? "unreported",
         // Required boolean: an action record (a parent-initiated ladder ran),
         // never a causation claim. False on natural paths.
         ownedShutdown: worker.ownedShutdown
       };
+      if (worker.lastEventAgeMs !== undefined) workerReceipt.lastEventAgeMs = worker.lastEventAgeMs;
       if (worker.signal !== undefined) workerReceipt.signal = worker.signal;
       if (worker.failureClass !== undefined) workerReceipt.failureClass = worker.failureClass;
       if (worker.errorSha256 !== undefined) workerReceipt.errorSha256 = worker.errorSha256;

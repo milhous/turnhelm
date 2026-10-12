@@ -7,6 +7,12 @@ export type WorkerResult = Readonly<{
   code: number;
   status: "completed" | "failed" | "cancelled";
   durationMs: number;
+  // Parent-observed decoded-event evidence: the count of successfully decoded
+  // events of all kinds, and the rounded age from the last decode to
+  // settlement (present iff the count is positive). Never a liveness or stall
+  // claim — backpressure and the shutdown grace both bound what the age proves.
+  progressEvents: number;
+  lastEventAgeMs?: number;
   usage?: WorkerUsage;
   usageScope: "unverified";
   error?: "spawn" | "stdin" | "protocol" | "output" | "worker";
@@ -84,7 +90,7 @@ export function executeWorker(
 ): Promise<WorkerResult> {
   const started = performance.now();
   if (options.signal?.aborted) {
-    return Promise.resolve({ code: -1, status: "cancelled", durationMs: 0, usageScope: "unverified", ownedShutdown: false });
+    return Promise.resolve({ code: -1, status: "cancelled", durationMs: 0, progressEvents: 0, usageScope: "unverified", ownedShutdown: false });
   }
   return new Promise<WorkerResult>(resolve => {
     const child = spawn(options.executable, buildWorkerArgs(decision, options.write), {
@@ -103,6 +109,8 @@ export function executeWorker(
     let cancelled = false;
     let stickyFailed = false;
     let completionSeen = false;
+    let progressEvents = 0;
+    let lastEventAt: number | undefined;
     let usage: WorkerUsage | undefined;
     let inputDelivered = false;
     let childCode: number | null = null;
@@ -174,9 +182,11 @@ export function executeWorker(
         code: exitStatus(childCode, childSignal),
         status,
         durationMs: Math.round(performance.now() - started),
+        progressEvents,
         usageScope: "unverified"
-      } as { code: number; status: WorkerResult["status"]; durationMs: number; usageScope: "unverified"; ownedShutdown: boolean; usage?: WorkerUsage; error?: WorkerResult["error"]; signal?: "SIGINT" | "SIGTERM" | "SIGKILL"; failureClass?: FailureClass; errorSha256?: string };
+      } as { code: number; status: WorkerResult["status"]; durationMs: number; progressEvents: number; usageScope: "unverified"; ownedShutdown: boolean; usage?: WorkerUsage; error?: WorkerResult["error"]; signal?: "SIGINT" | "SIGTERM" | "SIGKILL"; failureClass?: FailureClass; errorSha256?: string; lastEventAgeMs?: number };
       result.ownedShutdown = ownedShutdown;
+      if (lastEventAt !== undefined) result.lastEventAgeMs = Math.round(performance.now() - lastEventAt);
       if (usage) result.usage = usage;
       if (error) result.error = error;
       // A failed status always carries a class: an eventless failure is unknown.
@@ -479,6 +489,8 @@ export function executeWorker(
           recordFailure("protocol");
           return;
         }
+        progressEvents += 1;
+        lastEventAt = performance.now();
         dispatch(event);
         if (cancelDrainWait !== undefined) return; // Sink blocked; the drain resumes the loop.
       }
