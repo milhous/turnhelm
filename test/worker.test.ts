@@ -832,6 +832,26 @@ finish(() => {
   assert.equal(typeof recorded.lastEventAgeMs, "number");
 });
 
+test("a settlement gap after decode quiescence makes lastEventAgeMs positive", { timeout: 30_000 }, async t => {
+  // The gap is constructed after the decode loop drains, never before it:
+  // both frames flush and decode on arrival (the output sink is unblocked),
+  // then the child holds stdout open with no further writes before exiting,
+  // so settlement lands a measurable span after the last decode.
+  const { recorded } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "gap" } });
+  emit({ type: "turn.completed", usage: { input_tokens: 1 } });
+  setTimeout(() => process.exit(0), 50);
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(recorded.progressEvents, 2, "both frames decode before the gap");
+  assert.ok(recorded.lastEventAgeMs !== undefined && recorded.lastEventAgeMs > 0,
+    "the hold-open gap lands after the last decode: saw " + recorded.lastEventAgeMs);
+});
+
 test("a malformed frame stops counting but the decoded count ships on the failed result", { timeout: 30_000 }, async t => {
   const { recorded } = await runWorker(t, {
     script: `
