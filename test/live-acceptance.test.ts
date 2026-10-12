@@ -15,7 +15,8 @@ import { promisify } from "node:util";
 import { parseProjectConfig } from "../src/config.js";
 import { readProjectFile } from "../src/project.js";
 import {
-  appendEvidence, claimAcceptance, envelopePayload, executeAcceptance, findOnPath, prepareAcceptance, superviseCli,
+  appendEvidence, claimAcceptance, envelopePayload, executeAcceptance, findOnPath, oracleSandboxPolicy,
+  prepareAcceptance, superviseCli,
   type AcceptanceManifest, type ClaimedRun, type SafeEvidence
 } from "./live-acceptance.js";
 
@@ -1492,6 +1493,38 @@ test("envelopePayload extracts the line-1 value behind inert trailers only", () 
   // The inert-trailer rule binds regardless of the payload's shape.
   assert.equal(envelopePayload('{"a":true}\n{"b":false}'), null);
   assert.equal(envelopePayload('{"a":true}\n```'), null);
+});
+
+test("oracleSandboxPolicy freezes the sealed round's SBPL, parameterized by its roots", () => {
+  const options = {
+    runtimeDir: "/opt/node-v24.0.0/libexec",
+    allowReadSubpaths: ["/tmp/turnhelm-live-laya/consumers/admission-x", "/tmp/turnhelm-live-laya/references/x"]
+  };
+  const first = oracleSandboxPolicy(options);
+  // (a) deterministic: the same inputs freeze byte-identical output, twice.
+  assert.equal(oracleSandboxPolicy(options), first);
+  // (b) parameter sensitivity: every accepted root changes the bytes.
+  assert.notEqual(oracleSandboxPolicy({ ...options, allowReadSubpaths: ["/tmp/other-root"] }), first);
+  assert.notEqual(oracleSandboxPolicy({ ...options, runtimeDir: "/usr/local/node24/libexec" }), first);
+  // (c) shape: every clause of the round tooling's policy, one substring each.
+  assert.ok(first.startsWith("(version 1)\n"));
+  assert.ok(first.includes("(allow default)\n"));
+  assert.ok(first.includes("(deny network*)\n"));
+  assert.ok(first.includes("(deny file-write*)\n"));
+  assert.ok(first.includes("(deny process-fork)\n"));
+  assert.ok(first.includes("(deny signal)\n"));
+  assert.ok(first.endsWith('(literal "/dev/urandom"))))\n'), "the policy is a closed line list");
+  assert.ok(first.includes(`(subpath ${JSON.stringify(options.runtimeDir)})`));
+  for (const path of options.allowReadSubpaths) {
+    assert.ok(first.includes(`(subpath ${JSON.stringify(path)})`));
+  }
+  assert.ok(first.includes('(literal "/")'));
+  for (const system of ["/System", "/usr", "/bin", "/sbin", "/Library"]) {
+    assert.ok(first.includes(`(subpath ${JSON.stringify(system)})`));
+  }
+  for (const device of ["/dev/null", "/dev/random", "/dev/urandom"]) {
+    assert.ok(first.includes(`(literal ${JSON.stringify(device)})`));
+  }
 });
 
 test("oracle-only failures continue the roster to a failed completion", async t => {

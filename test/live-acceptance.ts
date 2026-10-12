@@ -1422,6 +1422,22 @@ const envelope = (text: string, expected: Readonly<{ count: number; sum: number 
 const stdoutPayloadEquals = (raw: string | null, expected: Readonly<{ count: number; sum: number }>): boolean =>
   raw !== null && (jsonEquals(raw, expected) || envelope(raw, expected));
 
+// VH-5: the sealed round's sandbox profile lifted verbatim from its freeze
+// tooling, parameterized by the runtime directory and the per-case readable
+// roots. No behavior of this harness consumes it; export keeps the round
+// tooling and the harness on one frozen policy instead of two that drift.
+export function oracleSandboxPolicy(options: { runtimeDir: string; allowReadSubpaths: readonly string[] }): string {
+  const readable = [
+    '(literal "/")',
+    '(subpath "/System")', '(subpath "/usr")', '(subpath "/bin")', '(subpath "/sbin")', '(subpath "/Library")',
+    `(subpath ${JSON.stringify(options.runtimeDir)})`,
+    ...options.allowReadSubpaths.map(path => `(subpath ${JSON.stringify(path)})`),
+    '(literal "/dev/null")', '(literal "/dev/random")', '(literal "/dev/urandom")'
+  ].join(" ");
+  return `(version 1)\n(allow default)\n(deny network*)\n(deny file-write*)\n(deny process-fork)\n(deny signal)\n`
+    + `(deny file-read-data (require-not (require-any ${readable})))\n`;
+}
+
 const withoutLayaKey = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
   const copy = { ...env };
   delete copy.LAYA_API_KEY;
