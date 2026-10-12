@@ -6,7 +6,7 @@ import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -366,7 +366,11 @@ test("a moved HEAD or an unreadable consumed file is a baseline refusal", async 
 // and one fake git that dumps the CLI child's own environment — the direct
 // observation of the runner's scrubbed constructor — before answering the
 // work-tree probe.
-const FAKE_CODEX_BODY = `
+// The fake worker's exit path varies per scenario: the default prints the case
+// root's codex-output.txt lines and completes, a failureMessage emits one
+// turn.failed frame and exits 9 (the CLI classifies and receipts it), and a
+// stallMs holds the turn open so a signal test can land mid-case.
+const fakeCodexBody = (options: Readonly<{ failureMessage?: string; stallMs?: number }> = {}): string => `
 const argv = process.argv.slice(2);
 if (argv[0] === "--version") { process.stdout.write("codex-cli 0.160.2\\n"); process.exit(0); }
 if (argv[0] === "exec" && argv[1] === "--help") { process.stdout.write("--json\\n--ephemeral\\n--sandbox <MODE>\\n-\\n"); process.exit(0); }
@@ -389,12 +393,13 @@ process.stdin.on("data", chunk => { task += chunk; });
 process.stdin.on("end", () => {
   fs.appendFileSync(path.join(__dirname, "invocations"), "1");
   fs.writeFileSync(path.join(process.cwd(), "worker-task.txt"), task);
-  const lines = fs.readFileSync(path.join(process.cwd(), "codex-output.txt"), "utf8").split("\\n").filter(Boolean);
-  for (const line of lines) {
-    process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: line } }) + "\\n");
-  }
-  process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1 } }) + "\\n");
-  process.exit(0);
+  const finish = () => {
+` + (options.failureMessage !== undefined
+    ? `    process.stdout.write(JSON.stringify({ type: "turn.failed", message: ${JSON.stringify(options.failureMessage)} }) + "\\n");\n    process.exit(9);`
+    : `    const lines = fs.readFileSync(path.join(process.cwd(), "codex-output.txt"), "utf8").split("\\n").filter(Boolean);\n    for (const line of lines) {\n      process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: line } }) + "\\n");\n    }\n    process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1 } }) + "\\n");\n    process.exit(0);`)
+  + `
+  };
+` + (options.stallMs !== undefined ? `  setTimeout(finish, ${options.stallMs});` : "  finish();") + `
 });
 `;
 
@@ -418,12 +423,17 @@ type ExecuteCaseSpec = {
   transport: "arg" | "stdin-file";
   grading: Record<string, unknown>;
   outputLines: readonly string[];
+  contractSource?: string;
 };
 
 const scratchExecuteRound = async (
   t: TestContext,
   specs: readonly ExecuteCaseSpec[],
-  envExtra: Record<string, string> = {}
+  envExtra: Record<string, string> = {},
+  options?: Readonly<{
+    caps?: { classifierRequests: number; workerExecutions: number };
+    codex?: Readonly<{ failureMessage?: string; stallMs?: number }>;
+  }>
 ): Promise<{
   base: string;
   evidenceRoot: string;
@@ -456,14 +466,12 @@ const scratchExecuteRound = async (
   const invocations = join(bin, "invocations");
   const gitEnv = join(base, "git-env.txt");
   const workerEnv = join(bin, "worker-env.json");
-  await executableFixture(join(bin, "codex"), FAKE_CODEX_BODY, "node");
+  await executableFixture(join(bin, "codex"), fakeCodexBody(options?.codex), "node");
   await executableFixture(join(bin, "git"),
     `/usr/bin/env > '${gitEnv}'\nif [ "$1" = "-C" ]; then echo true; exit 0; fi\nexit 64\n`, "shell");
   const taskText = "Sum the ledger rows and print the JSON result.";
   const taskFile = join(base, "task.txt");
   await writeFile(taskFile, taskText);
-  const contract = join(base, "contract.mjs");
-  await writeFile(contract, "import assert from \"node:assert/strict\";\nassert.equal(1 + 1, 2);\n");
   const roots: string[] = [];
   const cases = [];
   for (const spec of specs) {
@@ -472,6 +480,9 @@ const scratchExecuteRound = async (
     await mkdir(join(root, ".turnhelm"), { recursive: true });
     await writeFile(join(root, ".turnhelm", "config.json"), caseConfig(port));
     await writeFile(join(root, "codex-output.txt"), spec.outputLines.join("\n") + "\n");
+    const contract = join(base, spec.id + "-contract.mjs");
+    await writeFile(contract,
+      spec.contractSource ?? "import assert from \"node:assert/strict\";\nassert.equal(1 + 1, 2);\n");
     cases.push({
       id: spec.id, kind: spec.kind, scope: spec.id + " scope", task: taskText,
       transport: spec.transport, root,
@@ -488,7 +499,7 @@ const scratchExecuteRound = async (
     version: 1,
     head: execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT }).toString().trim(),
     evidenceRoot,
-    caps: { classifierRequests: 8, workerExecutions: 8 },
+    caps: options?.caps ?? { classifierRequests: 8, workerExecutions: 8 },
     cases
   }));
   const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
@@ -668,3 +679,147 @@ test("the CLI child env is scrubbed before it reaches the CLI and again the work
     }
     assert.equal(worker.PATH, round.env.PATH);
   });
+
+// ---------- Task 6: stop policy, lifecycle, and exit codes (spec §3.3) ----------
+
+const waitForFile = async (path: string): Promise<void> => {
+  for (const deadline = Date.now() + 20_000; Date.now() < deadline;) {
+    if (await stat(path).then(() => true, () => false)) return;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.fail("timed out waiting for " + path);
+};
+
+test("an ordinary contract failure fails its case and the roster continues",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-write", transport: "stdin-file",
+        grading: { mode: "envelope-equal", expected: { count: 1, sum: 2 } },
+        outputLines: ['{"count":1,"sum":2}'],
+        contractSource: "throw new Error(\"contract violated\");\n"
+      },
+      {
+        id: "case-b", kind: "worker-write", transport: "stdin-file",
+        grading: { mode: "envelope-equal", expected: { count: 1, sum: 2 } },
+        outputLines: ['{"count":1,"sum":2}']
+      }
+    ]);
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 4, "a complete round with one failed case exits four");
+    assert.equal(await readFile(round.invocations, "utf8"), "11",
+      "an ordinary assertion failure never stops the roster");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    assert.deepEqual(ledger.filter(r => r.phase === "case").map(r => [r.caseId, r.outcome]),
+      [["case-a", "failed"], ["case-b", "pass"]]);
+    assert.ok(!ledger.some(r => r.phase === "stopped"));
+  });
+
+test("a contract-check infrastructure failure stops the round before the next spend",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-write", transport: "stdin-file",
+        grading: { mode: "envelope-equal", expected: { count: 1, sum: 2 } },
+        outputLines: ['{"count":1,"sum":2}']
+      },
+      {
+        id: "case-b", kind: "worker-write", transport: "stdin-file",
+        grading: { mode: "envelope-equal", expected: { count: 1, sum: 2 } },
+        outputLines: ['{"count":1,"sum":2}']
+      }
+    ]);
+    const broken = await writeFakeSandboxExec(t, "shift 2\nexit 9");
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: broken });
+    assert.equal(code, 1, "an infrastructure failure is an integrity stop");
+    assert.equal(await readFile(round.invocations, "utf8"), "1",
+      "case one ran; case two never launches");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    assert.deepEqual(ledger.at(-1),
+      { phase: "stopped", caseId: "case-a", reason: "contract-missing-outcome" });
+  });
+
+test("an auth-class worker failure stops the round",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } },
+        outputLines: ['{"count":3,"sum":6}']
+      },
+      {
+        id: "case-b", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } },
+        outputLines: ['{"count":3,"sum":6}']
+      }
+    ], {}, { codex: { failureMessage: "invalid api key rejected" } });
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 1, "auth-class failures stop all remaining spend");
+    assert.equal(await readFile(round.invocations, "utf8"), "1", "the second case never launches");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    assert.deepEqual(ledger.at(-1), { phase: "stopped", caseId: "case-a", reason: "worker-auth" });
+  });
+
+test("a roster exceeding its declared caps is refused before any spend",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } },
+        outputLines: ['{"count":3,"sum":6}']
+      },
+      {
+        id: "case-b", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } },
+        outputLines: ['{"count":3,"sum":6}']
+      }
+    ], {}, { caps: { classifierRequests: 1, workerExecutions: 1 } });
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 1, "planned spend above the frozen caps is refused");
+    await assert.rejects(readFile(round.invocations), { code: "ENOENT" }, "zero worker invocations");
+    await assert.rejects(readFile(join(round.evidenceRoot, "custom-round-evidence.jsonl")), { code: "ENOENT" },
+      "a refused roster never claims the ledger");
+  });
+
+test("SIGINT during a case closes gracefully with exit 130", { timeout: 90_000 }, async t => {
+  const round = await scratchExecuteRound(t, [
+    {
+      id: "case-a", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } },
+      outputLines: ['{"count":3,"sum":6}']
+    }
+  ], {}, { codex: { stallMs: 30_000 } });
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const pending = executeRound(round.manifestPath, round.approvalSha256,
+    { env: round.env, sandboxExecPath: fake });
+  await waitForFile(round.invocations);
+  process.kill(process.pid, "SIGINT");
+  assert.equal(await pending, 130, "SIGINT maps to the graceful-stop exit code");
+  const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+  assert.equal(ledger.at(-1)?.phase, "stopped", "the signal stop is recorded");
+});
+
+test("SIGTERM during a case exits 143", { timeout: 90_000 }, async t => {
+  const round = await scratchExecuteRound(t, [
+    {
+      id: "case-a", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } },
+      outputLines: ['{"count":3,"sum":6}']
+    }
+  ], {}, { codex: { stallMs: 30_000 } });
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const pending = executeRound(round.manifestPath, round.approvalSha256,
+    { env: round.env, sandboxExecPath: fake });
+  await waitForFile(round.invocations);
+  process.kill(process.pid, "SIGTERM");
+  assert.equal(await pending, 143, "SIGTERM maps to the immediate-stop exit code");
+  const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+  assert.equal(ledger.at(-1)?.phase, "stopped", "the signal stop is recorded");
+});

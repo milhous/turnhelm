@@ -474,6 +474,7 @@ type RoundManifest = {
   baseline: { files: { path: string; sha256: string }[] };
   runtime: { node: string; execPath: string };
   evidenceRoot: { canonical: string; dev: number; ino: number };
+  caps: { classifierRequests: number; workerExecutions: number };
   cases: RoundCase[];
 };
 
@@ -496,6 +497,8 @@ const parseRoundManifest = (bytes: Buffer): RoundManifest | null => {
     if (typeof value.runtime?.node !== "string" || typeof value.runtime?.execPath !== "string") return null;
     if (typeof value.evidenceRoot?.canonical !== "string"
       || !Number.isInteger(value.evidenceRoot?.dev) || !Number.isInteger(value.evidenceRoot?.ino)) return null;
+    if (!Number.isInteger(value.caps?.classifierRequests) || !Number.isInteger(value.caps?.workerExecutions)
+      || value.caps.classifierRequests < 0 || value.caps.workerExecutions < 0) return null;
     for (const item of value.cases) {
       if (typeof item?.id !== "string" || typeof item?.task !== "string"
         || (item.transport !== "arg" && item.transport !== "stdin-file")
@@ -557,20 +560,72 @@ const scrubbedCliEnv = (base: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
   return env;
 };
 
+// Spec §3.3: auth, rate-limit, and usage-limit worker failures stop all
+// remaining spend. The CLI's receipt is the only sanctioned attribution
+// surface — the frozen class, never raw error text.
+const STOP_FAILURE_CLASSES = new Set(["auth", "rate-limit", "usage-limit"]);
+
+const receiptFailureClass = (stderr: Buffer): string | null => {
+  for (const line of stderr.toString("utf8").split("\n")) {
+    if (!line.includes("turnhelm.receipt")) continue;
+    try {
+      const parsed = JSON.parse(line) as { type?: unknown; worker?: { failureClass?: unknown } };
+      if (parsed.type !== "turnhelm.receipt") continue;
+      if (typeof parsed.worker?.failureClass === "string") return parsed.worker.failureClass;
+    } catch { /* not a receipt line */ }
+  }
+  return null;
+};
+
 // The gated run: approval hash, evidence-root identity, runtime and baseline
 // re-verification, an exclusive-create claim, then per case identity-before-
 // spend, one supervised CLI run, declarative grading, the sandboxed contract
-// check for worker-write, and bounded evidence records.
+// check for worker-write, and bounded evidence records. Exit codes (spec
+// §3.3): 0 all-pass, 4 complete-with-failures, 1 structural, 130 SIGINT,
+// 143 SIGTERM.
 export async function executeRound(
   manifestPath: string,
   approvedSha256: string,
   options?: Readonly<{ env?: NodeJS.ProcessEnv; signal?: AbortSignal; sandboxExecPath?: string; caseTimeoutMs?: number }>
 ): Promise<number> {
-  const abort = options?.signal;
+  // Signal ladder (spec §3.3): the first SIGINT stops gracefully — the owned
+  // CLI child is signalled through its supervision abort path and the round
+  // settles with 130 — while SIGTERM settles with 143 after the same child
+  // cleanup. A caller-supplied signal feeds the same controller.
+  const controller = new AbortController();
+  if (options?.signal !== undefined) {
+    if (options.signal.aborted) controller.abort();
+    else options.signal.addEventListener("abort", () => controller.abort(), { once: true });
+  }
+  let terminated = false;
+  const onInterrupt = (): void => { controller.abort(); };
+  const onTerminate = (): void => { terminated = true; controller.abort(); };
+  process.on("SIGINT", onInterrupt);
+  process.on("SIGTERM", onTerminate);
+  const signal = controller.signal;
+  try {
+    return await runGatedRound(manifestPath, approvedSha256, options, signal, () => terminated);
+  } finally {
+    process.removeListener("SIGINT", onInterrupt);
+    process.removeListener("SIGTERM", onTerminate);
+  }
+}
+
+async function runGatedRound(
+  manifestPath: string,
+  approvedSha256: string,
+  options: Readonly<{ env?: NodeJS.ProcessEnv; sandboxExecPath?: string; caseTimeoutMs?: number }> | undefined,
+  signal: AbortSignal,
+  terminated: () => boolean
+): Promise<number> {
   const bytes = await readFile(manifestPath).catch(() => null);
   if (bytes === null || sha256hex(bytes) !== approvedSha256) return 1;
   const manifest = parseRoundManifest(bytes);
   if (manifest === null) return 1;
+  // The caps froze with the manifest: planned spend above them is refused
+  // before any identity work, claim, or launch (spec §3.3, §3.6).
+  if (manifest.cases.length > manifest.caps.workerExecutions
+    || manifest.cases.length > manifest.caps.classifierRequests) return 1;
   // Relocated manifest: the exclusive-create claim only holds at the frozen
   // evidence root, so the manifest directory's own dev/ino identity is the
   // gate — a byte-identical copy elsewhere never reaches the claim.
@@ -607,9 +662,9 @@ export async function executeRound(
   const sandboxExecPath = options?.sandboxExecPath ?? "/usr/bin/sandbox-exec";
   let failedCases = 0;
   for (const item of manifest.cases) {
-    if (abort?.aborted) {
+    if (signal.aborted) {
       await appendEvidence({ phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
-      return 130;
+      return terminated() ? 143 : 130;
     }
     // Identity before spend (spec §3.2(1)): canonical path plus dev/ino — the
     // check that catches same-path replacement — and every pinned case file
@@ -636,9 +691,9 @@ export async function executeRound(
       await appendEvidence({ phase: "stopped", caseId: item.id, reason: stopReason }).catch(() => {});
       return 1;
     }
-    if (abort?.aborted) {
+    if (signal.aborted) {
       await appendEvidence({ phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
-      return 130;
+      return terminated() ? 143 : 130;
     }
     await appendEvidence({ phase: "reserved", caseId: item.id }).catch(() => {});
 
@@ -656,10 +711,10 @@ export async function executeRound(
             "<", shQuote(taskFileEntry === undefined ? "" : taskFileEntry.path)].join(" ")]
         };
     const observation = await superviseCli(supervision.file, supervision.args,
-      { env, timeoutMs: options?.caseTimeoutMs ?? CASE_TIMEOUT_MS, signal: abort });
-    if (observation.aborted || abort?.aborted) {
+      { env, timeoutMs: options?.caseTimeoutMs ?? CASE_TIMEOUT_MS, signal });
+    if (observation.aborted || signal.aborted) {
       await appendEvidence({ phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
-      return 130;
+      return terminated() ? 143 : 130;
     }
     // Budget breaches are integrity stops (spec §3.3): grading never reads a
     // capped or truncated stream.
@@ -667,6 +722,14 @@ export async function executeRound(
       await appendEvidence({
         phase: "stopped", caseId: item.id, reason: observation.timedOut ? "timeout" : "output-cap"
       }).catch(() => {});
+      return 1;
+    }
+    // A stopping failure class on the CLI's receipt (spec §3.3) ends the
+    // round: auth, rate-limit, and usage-limit failures mean every remaining
+    // case would spend against the same broken boundary.
+    const failureClass = receiptFailureClass(observation.stderr);
+    if (failureClass !== null && STOP_FAILURE_CLASSES.has(failureClass)) {
+      await appendEvidence({ phase: "stopped", caseId: item.id, reason: "worker-" + failureClass }).catch(() => {});
       return 1;
     }
 
