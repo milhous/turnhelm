@@ -698,6 +698,22 @@ finish(() => {
   assert.deepEqual(recorded.payload, { mode: "unstructured" });
 });
 
+test("a strict trailing-newline message keeps its newline and gains the emitter's", { timeout: 30_000 }, async t => {
+  const { recorded, stdout } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: ${JSON.stringify("{}\n")} } });
+  emit({ type: "turn.completed" });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  // PE-01's pinned shape: the strict message "{}\n" is emitted verbatim and the
+  // emitter appends its own single newline — "{}\n\n" on stdout, deliberate.
+  assert.equal(stdout, "{}\n\n");
+  assert.deepEqual(recorded.payload, { mode: "strict" });
+});
+
 test("a message decoded after completion becomes the final message", { timeout: 30_000 }, async t => {
   const { recorded, stdout } = await runWorker(t, {
     script: `
