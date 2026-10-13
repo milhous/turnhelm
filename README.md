@@ -279,10 +279,13 @@ than opened.
   end, including routing failure/cancellation and the worker outcome.
   Client cancellation does not prove backend inference has stopped.
 
-The receipt's `worker` object always carries the status, exit code,
-duration, usage, and `ownedShutdown` — a required boolean action record
-meaning a parent-initiated stop ladder ran, never a causation claim; it is
-false on every natural path. A failed worker also carries the frozen
+The receipt's `worker` object always carries the status, duration, usage,
+and, once a worker actually executed, the exit code and `ownedShutdown` —
+a required boolean action record meaning a parent-initiated stop ladder
+ran, never a causation claim; it is false on every natural path. A run
+that never started a worker reports exactly
+`{ status: "not-started", durationMs: 0, progressEvents: 0, usage: "unreported" }`
+with no exit-code or action fields. A failed worker also carries the frozen
 `failureClass` (plus `errorSha256`, a SHA-256 over the native error bytes
 for cross-run correlation, when a native message existed); a worker that
 died by SIGINT/SIGTERM/SIGKILL — failed or cancelled — carries the death
@@ -484,20 +487,21 @@ are historical design records, not current invocation instructions.
 Interactive, evidence-pinned diagrams live under [`.archify/`](.archify/).
 GitHub Markdown cannot embed interactive HTML, so the static captures below
 link to the artifacts; open the HTML files locally (for example
-`open .archify/architecture-turnhelm-20261012-090500/turnhelm-architecture.html`)
+`open .archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.html`)
 for the interactive versions with zoom, guided views, and source links.
 
-[![Architecture diagram](.archify/architecture-turnhelm-20261012-090500/visual-check/turnhelm-architecture.visual-check.1440x900.light.png)](.archify/architecture-turnhelm-20261012-090500/turnhelm-architecture.html)
+[![Architecture diagram](.archify/architecture-turnhelm-20261013-165202/visual-check/turnhelm-architecture.visual-check.1440x900.light.png)](.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.html)
 
-[Architecture](.archify/architecture-turnhelm-20261012-090500/turnhelm-architecture.html)
+[Architecture](.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.html)
 — components, the host-loopback boundary, and trust gates including the
 ZDOTDIR managed-root redirect.
 
-[![Routing workflow diagram](.archify/workflow-turnhelm-run-20261012-091500/visual-check/turnhelm-run-workflow.visual-check.1440x900.light.png)](.archify/workflow-turnhelm-run-20261012-091500/turnhelm-run-workflow.html)
+[![Routing workflow diagram](.archify/workflow-turnhelm-run-20261013-165202/visual-check/turnhelm-run-workflow.visual-check.1440x900.light.png)](.archify/workflow-turnhelm-run-20261013-165202/turnhelm-run-workflow.html)
 
-[Routing workflow](.archify/workflow-turnhelm-run-20261012-091500/turnhelm-run-workflow.html)
-— one `turnhelm run` from task submission to receipt, including rejection
-and fail-closed paths.
+[Routing workflow](.archify/workflow-turnhelm-run-20261013-165202/turnhelm-run-workflow.html)
+— one `turnhelm run` from task submission to the final-message stdout
+contract and receipt, including rejection and fail-closed paths.
 
-Both diagrams are pinned at `6a2f8dc`; earlier `.archify/` generations
-remain as historical evidence.
+Both diagrams are pinned at `f713e08`, the revision that introduced the
+final-message-only worker stdout contract; superseded `.archify/`
+generations live in git history.
