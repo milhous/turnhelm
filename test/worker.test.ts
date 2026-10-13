@@ -116,6 +116,7 @@ type Recorded = {
   outputErrAfter?: number;
   ownedShutdown?: boolean;
   failureClass?: string;
+  payload?: { mode: string; trailerBytes?: number };
   errorSha256?: string;
   signal?: string;
   postSettleKills?: number;
@@ -593,7 +594,8 @@ finish(() => {
     diagMaxLength: 0,
     diagFinalLength: 0,
     tailWrites: 0,
-    ownedShutdown: false
+    ownedShutdown: false,
+    payload: { mode: "unstructured" }
   });
   assert.equal(await fakeFile(directory, "argv.json"), JSON.stringify(buildWorkerArgs(decision("balanced"), true)));
   assert.equal(await fakeFile(directory, "cwd.txt"), await realpath(join(directory, "root")));
@@ -626,10 +628,60 @@ finish(() => {
   forbid(stdout + stderr + JSON.stringify(recorded), "progress narration");
 });
 
+// PE-1: the structured payload contract at the emission phase. Classification
+// precedes the single sink write; stdout is byte-exact per mode, and the
+// projection is content-free (mode, trailerBytes only).
+test("an envelope-shaped final message emits exactly its payload line", { timeout: 30_000 }, async t => {
+  const trailer = "备注：未访问网络，冻结检查通过。";
+  const { recorded, stdout, stderr } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "progress narration" } });
+  emit({ type: "item.completed", item: { type: "agent_message", text: ${JSON.stringify('{"count":8,"sum":8}\n' + trailer)} } });
+  emit({ type: "turn.completed" });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(stdout, '{"count":8,"sum":8}\n');
+  forbid(stdout + stderr + JSON.stringify(recorded), trailer, "progress narration");
+  assert.deepEqual(recorded.payload, { mode: "extracted", trailerBytes: Buffer.byteLength(trailer, "utf8") });
+});
+
+test("a whole-message JSON final message emits verbatim with payload mode strict", { timeout: 30_000 }, async t => {
+  const { recorded, stdout } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: '{"count":8,"sum":8}' } });
+  emit({ type: "turn.completed" });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(stdout, '{"count":8,"sum":8}\n');
+  assert.deepEqual(recorded.payload, { mode: "strict" });
+});
+
+test("a conflicting second structured answer emits verbatim with payload mode conflict", { timeout: 30_000 }, async t => {
+  const message = '{"count":8,"sum":8}\n{"count":9,"sum":9}';
+  const { recorded, stdout } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: ${JSON.stringify(message)} } });
+  emit({ type: "turn.completed" });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(stdout, message + "\n");
+  assert.deepEqual(recorded.payload, { mode: "conflict" });
+});
+
 test("a completed run with zero agent messages writes nothing to stdout", { timeout: 30_000 }, async t => {
   const { recorded, stdout } = await runWorker(t, { script: "finish(() => emit({ type: 'turn.completed' }));" });
   assert.equal(recorded.status, "completed");
   assert.equal(stdout, "");
+  assert.equal(recorded.payload, undefined, "a zero-message completion attaches no payload projection");
 });
 
 test("an empty-string final message writes exactly one newline", { timeout: 30_000 }, async t => {
@@ -643,6 +695,23 @@ finish(() => {
   });
   assert.equal(recorded.status, "completed");
   assert.equal(stdout, "\n");
+  assert.deepEqual(recorded.payload, { mode: "unstructured" });
+});
+
+test("a strict trailing-newline message keeps its newline and gains the emitter's", { timeout: 30_000 }, async t => {
+  const { recorded, stdout } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: ${JSON.stringify("{}\n")} } });
+  emit({ type: "turn.completed" });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  // PE-01's pinned shape: the strict message "{}\n" is emitted verbatim and the
+  // emitter appends its own single newline — "{}\n\n" on stdout, deliberate.
+  assert.equal(stdout, "{}\n\n");
+  assert.deepEqual(recorded.payload, { mode: "strict" });
 });
 
 test("a message decoded after completion becomes the final message", { timeout: 30_000 }, async t => {
@@ -703,6 +772,9 @@ finish(() => {
   });
   assert.equal(recorded.status, "completed");
   assert.equal(stdout, "z".repeat(1048576 - 68) + "\n");
+  // Classification is bounded native parsing: the maximal frame classifies
+  // without a second write or clipping.
+  assert.deepEqual(recorded.payload, { mode: "unstructured" });
 });
 
 test("exit zero without a completion is a worker failure", { timeout: 30_000 }, async t => {
@@ -1134,6 +1206,8 @@ finish(() => {
   assert.equal(recorded.status, "failed");
   assert.equal(recorded.error, "output");
   assert.equal(recorded.code, 0);
+  // Emission may have initiated, but a failed run attaches no payload projection.
+  assert.equal(recorded.payload, undefined);
   forbid(JSON.stringify(recorded) + stderr, "PRIVATE_LATE_EPIPE");
 });
 
@@ -1177,6 +1251,8 @@ finish(() => {
   assert.equal(recorded.status, "failed");
   assert.equal(recorded.error, "output");
   assert.equal(recorded.code, 0);
+  // Emission may have initiated, but a failed run attaches no payload projection.
+  assert.equal(recorded.payload, undefined);
   forbid(JSON.stringify(recorded) + stderr, "PRIVATE_LATE_EPIPE");
 });
 
@@ -1410,6 +1486,9 @@ finish(() => {
   assert.equal(recorded.status, "cancelled");
   assert.equal(recorded.received, 1);
   assert.equal(recorded.maxPending, 1);
+  // Bytes were delivered before the abort, but a cancelled run attaches no
+  // payload projection — non-transactional delivery, receipt is the authority.
+  assert.equal(recorded.payload, undefined);
   assert.equal(stderr, "");
 });
 
@@ -1445,6 +1524,7 @@ finish(() => {
   });
   assert.equal(recorded.status, "cancelled");
   assert.equal(recorded.received, 1);
+  assert.equal(recorded.payload, undefined);
   await waitForExit(Number(await fakeFile(directory, "descendant.pid")));
 });
 

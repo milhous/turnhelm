@@ -99,7 +99,14 @@ settings to make a check pass.
 Worker output on stdout is at most one message — the final agent message of
 a completed run; earlier progress messages are discarded; fixed diagnostics
 and one `turnhelm.receipt` JSON are on stderr **once classification
-starts**. Input/config/preflight rejection
+starts**. The message is classified at emission: one JSON value is emitted
+verbatim (`payload.mode: "strict"`); a payload line plus inert trailing
+prose yields exactly the payload line (`"extracted"`, with `trailerBytes`
+in the receipt — the dropped trailer is retained nowhere); further
+structured content after the payload line, or any non-JSON message, is
+emitted verbatim (`"conflict"` / `"unstructured"`). The boundary is a
+delimitor, not a validator, and still not a redactor; success is read from
+the exit code and receipt, never stdout presence. Input/config/preflight rejection
 has no receipt. A failed worker turn prints exactly one fixed
 `turnhelm: worker-failed: <class>` line — class from a frozen taxonomy,
 never native error text. The receipt's `worker` object always carries

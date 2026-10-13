@@ -666,6 +666,10 @@ test("execute runs both transports, grades both cases, and exits zero with an ev
       "each case record retains the bounded oracle input it was graded on");
     assert.deepEqual(caseRecords.map(r => [r.backend, r.profileId]).sort(),
       [["laya", "balanced"], ["laya", "balanced"]], "journal values surface only through the whitelist");
+    assert.deepEqual(ledger.find(r => r.phase === "case" && r.caseId === "case-a")?.workerPayload,
+      { mode: "strict" }, "a one-value message projects strict");
+    assert.deepEqual(ledger.find(r => r.phase === "case" && r.caseId === "case-b")?.workerPayload,
+      { mode: "extracted", trailerBytes: "trailer: inert footer".length });
     assert.ok(!ledger.some(r => r.phase === "stopped"), "no stop record on the happy path");
     assert.equal(await readFile(round.invocations, "utf8"), "11", "exactly one worker execution per case");
     for (const root of round.roots) {
@@ -847,23 +851,36 @@ test("a baseline file mutated between cases stops the round at the next reservat
     assert.deepEqual(ledger.at(-1), { phase: "stopped", caseId: "case-b", reason: "baseline" });
   });
 
-test("a footer output fails strict-whole-json while envelope-equal tolerates it",
+test("an envelope-shaped output extracts to its payload line for strict grading",
   { timeout: 90_000 }, async t => {
     const round = await scratchExecuteRound(t, [
       {
-        id: "case-a", kind: "worker-readonly", transport: "arg",
+        id: "case-envelope", kind: "worker-readonly", transport: "arg",
         grading: { mode: "strict-whole-json", expected: { count: 1, sum: 2 } },
         outputLines: ['{"count":1,"sum":2}', "trailer: inert footer"]
+      },
+      {
+        id: "case-conflict", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-whole-json", expected: { count: 1, sum: 2 } },
+        outputLines: ['{"count":1,"sum":2}', '{"count":9,"sum":9}']
       }
     ]);
     const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
     const code = await executeRound(round.manifestPath, round.approvalSha256,
       { env: round.env, sandboxExecPath: fake });
-    assert.equal(code, 4, "a completed round with one failed case exits four");
+    assert.equal(code, 4, "the conflicting second answer fails its case");
     const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
-    assert.equal(ledger.find(r => r.phase === "case")?.outcome, "failed",
-      "the strict-only contract rejects the envelope shape");
-    assert.equal(await readFile(round.invocations, "utf8"), "1", "the case did run; grading is the failure");
+    assert.deepEqual(ledger.filter(r => r.phase === "case").map(r => [r.caseId, r.outcome]).sort(),
+      [["case-conflict", "failed"], ["case-envelope", "pass"]],
+      "an inert trailer extracts to the payload line; a second structured answer stays verbatim and fails");
+    const envelope = ledger.find(r => r.phase === "case" && r.caseId === "case-envelope");
+    assert.deepEqual(envelope?.workerPayload, { mode: "extracted", trailerBytes: "trailer: inert footer".length },
+      "the observed record carries the bounded payload projection off the receipt");
+    const conflict = ledger.find(r => r.phase === "case" && r.caseId === "case-conflict");
+    assert.deepEqual(conflict?.workerPayload, { mode: "conflict" });
+    assert.equal(JSON.stringify(ledger).includes("trailer: inert footer"), false,
+      "the trailer text is retained nowhere — not even the observed record");
+    assert.equal(await readFile(round.invocations, "utf8"), "11", "both cases ran; grading is the discriminator");
   });
 
 test("the CLI child env is scrubbed before it reaches the CLI and again the worker",

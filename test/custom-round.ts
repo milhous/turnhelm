@@ -744,6 +744,31 @@ const receiptFailureClass = (stderr: Buffer): string | null => {
   return null;
 };
 
+// PE-1 (§3.6): the bounded payload projection off the CLI receipt — mode and,
+// when extracted, trailerBytes. Content-free: no trailer bytes, hashes, or
+// value shapes; degraded to absent when the receipt carries no projection.
+const WORKER_PAYLOAD_MODES = new Set(["strict", "extracted", "conflict", "unstructured"]);
+
+const receiptWorkerPayload = (stderr: Buffer): { mode: string; trailerBytes?: number } | null => {
+  for (const line of stderr.toString("utf8").split("\n")) {
+    if (!line.includes("turnhelm.receipt")) continue;
+    try {
+      const parsed = JSON.parse(line) as { type?: unknown; worker?: { payload?: unknown } };
+      if (parsed.type !== "turnhelm.receipt") continue;
+      const payload = parsed.worker?.payload;
+      if (payload === null || typeof payload !== "object") return null;
+      const mode = (payload as { mode?: unknown }).mode;
+      if (typeof mode !== "string" || !WORKER_PAYLOAD_MODES.has(mode)) return null;
+      const trailerBytes = (payload as { trailerBytes?: unknown }).trailerBytes;
+      if (trailerBytes === undefined) return { mode };
+      return typeof trailerBytes === "number" && Number.isInteger(trailerBytes) && trailerBytes >= 1
+        ? { mode, trailerBytes }
+        : { mode };
+    } catch { /* not a receipt line */ }
+  }
+  return null;
+};
+
 // Spec §3.5: exactly one receipt per classified run. Zero receipts (a CLI
 // that died before classification) or several means the run's own attribution
 // is broken, so grading never proceeds on captured stdout alone.
@@ -1021,6 +1046,7 @@ async function runGatedRound(
     }
 
     if (!passed) failedCases += 1;
+    const workerPayload = receiptWorkerPayload(observation.stderr);
     // The case record fails open: the case already ran and its stop conditions
     // were all checked; a dead ledger here surfaces at the next case's
     // reserved append, which is a hard stop.
@@ -1028,6 +1054,7 @@ async function runGatedRound(
       phase: "case", caseId: item.id, outcome: passed ? "pass" : "failed",
       exitCode: observation.exitCode, durationMs: observation.durationMs, taskSha256: taskHash,
       backend, profileId,
+      ...(workerPayload !== null ? { workerPayload } : {}),
       oracleInput: observation.stdout.subarray(0, ORACLE_INPUT_CAP_BYTES).toString("utf8")
     }).catch(() => {});
   }
