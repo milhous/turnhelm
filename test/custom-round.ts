@@ -784,6 +784,112 @@ const receiptCount = (stderr: Buffer): number => {
   return count;
 };
 
+// FE-1 (§3): the per-field worker projection off the CLI receipt. The receipt
+// legitimately carries keys outside this table (today `payload`); a projection
+// that passed them through would not be a projection. Each retained field is
+// individually type-checked and dropped alone on failure — never coerced,
+// never thrown — and the whole projection is omitted only when the worker
+// object is absent/not a record or `status` is outside the frozen enum.
+// Bounded scalars only: no error text or stderr bytes reach the ledger
+// (errorSha256 is correlation-only), and usage follows VH-3 — partial
+// snapshots kept without zero-fill, malformed counters dropped, absent usage,
+// the emitted "unreported" literal, and zero surviving counters all project
+// to "unreported".
+export type WorkerReceiptEvidence = Readonly<{
+  status: "not-started" | "completed" | "failed" | "cancelled";
+  code?: number;
+  durationMs?: number;
+  progressEvents?: number;
+  ownedShutdown?: boolean;
+  usage?: Partial<Record<"input_tokens" | "output_tokens" | "cached_input_tokens" | "reasoning_output_tokens", number>> | "unreported";
+  failureClass?: "stream-disconnected" | "rate-limit" | "usage-limit" | "timeout" | "auth" | "overloaded" | "unknown";
+  errorSha256?: string;
+  signal?: "SIGINT" | "SIGTERM" | "SIGKILL";
+  lastEventAgeMs?: number;
+}>;
+
+const WORKER_STATUSES = new Set(["not-started", "completed", "failed", "cancelled"]);
+const WORKER_FAILURE_CLASSES = new Set([
+  "stream-disconnected", "rate-limit", "usage-limit", "timeout", "auth", "overloaded", "unknown"
+]);
+const WORKER_SIGNALS = new Set(["SIGINT", "SIGTERM", "SIGKILL"]);
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+const USAGE_COUNTERS = ["input_tokens", "output_tokens", "cached_input_tokens", "reasoning_output_tokens"] as const;
+
+const workerUsageEvidence = (usage: unknown): Exclude<WorkerReceiptEvidence["usage"], undefined> => {
+  if (usage === "unreported" || typeof usage !== "object" || usage === null || Array.isArray(usage)) {
+    return "unreported";
+  }
+  const counters: Partial<Record<(typeof USAGE_COUNTERS)[number], number>> = {};
+  for (const field of USAGE_COUNTERS) {
+    const value = (usage as Record<string, unknown>)[field];
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) counters[field] = value;
+  }
+  return Object.keys(counters).length === 0 ? "unreported" : counters;
+};
+
+export function projectWorkerReceipt(worker: unknown): WorkerReceiptEvidence | undefined {
+  if (typeof worker !== "object" || worker === null || Array.isArray(worker)) return undefined;
+  const record = worker as Record<string, unknown>;
+  if (typeof record.status !== "string" || !WORKER_STATUSES.has(record.status)) return undefined;
+  const projection: {
+    status: WorkerReceiptEvidence["status"];
+    code?: number;
+    durationMs?: number;
+    progressEvents?: number;
+    ownedShutdown?: boolean;
+    usage: Exclude<WorkerReceiptEvidence["usage"], undefined>;
+    failureClass?: NonNullable<WorkerReceiptEvidence["failureClass"]>;
+    errorSha256?: string;
+    signal?: NonNullable<WorkerReceiptEvidence["signal"]>;
+    lastEventAgeMs?: number;
+  } = { status: record.status as WorkerReceiptEvidence["status"], usage: workerUsageEvidence(record.usage) };
+  const { code, durationMs, progressEvents, ownedShutdown, failureClass, errorSha256, signal, lastEventAgeMs } = record;
+  if (typeof code === "number" && Number.isSafeInteger(code)) projection.code = code;
+  // A not-started worker never ran: its zero duration and zero events are
+  // placeholders, not evidence, so only positive values project.
+  if (typeof durationMs === "number" && Number.isSafeInteger(durationMs) && durationMs >= 1) {
+    projection.durationMs = durationMs;
+  }
+  if (typeof progressEvents === "number" && Number.isSafeInteger(progressEvents) && progressEvents >= 1) {
+    projection.progressEvents = progressEvents;
+  }
+  if (typeof ownedShutdown === "boolean") projection.ownedShutdown = ownedShutdown;
+  if (typeof failureClass === "string" && WORKER_FAILURE_CLASSES.has(failureClass)) {
+    projection.failureClass = failureClass as WorkerReceiptEvidence["failureClass"];
+  }
+  if (typeof errorSha256 === "string" && SHA256_HEX.test(errorSha256)) projection.errorSha256 = errorSha256;
+  if (typeof signal === "string" && WORKER_SIGNALS.has(signal)) {
+    projection.signal = signal as WorkerReceiptEvidence["signal"];
+  }
+  if (typeof lastEventAgeMs === "number" && Number.isSafeInteger(lastEventAgeMs) && lastEventAgeMs >= 0) {
+    projection.lastEventAgeMs = lastEventAgeMs;
+  }
+  return projection;
+}
+
+// The single receipt's `worker` value, through the same line-scan discipline
+// as receiptFailureClass: the first parseable receipt line wins, anything
+// else degrades to undefined.
+const receiptWorkerObject = (stderr: Buffer): unknown => {
+  for (const line of stderr.toString("utf8").split("\n")) {
+    if (!line.includes("turnhelm.receipt")) continue;
+    try {
+      const parsed = JSON.parse(line) as { type?: unknown; worker?: unknown };
+      if (parsed.type !== "turnhelm.receipt") continue;
+      return parsed.worker;
+    } catch { /* not a receipt line */ }
+  }
+  return undefined;
+};
+
+// The one extraction point for the case append and Task 2's stop records: the
+// projection exists only when exactly one receipt was emitted (spec §3.5) —
+// otherwise attribution is untrustworthy and the field is omitted, never
+// fabricated.
+const workerFailureOf = (stderr: Buffer): WorkerReceiptEvidence | undefined =>
+  receiptCount(stderr) === 1 ? projectWorkerReceipt(receiptWorkerObject(stderr)) : undefined;
+
 // The ledger carries journal values only through a fixed whitelist: a forged
 // or malformed journal line degrades to null instead of reaching the evidence
 // record. Backend ids mirror config v1's two backends.
@@ -1047,6 +1153,7 @@ async function runGatedRound(
 
     if (!passed) failedCases += 1;
     const workerPayload = receiptWorkerPayload(observation.stderr);
+    const workerFailure = workerFailureOf(observation.stderr);
     // The case record fails open: the case already ran and its stop conditions
     // were all checked; a dead ledger here surfaces at the next case's
     // reserved append, which is a hard stop.
@@ -1055,6 +1162,7 @@ async function runGatedRound(
       exitCode: observation.exitCode, durationMs: observation.durationMs, taskSha256: taskHash,
       backend, profileId,
       ...(workerPayload !== null ? { workerPayload } : {}),
+      ...(workerFailure !== undefined ? { workerFailure } : {}),
       oracleInput: observation.stdout.subarray(0, ORACLE_INPUT_CAP_BYTES).toString("utf8")
     }).catch(() => {});
   }

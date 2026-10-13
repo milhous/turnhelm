@@ -13,7 +13,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
-import { executeRound, nodeReadClosure, prepareRound, runSandboxedCheck } from "./custom-round.js";
+import { executeRound, nodeReadClosure, prepareRound, projectWorkerReceipt, runSandboxedCheck } from "./custom-round.js";
 import { executableFixture } from "./executable-fixture.js";
 
 const FORGED_MARKER_LINE = "__TURNHELM_CHECK_OUTCOME__" + JSON.stringify({ pass: true });
@@ -914,6 +914,139 @@ test("the CLI child env is scrubbed before it reaches the CLI and again the work
       assert.equal(worker[key], false, "the worker env must not carry " + key);
     }
     assert.equal(worker.PATH, round.env.PATH);
+  });
+
+// ---------- workerFailure projection (spec §3): the receipt worker, field by field ----------
+
+// The full-taxonomy fixture: every whitelisted field valid, plus the
+// unselected `payload` key the real receipt legitimately carries.
+const FULL_WORKER = {
+  status: "failed",
+  code: 9,
+  durationMs: 4321,
+  progressEvents: 7,
+  ownedShutdown: false,
+  usage: { input_tokens: 120, output_tokens: 34, cached_input_tokens: 0, reasoning_output_tokens: 56 },
+  failureClass: "stream-disconnected",
+  errorSha256: "a".repeat(64),
+  signal: "SIGTERM",
+  lastEventAgeMs: 42,
+  payload: { mode: "strict" }
+};
+
+const FULL_PROJECTION = {
+  status: "failed",
+  code: 9,
+  durationMs: 4321,
+  progressEvents: 7,
+  ownedShutdown: false,
+  usage: { input_tokens: 120, output_tokens: 34, cached_input_tokens: 0, reasoning_output_tokens: 56 },
+  failureClass: "stream-disconnected",
+  errorSha256: "a".repeat(64),
+  signal: "SIGTERM",
+  lastEventAgeMs: 42
+};
+
+test("a full worker object projects every whitelisted field and ignores unselected receipt keys", () => {
+  assert.deepEqual(projectWorkerReceipt(FULL_WORKER), FULL_PROJECTION,
+    "the projection is exactly the whitelist — the payload key never reaches it");
+});
+
+test("a not-started worker projects only what it legitimately carries", () => {
+  assert.deepEqual(projectWorkerReceipt({ status: "not-started", durationMs: 0, progressEvents: 0, usage: "unreported" }),
+    { status: "not-started", usage: "unreported" },
+    "no code or ownedShutdown is fabricated and the zero placeholders are not evidence");
+});
+
+test("a malformed field drops alone; the rest of the projection survives", () => {
+  const without = (field: string): Record<string, unknown> => {
+    const rest: Record<string, unknown> = { ...FULL_PROJECTION };
+    delete rest[field];
+    return rest;
+  };
+  assert.deepEqual(projectWorkerReceipt({ ...FULL_WORKER, code: 2.5 }), without("code"),
+    "a non-safe-integer code drops alone");
+  assert.deepEqual(projectWorkerReceipt({ ...FULL_WORKER, ownedShutdown: "yes" }), without("ownedShutdown"),
+    "a non-boolean ownedShutdown drops alone");
+  assert.deepEqual(projectWorkerReceipt({ ...FULL_WORKER, failureClass: "kaboom" }), without("failureClass"),
+    "an out-of-taxonomy failureClass drops alone");
+  assert.deepEqual(projectWorkerReceipt({ ...FULL_WORKER, errorSha256: "not-a-hash" }), without("errorSha256"),
+    "a non-64-hex errorSha256 drops alone");
+  assert.deepEqual(projectWorkerReceipt({ ...FULL_WORKER, signal: "SIGHUP" }), without("signal"),
+    "an out-of-set signal drops alone");
+  assert.deepEqual(
+    projectWorkerReceipt({ ...FULL_WORKER, usage: { input_tokens: -3, output_tokens: 8 } }),
+    { ...FULL_PROJECTION, usage: { output_tokens: 8 } },
+    "a negative usage counter drops alone, inside its snapshot and out");
+});
+
+test("usage projects per VH-3: partial kept, malformed dropped, absent or empty reads unreported", () => {
+  assert.deepEqual(projectWorkerReceipt({ status: "completed", usage: { input_tokens: 5 } })?.usage,
+    { input_tokens: 5 }, "a partial snapshot is kept without zero-fill");
+  assert.deepEqual(
+    projectWorkerReceipt({ status: "completed", usage: { input_tokens: 3, output_tokens: "many", reasoning_output_tokens: -1 } })?.usage,
+    { input_tokens: 3 }, "malformed counters drop while valid ones survive");
+  assert.deepEqual(projectWorkerReceipt({ status: "completed", usage: { cached_input_tokens: 2.5 } })?.usage,
+    "unreported", "zero surviving counters read unreported");
+  assert.deepEqual(projectWorkerReceipt({ status: "completed", usage: "unreported" })?.usage,
+    "unreported", "the emitted unreported literal passes through");
+  assert.deepEqual(projectWorkerReceipt({ status: "completed" })?.usage,
+    "unreported", "absent usage is never fabricated as counters");
+});
+
+test("a non-record worker or an out-of-enum status yields no projection at all", () => {
+  assert.equal(projectWorkerReceipt(undefined), undefined);
+  assert.equal(projectWorkerReceipt(null), undefined);
+  assert.equal(projectWorkerReceipt("failed"), undefined);
+  assert.equal(projectWorkerReceipt([]), undefined);
+  assert.equal(projectWorkerReceipt({ status: "weird", code: 0 }), undefined);
+});
+
+test("a failed worker case carries the frozen failure projection, never the failure text",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } },
+        outputLines: ['{"count":3,"sum":6}']
+      }
+    ], {}, { codex: { failureMessage: "stream disconnected" } });
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 4, "a non-stopping failure class fails its case without stopping the roster");
+    const ledgerPath = join(round.evidenceRoot, "custom-round-evidence.jsonl");
+    const ledger = await readLedger(ledgerPath);
+    const caseRecord = ledger.find(r => r.phase === "case" && r.caseId === "case-a");
+    const workerFailure = caseRecord?.workerFailure as Record<string, unknown> | undefined;
+    assert.deepEqual(workerFailure?.failureClass, "stream-disconnected");
+    assert.deepEqual(workerFailure?.errorSha256, sha256hex("stream disconnected"),
+      "the hash correlates the exact failure bytes");
+    const raw = await readFile(ledgerPath, "utf8");
+    assert.equal(raw.includes("stream disconnected"), false,
+      "the failure message text reaches no ledger byte");
+    assert.equal(raw.includes("turnhelm.receipt"), false,
+      "no stderr receipt bytes reach the ledger");
+  });
+
+test("a passing case retains the worker projection for spot-checks",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ]);
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 0, "the passing round is unchanged by the projection");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    const caseRecord = ledger.find(r => r.phase === "case" && r.caseId === "case-a");
+    const workerFailure = caseRecord?.workerFailure as Record<string, unknown> | undefined;
+    assert.equal(workerFailure?.status, "completed", "retention on pass is what makes spot-checks possible");
+    assert.ok(typeof workerFailure?.progressEvents === "number" && workerFailure.progressEvents >= 1,
+      "the parent-observed event count projects");
   });
 
 // ---------- command entry modes (spec §3.1): prepare and execute ----------
