@@ -1005,7 +1005,10 @@ async function runGatedRound(
 
   const env = scrubbedCliEnv(options?.env ?? process.env);
   const sandboxExecPath = options?.sandboxExecPath ?? "/usr/bin/sandbox-exec";
-  let failedCases = 0;
+  // Written outcomes (spec §5): an outcome counts only once its case record
+  // is on the ledger, so the completed record and the exit code reconcile
+  // what was actually written, never what was planned.
+  const writtenOutcomes: ("pass" | "failed" | "timeout")[] = [];
   for (const item of manifest.cases) {
     if (signal.aborted) {
       await appendEvidence({ phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
@@ -1207,30 +1210,61 @@ async function runGatedRound(
     // and no oracle input (nothing was judged) — and the roster continues. The
     // case counts as non-pass in the exit tally.
     if (observation.timedOut) {
-      await appendEvidence({
-        phase: "case", caseId: item.id, outcome: "timeout",
-        exitCode: observation.exitCode, durationMs: observation.durationMs, taskSha256: taskHash,
-        backend, profileId,
-        ...(workerFailure !== undefined ? { workerFailure } : {})
-      }).catch(() => {});
-      failedCases += 1;
+      try {
+        await appendEvidence({
+          phase: "case", caseId: item.id, outcome: "timeout",
+          exitCode: observation.exitCode, durationMs: observation.durationMs, taskSha256: taskHash,
+          backend, profileId,
+          ...(workerFailure !== undefined ? { workerFailure } : {})
+        });
+      } catch {
+        await appendEvidence({ phase: "stopped", caseId: item.id, reason: "evidence-io" }).catch(() => {});
+        return 1;
+      }
+      writtenOutcomes.push("timeout");
       continue;
     }
-    if (!passed) failedCases += 1;
     const workerPayload = receiptWorkerPayload(observation.stderr);
-    // The case record fails open: the case already ran and its stop conditions
-    // were all checked; a dead ledger here surfaces at the next case's
-    // reserved append, which is a hard stop.
-    await appendEvidence({
-      phase: "case", caseId: item.id, outcome: passed ? "pass" : "failed",
-      exitCode: observation.exitCode, durationMs: observation.durationMs, taskSha256: taskHash,
-      backend, profileId,
-      ...(workerPayload !== null ? { workerPayload } : {}),
-      ...(workerFailure !== undefined ? { workerFailure } : {}),
-      oracleInput: observation.stdout.subarray(0, ORACLE_INPUT_CAP_BYTES).toString("utf8")
-    }).catch(() => {});
+    // The case record is terminal (spec §5): a ledger that cannot take it has
+    // lost the run's evidence, so the round stops instead of recording the
+    // outcome on faith.
+    try {
+      await appendEvidence({
+        phase: "case", caseId: item.id, outcome: passed ? "pass" : "failed",
+        exitCode: observation.exitCode, durationMs: observation.durationMs, taskSha256: taskHash,
+        backend, profileId,
+        ...(workerPayload !== null ? { workerPayload } : {}),
+        ...(workerFailure !== undefined ? { workerFailure } : {}),
+        oracleInput: observation.stdout.subarray(0, ORACLE_INPUT_CAP_BYTES).toString("utf8")
+      });
+    } catch {
+      await appendEvidence({ phase: "stopped", caseId: item.id, reason: "evidence-io" }).catch(() => {});
+      return 1;
+    }
+    writtenOutcomes.push(passed ? "pass" : "failed");
   }
-  return failedCases === 0 ? 0 : 4;
+  // A signal discovered after the last append still settles through the
+  // signal ladder (spec §5), never as a would-be 0/4.
+  if (signal.aborted) {
+    await appendEvidence({ phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
+    return terminated() ? 143 : 130;
+  }
+  // The completed record reconciles what was actually written: its counts
+  // come from writtenOutcomes, so a stopped run (which returns above) never
+  // appends one, and failed + timedOut never exceed the written cases.
+  const failed = writtenOutcomes.filter(outcome => outcome === "failed").length;
+  const timedOut = writtenOutcomes.filter(outcome => outcome === "timeout").length;
+  try {
+    await appendEvidence({
+      phase: "completed", outcome: failed + timedOut > 0 ? "fail" : "pass",
+      cases: manifest.cases.length, failed, timedOut
+    });
+  } catch {
+    return 1;
+  }
+  return writtenOutcomes.length === manifest.cases.length && writtenOutcomes.every(outcome => outcome === "pass")
+    ? 0
+    : 4;
 }
 
 // ---------- command entry (spec §3.1): prepare and execute modes ----------
