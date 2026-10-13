@@ -5,16 +5,16 @@
   "status": "pass",
   "type": "workflow",
   "quality": "showcase",
-  "startedAt": "2026-10-13T08:54:01.091Z",
+  "startedAt": "2026-10-13T23:30:13.059Z",
   "specification": {
-    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261013-165202/candidate.json",
-    "sha256": "6ea8b502bd6f1afb8b2a8789b0f6c08cbde92961092223414ed0ff6e49e7a155",
-    "bytes": 8693
+    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/candidate.json",
+    "sha256": "206128b093f1ba9038fb5a95575242de7f9caf10eaa19728c1b1e4896e711314",
+    "bytes": 9000
   },
   "artifact": {
-    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261013-165202/turnhelm-run-workflow.html",
-    "sha256": "b8c23da80eed008879c8a50f380cd21c55b01c72e3d59666c85dc2dd87eec67c",
-    "bytes": 764917
+    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html",
+    "sha256": "48ef67b6d452f65dbb23f2c08cec7f020d47a6ba8e05c4d3bdfdd326385cbdd8",
+    "bytes": 765155
   },
   "stages": {
     "validate": {
@@ -27,8 +27,8 @@
         "/Users/zhangxiao/.agents/skills/archify/bin/archify.mjs",
         "deliver",
         "workflow",
-        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261013-165202/candidate.json",
-        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261013-165202/turnhelm-run-workflow.html",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/candidate.json",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html",
         "--quality",
         "showcase",
         "--repo-root",
@@ -40,8 +40,8 @@
         "ok": true,
         "command": "validate",
         "specification": {
-          "sha256": "6ea8b502bd6f1afb8b2a8789b0f6c08cbde92961092223414ed0ff6e49e7a155",
-          "bytes": 8693
+          "sha256": "206128b093f1ba9038fb5a95575242de7f9caf10eaa19728c1b1e4896e711314",
+          "bytes": 9000
         },
         "validation": {
           "checksPassed": 9,
@@ -56,14 +56,14 @@
     "deliver": {
       "status": "pass",
       "exitCode": 0,
-      "durationMs": 343,
+      "durationMs": 384,
       "command": [
         "/opt/homebrew/Cellar/node/26.5.0/bin/node",
         "/Users/zhangxiao/.agents/skills/archify/bin/archify.mjs",
         "deliver",
         "workflow",
-        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261013-165202/candidate.json",
-        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261013-165202/turnhelm-run-workflow.html",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/candidate.json",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html",
         "--quality",
         "showcase",
         "--repo-root",
@@ -72,19 +72,19 @@
       ],
       "receipt": {
         "schemaVersion": 1,
-        "receiptId": "5dfbad10-4443-46ae-bb9f-1518d63e1b22",
+        "receiptId": "826e38a8-5e9b-4f20-b0bc-90d882ba6dff",
         "ok": true,
         "command": "deliver",
         "type": "workflow",
-        "input": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261013-165202/candidate.json",
-        "output": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261013-165202/turnhelm-run-workflow.html",
+        "input": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/candidate.json",
+        "output": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html",
         "specification": {
-          "sha256": "6ea8b502bd6f1afb8b2a8789b0f6c08cbde92961092223414ed0ff6e49e7a155",
-          "bytes": 8693
+          "sha256": "206128b093f1ba9038fb5a95575242de7f9caf10eaa19728c1b1e4896e711314",
+          "bytes": 9000
         },
         "artifact": {
-          "sha256": "b8c23da80eed008879c8a50f380cd21c55b01c72e3d59666c85dc2dd87eec67c",
-          "bytes": 764917
+          "sha256": "48ef67b6d452f65dbb23f2c08cec7f020d47a6ba8e05c4d3bdfdd326385cbdd8",
+          "bytes": 765155
         },
         "validation": {
           "checksPassed": 9,
@@ -97,8 +97,8 @@
         "evidence": {
           "verified": true,
           "repository": "git@github.com:milhous/turnhelm",
-          "revision": "f713e08a754e86a5361100f27dcc041b26fdc2c0",
-          "references": 14,
+          "revision": "733753eb2fe0762176c695410ce6a51fba23a8d3",
+          "references": 15,
           "linkMode": "local-only"
         },
         "update": {
@@ -117,20 +117,20 @@
     "check": {
       "status": "pass",
       "exitCode": 0,
-      "durationMs": 306,
+      "durationMs": 119,
       "command": [
         "/opt/homebrew/Cellar/node/26.5.0/bin/node",
         "/Users/zhangxiao/.agents/skills/archify/bin/archify.mjs",
         "check",
-        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261013-165202/turnhelm-run-workflow.html",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html",
         "--require-provenance"
       ],
       "receipt": {
         "ok": true,
-        "file": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261013-165202/turnhelm-run-workflow.html",
+        "file": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html",
         "artifact": {
-          "sha256": "b8c23da80eed008879c8a50f380cd21c55b01c72e3d59666c85dc2dd87eec67c",
-          "bytes": 764917
+          "sha256": "48ef67b6d452f65dbb23f2c08cec7f020d47a6ba8e05c4d3bdfdd326385cbdd8",
+          "bytes": 765155
         },
         "checks": [
           {
@@ -197,7 +197,7 @@
             "containerBorderRuns": 0,
             "labelRouteClearanceIssues": 0,
             "labelCanvasOverflowIssues": 0,
-            "minLabelRouteClearance": 30.4,
+            "minLabelRouteClearance": 18.4,
             "desktopReadabilityIssues": 0,
             "viewportHeightIssues": 0,
             "minProjectedNodeTextPx": 6.695266272189349,
@@ -260,18 +260,18 @@
           "issues": []
         },
         "provenance": "current",
-        "deliveryReceiptId": "5dfbad10-4443-46ae-bb9f-1518d63e1b22"
+        "deliveryReceiptId": "826e38a8-5e9b-4f20-b0bc-90d882ba6dff"
       }
     },
     "browser-check": {
       "status": "pass",
       "exitCode": 0,
-      "durationMs": 1649,
+      "durationMs": 1049,
       "command": [
         "/opt/homebrew/Cellar/node/26.5.0/bin/node",
         "/Users/zhangxiao/.agents/skills/archify/bin/archify.mjs",
         "browser-check",
-        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261013-165202/turnhelm-run-workflow.html",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html",
         "--json",
         "--require-provenance"
       ],
@@ -284,11 +284,11 @@
         "status": "pass",
         "visualReview": "not-requested",
         "provenance": "current",
-        "deliveryReceiptId": "5dfbad10-4443-46ae-bb9f-1518d63e1b22",
+        "deliveryReceiptId": "826e38a8-5e9b-4f20-b0bc-90d882ba6dff",
         "artifact": {
-          "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261013-165202/turnhelm-run-workflow.html",
-          "sha256": "b8c23da80eed008879c8a50f380cd21c55b01c72e3d59666c85dc2dd87eec67c",
-          "bytes": 764917
+          "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html",
+          "sha256": "48ef67b6d452f65dbb23f2c08cec7f020d47a6ba8e05c4d3bdfdd326385cbdd8",
+          "bytes": 765155
         },
         "state": {
           "detail": "read",
@@ -1589,13 +1589,13 @@
   },
   "diagnostics": [],
   "evidence": {
-    "receipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261013-165202/turnhelm-run-workflow.finalize.json",
-    "summaryReceipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261013-165202/turnhelm-run-workflow.finalize-summary.json",
-    "browserCheckReceipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261013-165202/turnhelm-run-workflow.browser-check.json"
+    "receipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.finalize.json",
+    "summaryReceipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.finalize-summary.json",
+    "browserCheckReceipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.browser-check.json"
   },
   "visualReview": "not-requested",
-  "finishedAt": "2026-10-13T08:54:03.542Z",
-  "durationMs": 2450,
+  "finishedAt": "2026-10-13T23:30:14.729Z",
+  "durationMs": 1669,
   "update": {
     "status": "current",
     "installedVersion": "3.0.1",

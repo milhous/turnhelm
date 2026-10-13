@@ -5,16 +5,16 @@
   "status": "pass",
   "type": "architecture",
   "quality": "showcase",
-  "startedAt": "2026-10-13T08:53:40.925Z",
+  "startedAt": "2026-10-13T23:30:01.785Z",
   "specification": {
-    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/candidate.json",
-    "sha256": "24a7479c8808242c1386336b9619ef2973071d6fc8feb2ee9d1545e3fb2a3cbb",
-    "bytes": 9331
+    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/candidate.json",
+    "sha256": "77ed7d8d3e7b05be1ae7441e38275feb30dc3509f3c539fd39aaeef5c6504344",
+    "bytes": 10181
   },
   "artifact": {
-    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.html",
-    "sha256": "5865941087573c3278719d6e3c50d1c4d568b1c05d74f4bb65a254de63ad64d8",
-    "bytes": 767946
+    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/turnhelm-architecture.html",
+    "sha256": "b276a7a141a04f9f2366ce146c4f8acdf0df31d46d5ad280f6cb4f10dab71e68",
+    "bytes": 768041
   },
   "stages": {
     "validate": {
@@ -27,8 +27,8 @@
         "/Users/zhangxiao/.agents/skills/archify/bin/archify.mjs",
         "deliver",
         "architecture",
-        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/candidate.json",
-        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.html",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/candidate.json",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/turnhelm-architecture.html",
         "--quality",
         "showcase",
         "--repo-root",
@@ -40,8 +40,8 @@
         "ok": true,
         "command": "validate",
         "specification": {
-          "sha256": "24a7479c8808242c1386336b9619ef2973071d6fc8feb2ee9d1545e3fb2a3cbb",
-          "bytes": 9331
+          "sha256": "77ed7d8d3e7b05be1ae7441e38275feb30dc3509f3c539fd39aaeef5c6504344",
+          "bytes": 10181
         },
         "validation": {
           "checksPassed": 9,
@@ -56,14 +56,14 @@
     "deliver": {
       "status": "pass",
       "exitCode": 0,
-      "durationMs": 293,
+      "durationMs": 292,
       "command": [
         "/opt/homebrew/Cellar/node/26.5.0/bin/node",
         "/Users/zhangxiao/.agents/skills/archify/bin/archify.mjs",
         "deliver",
         "architecture",
-        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/candidate.json",
-        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.html",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/candidate.json",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/turnhelm-architecture.html",
         "--quality",
         "showcase",
         "--repo-root",
@@ -72,19 +72,19 @@
       ],
       "receipt": {
         "schemaVersion": 1,
-        "receiptId": "eaea9c80-0228-4362-a4f9-273afda08293",
+        "receiptId": "d3b2d093-06ee-4ee7-8c43-5f85a5445110",
         "ok": true,
         "command": "deliver",
         "type": "architecture",
-        "input": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/candidate.json",
-        "output": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.html",
+        "input": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/candidate.json",
+        "output": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/turnhelm-architecture.html",
         "specification": {
-          "sha256": "24a7479c8808242c1386336b9619ef2973071d6fc8feb2ee9d1545e3fb2a3cbb",
-          "bytes": 9331
+          "sha256": "77ed7d8d3e7b05be1ae7441e38275feb30dc3509f3c539fd39aaeef5c6504344",
+          "bytes": 10181
         },
         "artifact": {
-          "sha256": "5865941087573c3278719d6e3c50d1c4d568b1c05d74f4bb65a254de63ad64d8",
-          "bytes": 767946
+          "sha256": "b276a7a141a04f9f2366ce146c4f8acdf0df31d46d5ad280f6cb4f10dab71e68",
+          "bytes": 768041
         },
         "validation": {
           "checksPassed": 9,
@@ -97,7 +97,7 @@
         "evidence": {
           "verified": true,
           "repository": "git@github.com:milhous/turnhelm",
-          "revision": "f713e08a754e86a5361100f27dcc041b26fdc2c0",
+          "revision": "733753eb2fe0762176c695410ce6a51fba23a8d3",
           "references": 19,
           "linkMode": "local-only"
         },
@@ -117,20 +117,20 @@
     "check": {
       "status": "pass",
       "exitCode": 0,
-      "durationMs": 133,
+      "durationMs": 154,
       "command": [
         "/opt/homebrew/Cellar/node/26.5.0/bin/node",
         "/Users/zhangxiao/.agents/skills/archify/bin/archify.mjs",
         "check",
-        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.html",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/turnhelm-architecture.html",
         "--require-provenance"
       ],
       "receipt": {
         "ok": true,
-        "file": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.html",
+        "file": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/turnhelm-architecture.html",
         "artifact": {
-          "sha256": "5865941087573c3278719d6e3c50d1c4d568b1c05d74f4bb65a254de63ad64d8",
-          "bytes": 767946
+          "sha256": "b276a7a141a04f9f2366ce146c4f8acdf0df31d46d5ad280f6cb4f10dab71e68",
+          "bytes": 768041
         },
         "checks": [
           {
@@ -250,7 +250,7 @@
                   "id": "conOutput",
                   "from": "codexWorker",
                   "to": "parentSession",
-                  "label": "stdout · final agent message",
+                  "label": "stdout · classified payload",
                   "collectionIndex": 9,
                   "artifactIndex": 10
                 },
@@ -312,18 +312,18 @@
           "issues": []
         },
         "provenance": "current",
-        "deliveryReceiptId": "eaea9c80-0228-4362-a4f9-273afda08293"
+        "deliveryReceiptId": "d3b2d093-06ee-4ee7-8c43-5f85a5445110"
       }
     },
     "browser-check": {
       "status": "pass",
       "exitCode": 0,
-      "durationMs": 5530,
+      "durationMs": 1263,
       "command": [
         "/opt/homebrew/Cellar/node/26.5.0/bin/node",
         "/Users/zhangxiao/.agents/skills/archify/bin/archify.mjs",
         "browser-check",
-        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.html",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/turnhelm-architecture.html",
         "--json",
         "--require-provenance"
       ],
@@ -336,11 +336,11 @@
         "status": "pass",
         "visualReview": "not-requested",
         "provenance": "current",
-        "deliveryReceiptId": "eaea9c80-0228-4362-a4f9-273afda08293",
+        "deliveryReceiptId": "d3b2d093-06ee-4ee7-8c43-5f85a5445110",
         "artifact": {
-          "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.html",
-          "sha256": "5865941087573c3278719d6e3c50d1c4d568b1c05d74f4bb65a254de63ad64d8",
-          "bytes": 767946
+          "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/turnhelm-architecture.html",
+          "sha256": "b276a7a141a04f9f2366ce146c4f8acdf0df31d46d5ad280f6cb4f10dab71e68",
+          "bytes": 768041
         },
         "state": {
           "detail": "read",
@@ -1029,13 +1029,13 @@
   },
   "diagnostics": [],
   "evidence": {
-    "receipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.finalize.json",
-    "summaryReceipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.finalize-summary.json",
-    "browserCheckReceipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.browser-check.json"
+    "receipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/turnhelm-architecture.finalize.json",
+    "summaryReceipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/turnhelm-architecture.finalize-summary.json",
+    "browserCheckReceipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/turnhelm-architecture.browser-check.json"
   },
   "visualReview": "not-requested",
-  "finishedAt": "2026-10-13T08:53:47.025Z",
-  "durationMs": 6100,
+  "finishedAt": "2026-10-13T23:30:03.631Z",
+  "durationMs": 1846,
   "update": {
     "status": "current",
     "installedVersion": "3.0.1",

@@ -6,11 +6,11 @@
   "status": "pass",
   "visualReview": "pending",
   "provenance": "current",
-  "deliveryReceiptId": "eaea9c80-0228-4362-a4f9-273afda08293",
+  "deliveryReceiptId": "d3b2d093-06ee-4ee7-8c43-5f85a5445110",
   "artifact": {
-    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.html",
-    "sha256": "5865941087573c3278719d6e3c50d1c4d568b1c05d74f4bb65a254de63ad64d8",
-    "bytes": 767946
+    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/turnhelm-architecture.html",
+    "sha256": "b276a7a141a04f9f2366ce146c4f8acdf0df31d46d5ad280f6cb4f10dab71e68",
+    "bytes": 768041
   },
   "state": {
     "detail": "read",
@@ -896,7 +896,7 @@
     "contactSheet": "turnhelm-architecture.visual-check.html"
   },
   "sidecars": {
-    "directory": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/visual-check",
+    "directory": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/visual-check",
     "receipt": "turnhelm-architecture.visual-check.json",
     "contactSheet": "turnhelm-architecture.visual-check.html",
     "files": [
@@ -906,23 +906,23 @@
         "file": "turnhelm-architecture.visual-check.html"
       },
       {
-        "sha256": "84aadf151d91604ecb8f875245872fd6ad39cefce6c2fa4426ee6e957160df1a",
-        "bytes": 99802,
+        "sha256": "f5d98894e265c32ab450608b58e38b11926964a8ec1a3ca1ebc8677c3801e93c",
+        "bytes": 99988,
         "file": "turnhelm-architecture.visual-check.1440x900.light.png"
       },
       {
-        "sha256": "e6e01de01dd07f75bcc3ed316ad674edbee549aeff87ccc8737314c32efc3fa0",
-        "bytes": 107402,
+        "sha256": "6b38e048ec152a72b23bc051715d67b6eaecf5670ec3629f09e10490e5ee51e5",
+        "bytes": 107551,
         "file": "turnhelm-architecture.visual-check.1440x900.dark.png"
       },
       {
-        "sha256": "baec80e2a2bf71ce1b8a22a697daf04d55037d74039c0ef25e25fad277f46a90",
-        "bytes": 169974,
+        "sha256": "643c329c4cdaf8c3d3dc36d4dfa4b39f55b17b68077c3caaedbae0eaa6650e7f",
+        "bytes": 169758,
         "file": "turnhelm-architecture.visual-check.2048x1320.light.png"
       },
       {
-        "sha256": "a4dec926b5f9fa576a4d5d6afc6532b70d277d1cb59349e3aef035084ee4c832",
-        "bytes": 184467,
+        "sha256": "72a6d894e90c5fcf9d38f3b97c133de81802f2bc6bd9bfc3d6b69c2f93eaf80c",
+        "bytes": 184167,
         "file": "turnhelm-architecture.visual-check.2048x1320.dark.png"
       }
     ]

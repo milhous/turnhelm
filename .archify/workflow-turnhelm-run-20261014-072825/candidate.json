@@ -3,12 +3,12 @@
   "diagram_type": "workflow",
   "meta": {
     "title": "Turnhelm run — Routing Workflow",
-    "output": ".archify/workflow-turnhelm-run-20261013-165202/turnhelm-run-workflow.html",
+    "output": ".archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html",
     "quality_profile": "showcase",
     "repository": {
       "url": "git@github.com:milhous/turnhelm.git",
       "link_mode": "local-only",
-      "revision": "f713e08a754e86a5361100f27dcc041b26fdc2c0"
+      "revision": "733753eb2fe0762176c695410ce6a51fba23a8d3"
     },
     "viewBox": [
       1014,
@@ -202,15 +202,21 @@
       "sources": [
         {
           "path": "src/codex.ts",
-          "line": 27,
-          "end_line": 31,
+          "line": 33,
+          "end_line": 39,
           "label": "sandboxed exec"
         },
         {
           "path": "src/codex.ts",
-          "line": 219,
-          "end_line": 221,
-          "label": "final message emitted once"
+          "line": 229,
+          "end_line": 238,
+          "label": "final message classified, emitted once"
+        },
+        {
+          "path": "src/payload.ts",
+          "line": 47,
+          "end_line": 54,
+          "label": "emission classifier"
         }
       ],
       "width": 150
@@ -232,7 +238,8 @@
         },
         {
           "path": "src/cli.ts",
-          "line": 85,
+          "line": 81,
+          "end_line": 87,
           "label": "worker exit preserved"
         }
       ],
@@ -346,7 +353,7 @@
       "id": "edgeWorkerOut",
       "from": "worker",
       "to": "receipt",
-      "label": "final message · exit code",
+      "label": "classified payload · exit code",
       "role": "return"
     },
     {
@@ -387,7 +394,7 @@
         "At most one Codex worker per run",
         "Sandbox read-only unless --write",
         "Child env strips credentials; ZDOTDIR redirects to the managed root; TURNHELM_MANAGED_CHILD=1 blocks recursion",
-        "Stdout carries at most one message — the final agent message of a completed run; failed or cancelled runs initiate no write"
+        "Stdout carries at most one message — the final agent message of a completed run, classified at emission as strict, extracted (inert trailer dropped, trailerBytes recorded), conflict, or unstructured; failed or cancelled runs initiate no write"
       ]
     }
   ]

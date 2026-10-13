@@ -530,21 +530,22 @@ are historical design records, not current invocation instructions.
 Interactive, evidence-pinned diagrams live under [`.archify/`](.archify/).
 GitHub Markdown cannot embed interactive HTML, so the static captures below
 link to the artifacts; open the HTML files locally (for example
-`open .archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.html`)
+`open .archify/architecture-turnhelm-20261014-072825/turnhelm-architecture.html`)
 for the interactive versions with zoom, guided views, and source links.
 
-[![Architecture diagram](.archify/architecture-turnhelm-20261013-165202/visual-check/turnhelm-architecture.visual-check.1440x900.light.png)](.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.html)
+[![Architecture diagram](.archify/architecture-turnhelm-20261014-072825/visual-check/turnhelm-architecture.visual-check.1440x900.light.png)](.archify/architecture-turnhelm-20261014-072825/turnhelm-architecture.html)
 
-[Architecture](.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.html)
+[Architecture](.archify/architecture-turnhelm-20261014-072825/turnhelm-architecture.html)
 — components, the host-loopback boundary, and trust gates including the
 ZDOTDIR managed-root redirect.
 
-[![Routing workflow diagram](.archify/workflow-turnhelm-run-20261013-165202/visual-check/turnhelm-run-workflow.visual-check.1440x900.light.png)](.archify/workflow-turnhelm-run-20261013-165202/turnhelm-run-workflow.html)
+[![Routing workflow diagram](.archify/workflow-turnhelm-run-20261014-072825/visual-check/turnhelm-run-workflow.visual-check.1440x900.light.png)](.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html)
 
-[Routing workflow](.archify/workflow-turnhelm-run-20261013-165202/turnhelm-run-workflow.html)
-— one `turnhelm run` from task submission to the final-message stdout
+[Routing workflow](.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html)
+— one `turnhelm run` from task submission to the classified-payload stdout
 contract and receipt, including rejection and fail-closed paths.
 
-Both diagrams are pinned at `f713e08`, the revision that introduced the
-final-message-only worker stdout contract; superseded `.archify/`
-generations live in git history.
+Both diagrams are pinned at `733753e`, which adds the structured payload
+emission contract (`src/payload.ts` modes: strict, extracted, conflict,
+unstructured) on top of the earlier final-message-only stdout contract;
+superseded `.archify/` generations live in git history.

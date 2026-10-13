@@ -6,11 +6,11 @@
   "status": "pass",
   "visualReview": "not-requested",
   "provenance": "current",
-  "deliveryReceiptId": "5dfbad10-4443-46ae-bb9f-1518d63e1b22",
+  "deliveryReceiptId": "826e38a8-5e9b-4f20-b0bc-90d882ba6dff",
   "artifact": {
-    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261013-165202/turnhelm-run-workflow.html",
-    "sha256": "b8c23da80eed008879c8a50f380cd21c55b01c72e3d59666c85dc2dd87eec67c",
-    "bytes": 764917
+    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html",
+    "sha256": "48ef67b6d452f65dbb23f2c08cec7f020d47a6ba8e05c4d3bdfdd326385cbdd8",
+    "bytes": 765155
   },
   "state": {
     "detail": "read",
