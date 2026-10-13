@@ -946,6 +946,19 @@ const baselineDrifted = async (manifest: RoundManifest): Promise<boolean> => {
   return false;
 };
 
+// Identity before spend (spec §3.2(1)): canonical path plus dev/ino — the
+// check that catches same-path replacement. One shared gate serves both the
+// pre-launch check and the settled-tree verification (spec §4): hashTree
+// proves content only, so a root rebuilt with byte-identical content is
+// still a replacement.
+const rootIdentityMatches = async (
+  root: Readonly<{ canonical: string; dev: number; ino: number }>
+): Promise<boolean> => {
+  const info = await stat(root.canonical).catch(() => null);
+  return info !== null && info.dev === root.dev && info.ino === root.ino
+    && await realpath(root.canonical).catch(() => "") === root.canonical;
+};
+
 async function runGatedRound(
   manifestPath: string,
   approvedSha256: string,
@@ -1012,10 +1025,7 @@ async function runGatedRound(
     // this gate).
     const frozenTree = new Map(Object.entries(item.tree));
     let stopReason: string | null = null;
-    const rootInfo = await stat(item.root.canonical).catch(() => null);
-    if (rootInfo === null || rootInfo.dev !== item.root.dev || rootInfo.ino !== item.root.ino) {
-      stopReason = "root-identity";
-    } else if (await realpath(item.root.canonical).catch(() => "") !== item.root.canonical) {
+    if (!(await rootIdentityMatches(item.root))) {
       stopReason = "root-identity";
     } else {
       for (const file of item.files) {
@@ -1068,16 +1078,32 @@ async function runGatedRound(
       await appendEvidence({ phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
       return terminated() ? 143 : 130;
     }
-    // Budget breaches are integrity stops (spec §3.3): grading never reads a
-    // capped or truncated stream.
-    if (observation.timedOut || observation.outputOverflow) {
+    // The projection for every stop this case can record, computed once:
+    // workerFailureOf omits it unless exactly one parseable receipt exists.
+    const workerFailure = workerFailureOf(observation.stderr);
+    // Unverified cleanup (spec §4): the supervisor may release the pipes
+    // without a kill while the CLI still lives; a possibly-live CLI means no
+    // further reservation may ever happen.
+    if (!observation.cliClosed) {
       await appendEvidence({
-        phase: "stopped", caseId: item.id, reason: observation.timedOut ? "timeout" : "output-cap"
+        phase: "stopped", caseId: item.id, reason: "cleanup-unverified",
+        ...(workerFailure !== undefined ? { workerFailure } : {})
+      }).catch(() => {});
+      return 1;
+    }
+    // Budget breaches are integrity stops (spec §3.3): grading never reads a
+    // capped or truncated stream. Overflow also raises the timeout flag, so
+    // it is decided first — a capped stream must never pose as a timeout.
+    if (observation.outputOverflow) {
+      await appendEvidence({
+        phase: "stopped", caseId: item.id, reason: "output-cap",
+        ...(workerFailure !== undefined ? { workerFailure } : {})
       }).catch(() => {});
       return 1;
     }
     // Exactly one receipt (spec §3.5): a run that receipted zero or several
-    // times has no trustworthy attribution, so its stdout is never graded.
+    // times has no trustworthy attribution, so its stdout is never graded and
+    // the stop record carries no projection by definition.
     if (receiptCount(observation.stderr) !== 1) {
       await appendEvidence({ phase: "stopped", caseId: item.id, reason: "receipt" }).catch(() => {});
       return 1;
@@ -1087,7 +1113,16 @@ async function runGatedRound(
     // case would spend against the same broken boundary.
     const failureClass = receiptFailureClass(observation.stderr);
     if (failureClass !== null && STOP_FAILURE_CLASSES.has(failureClass)) {
-      await appendEvidence({ phase: "stopped", caseId: item.id, reason: "worker-" + failureClass }).catch(() => {});
+      await appendEvidence({
+        phase: "stopped", caseId: item.id, reason: "worker-" + failureClass,
+        ...(workerFailure !== undefined ? { workerFailure } : {})
+      }).catch(() => {});
+      return 1;
+    }
+    // A wall-clock timeout is an integrity stop (spec §3.3); it sits below
+    // the receipt and stop-class gates so their evidence is still collected.
+    if (observation.timedOut) {
+      await appendEvidence({ phase: "stopped", caseId: item.id, reason: "timeout" }).catch(() => {});
       return 1;
     }
 
@@ -1145,16 +1180,28 @@ async function runGatedRound(
     // Integrity over semantics (spec §3.3): every completed case re-verifies
     // its consumer tree before the outcome counts — pass or fail — so a worker
     // that wrote outside its allowance stops the round even when its output
-    // graded fine. An unfreezable tree (new symlink, oversize) is drift.
+    // graded fine. Identity re-checks at the same gate (spec §4): hashTree
+    // proves content only, so a root rebuilt with byte-identical content is
+    // still a replacement. An unfreezable tree (new symlink, oversize) is
+    // drift.
+    if (!(await rootIdentityMatches(item.root))) {
+      await appendEvidence({
+        phase: "stopped", caseId: item.id, reason: "root-identity",
+        ...(workerFailure !== undefined ? { workerFailure } : {})
+      }).catch(() => {});
+      return 1;
+    }
     const settledTree = await hashTree(item.root.canonical);
     if (settledTree === null || treeChangedOutside(frozenTree, settledTree, item.allowedChanges) !== null) {
-      await appendEvidence({ phase: "stopped", caseId: item.id, reason: "tree-drift" }).catch(() => {});
+      await appendEvidence({
+        phase: "stopped", caseId: item.id, reason: "tree-drift",
+        ...(workerFailure !== undefined ? { workerFailure } : {})
+      }).catch(() => {});
       return 1;
     }
 
     if (!passed) failedCases += 1;
     const workerPayload = receiptWorkerPayload(observation.stderr);
-    const workerFailure = workerFailureOf(observation.stderr);
     // The case record fails open: the case already ran and its stop conditions
     // were all checked; a dead ledger here surfaces at the next case's
     // reserved append, which is a hard stop.
