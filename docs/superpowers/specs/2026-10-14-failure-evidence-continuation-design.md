@@ -42,7 +42,7 @@ Exit semantics after this spec: 0 complete all-pass; 1 stopped/incomplete or usa
 
 ## 3. Receipt projection on case and stop records (FE-1)
 
-Every `case` evidence record — and every integrity-stop record written after the CLI ran (`cleanup-unverified`, `output-cap`, `receipt`, `worker-<class>`, `tree-drift`) — gains `workerFailure`: a projection of the run's single receipt `worker` object (for stop records, when exactly one parseable receipt exists on the captured stderr; otherwise the field is omitted, never fabricated):
+Every `case` evidence record — and every integrity-stop record written after the CLI ran (`cleanup-unverified`, `output-cap`, `worker-<class>`, `tree-drift`) — gains `workerFailure`: a projection of the run's single receipt `worker` object (for stop records, when exactly one parseable receipt exists on the captured stderr; otherwise the field is omitted, never fabricated):
 
 ```ts
 type WorkerReceiptEvidence = Readonly<{

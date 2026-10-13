@@ -472,7 +472,9 @@ settled-tree gate its case record is appended and the roster continues to the
 next reservation. Every case record (pass, failed, or timeout) and the
 post-CLI stop records (`cleanup-unverified`, `output-cap`, `worker-<class>`,
 `tree-drift`, `root-identity`; not the `receipt` stop, which has no single
-receipt to project) carry a `workerFailure`: a per-field projection of the
+receipt to project) carry a `workerFailure` whenever the lone receipt's
+worker object is projectable (absent, non-record, or an out-of-enum status
+omits the field, never fabricates it): a per-field projection of the
 run's single receipt worker object — a frozen status enum plus optional
 `code`, `durationMs`, `progressEvents`, `ownedShutdown`, `usage`,
 `failureClass`, `errorSha256`, `signal`, and `lastEventAgeMs`. Unselected
