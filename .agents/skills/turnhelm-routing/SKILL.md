@@ -1,6 +1,6 @@
 ---
 name: turnhelm-routing
-description: Use when an agent needs to prepare or inspect a Turnhelm project, execute an authorized task in a separate model/effort-routed Codex child, or review Turnhelm route decision evidence.
+description: Use when Turnhelm appears at all — preparing or inspecting a Turnhelm project, executing an authorized task in a separate model/effort-routed Codex child, or reviewing route decision evidence (receipt, routes.jsonl). Also use it whenever the user asks to classify, route, or delegate a self-contained coding task to a selected model/effort profile, even without naming Turnhelm.
 ---
 
 <!-- turnhelm-template v1 -->
