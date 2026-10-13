@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { decodeWorkerEvent, MAX_EVENT_BYTES, type FailureClass, type WorkerEvent, type WorkerUsage } from "./codex-events.js";
+import { classifyPayload, type PayloadMode } from "./payload.js";
 import type { TaskDecision } from "./route.js";
 
 export type WorkerResult = Readonly<{
@@ -22,6 +23,11 @@ export type WorkerResult = Readonly<{
   ownedShutdown: boolean;
   failureClass?: FailureClass;
   errorSha256?: string;
+  // PE-1: the emission classifier's bounded, content-free projection, attached
+  // iff the run completed and emission was initiated. A failed or cancelled run
+  // — including a cancellation that lands mid-write after bytes were delivered —
+  // carries none; those receipts already tell that story.
+  payload?: Readonly<{ mode: PayloadMode; trailerBytes?: number }>;
 }>;
 
 export function buildWorkerArgs(decision: TaskDecision, write: boolean): string[] {
@@ -110,6 +116,7 @@ export function executeWorker(
     let stickyFailed = false;
     let finalMessage: string | undefined;
     let finalEmitted = false;
+    let payloadProjection: WorkerResult["payload"];
     let completionSeen = false;
     let progressEvents = 0;
     let lastEventAt: number | undefined;
@@ -191,7 +198,7 @@ export function executeWorker(
         durationMs: Math.round(performance.now() - started),
         progressEvents,
         usageScope: "unverified"
-      } as { code: number; status: WorkerResult["status"]; durationMs: number; progressEvents: number; usageScope: "unverified"; ownedShutdown: boolean; usage?: WorkerUsage; error?: WorkerResult["error"]; signal?: "SIGINT" | "SIGTERM" | "SIGKILL"; failureClass?: FailureClass; errorSha256?: string; lastEventAgeMs?: number };
+      } as { code: number; status: WorkerResult["status"]; durationMs: number; progressEvents: number; usageScope: "unverified"; ownedShutdown: boolean; usage?: WorkerUsage; error?: WorkerResult["error"]; signal?: "SIGINT" | "SIGTERM" | "SIGKILL"; failureClass?: FailureClass; errorSha256?: string; lastEventAgeMs?: number; payload?: WorkerResult["payload"] };
       result.ownedShutdown = ownedShutdown;
       if (lastEventAt !== undefined) result.lastEventAgeMs = Math.round(performance.now() - lastEventAt);
       if (usage) result.usage = usage;
@@ -204,6 +211,9 @@ export function executeWorker(
       if (childCode === null && childSignal !== null && isDeathSignal(childSignal)) {
         result.signal = childSignal;
       }
+      // Attached iff completed and emission was initiated — finalEmitted is
+      // that initiation record; a completed zero-message run never set it.
+      if (status === "completed" && finalEmitted && payloadProjection !== undefined) result.payload = payloadProjection;
       resolve(result);
     };
 
@@ -218,7 +228,14 @@ export function executeWorker(
       // final agent message writes to stdout, before finishing.
       if (!finalEmitted && finalMessage !== undefined && completedEligible()) {
         finalEmitted = true; // Set before the sink call: ack re-entry must never re-emit.
-        emitMessage(finalMessage);
+        // PE-1: classification precedes the sink call so the projection is
+        // captured before delivery; the sink receives the classifier's text and
+        // keeps its single unconditional "\n" append.
+        const classification = classifyPayload(finalMessage);
+        payloadProjection = classification.trailerBytes === undefined
+          ? { mode: classification.mode }
+          : { mode: classification.mode, trailerBytes: classification.trailerBytes };
+        emitMessage(classification.emittedText);
         return; // The accepted write must flush (or fail) before the run finishes.
       }
       finish();
