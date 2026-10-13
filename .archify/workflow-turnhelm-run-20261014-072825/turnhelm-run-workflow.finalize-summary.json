@@ -7,13 +7,13 @@
   "quality": "showcase",
   "specification": {
     "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/candidate.json",
-    "sha256": "206128b093f1ba9038fb5a95575242de7f9caf10eaa19728c1b1e4896e711314",
-    "bytes": 9000
+    "sha256": "d80d04ac3277932f0c8c406b6a9eda6b1fcbdab0fcb3c45c994beec65fc02375",
+    "bytes": 9046
   },
   "artifact": {
     "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html",
-    "sha256": "48ef67b6d452f65dbb23f2c08cec7f020d47a6ba8e05c4d3bdfdd326385cbdd8",
-    "bytes": 765155
+    "sha256": "9ab879d2e1027b14ba379c15fadfb5d82466106943d4d1dde6136a8c90987f24",
+    "bytes": 765201
   },
   "gates": {
     "validate": "pass",
@@ -43,7 +43,7 @@
     "noticeText": null
   },
   "visualReview": "not-requested",
-  "durationMs": 1669,
+  "durationMs": 1754,
   "visualReviewRecommendation": {
     "action": "inspect-route-readability",
     "signals": {

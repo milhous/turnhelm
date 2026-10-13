@@ -5431,7 +5431,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <li>At most one Codex worker per run</li>
           <li>Sandbox read-only unless --write</li>
           <li>Child env strips credentials; ZDOTDIR redirects to the managed root; TURNHELM_MANAGED_CHILD=1 blocks recursion</li>
-          <li>Stdout carries at most one message — the final agent message of a completed run, classified at emission as strict, extracted (inert trailer dropped, trailerBytes recorded), conflict, or unstructured; failed or cancelled runs initiate no write</li>
+          <li>Stdout carries at most one message — the final agent message of a completed run, classified at emission as strict, extracted (inert trailer dropped, trailerBytes recorded), conflict, or unstructured; no write starts once failure or cancellation is observed (delivery is not transactional)</li>
         </ul>
       </div>
     </div>

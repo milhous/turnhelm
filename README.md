@@ -271,7 +271,8 @@ than opened.
   (`"extracted"`, with `trailerBytes` in the receipt — the dropped trailer
   is retained nowhere); further structured content after the payload line,
   or any non-JSON message, is emitted verbatim (`"conflict"` /
-  `"unstructured"`). The boundary is a delimitor, not a validator — payload
+  `"unstructured"`); every emission is the classifier's text plus one
+  appended newline. The boundary is a delimitor, not a validator — payload
   contents are not checked — and stdout is still not a general-purpose
   redactor for secrets in that message. A failed or cancelled run initiates
   no write (delivery is not transactional: a cancellation landing mid-write
@@ -503,9 +504,10 @@ drivers must continue only on `0`, `3`, and `4` and halt on everything else —
 of `143` is a graded case outcome inside a manifest, never a campaign-process
 `143`. Worker-write contracts execute inside the
 runner's sandboxed check launcher, whose runner-owned fd-3 outcome record
-replaces exit-code and stdout inference; the sandbox boundary is a
-path-injected fake on every platform, with a real seatbelt profile only in the
-macOS-gated test. Two harness pins landed with it: acceptance-style tests
+replaces exit-code and stdout inference; the launcher drives
+`/usr/bin/sandbox-exec` with a generated seatbelt profile (macOS), the
+hermetic tests substitute a path-injected fake on every platform, and only
+the macOS-gated test exercises the real profile. Two harness pins landed with it: acceptance-style tests
 observe actual fake-worker invocations rather than reserved records, and the
 worker receipt's `lastEventAgeMs` is pinned positive through a post-drain
 settlement gap.
@@ -545,7 +547,8 @@ ZDOTDIR managed-root redirect.
 — one `turnhelm run` from task submission to the classified-payload stdout
 contract and receipt, including rejection and fail-closed paths.
 
-Both diagrams are pinned at `733753e`, which adds the structured payload
-emission contract (`src/payload.ts` modes: strict, extracted, conflict,
-unstructured) on top of the earlier final-message-only stdout contract;
-superseded `.archify/` generations live in git history.
+Both diagrams are pinned at `733753e`, whose snapshot includes the
+structured payload emission contract (`src/payload.ts` modes: strict,
+extracted, conflict, unstructured) on top of the earlier
+final-message-only stdout contract; superseded `.archify/` generations
+live in git history.

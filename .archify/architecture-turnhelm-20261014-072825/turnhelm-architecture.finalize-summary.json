@@ -7,13 +7,13 @@
   "quality": "showcase",
   "specification": {
     "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/candidate.json",
-    "sha256": "77ed7d8d3e7b05be1ae7441e38275feb30dc3509f3c539fd39aaeef5c6504344",
-    "bytes": 10181
+    "sha256": "8bc0e2726d3c2f15aeb8ae8d0af445807eddb8dfcaddef7c3ddd7141687cfc4a",
+    "bytes": 10227
   },
   "artifact": {
     "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/turnhelm-architecture.html",
-    "sha256": "b276a7a141a04f9f2366ce146c4f8acdf0df31d46d5ad280f6cb4f10dab71e68",
-    "bytes": 768041
+    "sha256": "3e6d3f9d132d74ae75d8cf4ea873698bd5896c9fd89454d009043183f4852072",
+    "bytes": 768087
   },
   "gates": {
     "validate": "pass",
@@ -43,7 +43,7 @@
     "noticeText": null
   },
   "visualReview": "not-requested",
-  "durationMs": 1846,
+  "durationMs": 1811,
   "visualReviewRecommendation": {
     "action": "inspect-route-readability",
     "signals": {

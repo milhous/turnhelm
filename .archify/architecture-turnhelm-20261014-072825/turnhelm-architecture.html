@@ -5453,7 +5453,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         </div>
         <ul>
           <li>Task limited to 8192 UTF-8 bytes via argv or stdin; continuation-only prompts rejected</li>
-          <li>Stdout carries at most one message — the final agent message of a completed run, classified at emission as strict, extracted, conflict, or unstructured; failed or cancelled runs initiate no write</li>
+          <li>Stdout carries at most one message — the final agent message of a completed run, classified at emission as strict, extracted, conflict, or unstructured; no write starts once failure or cancellation is observed (delivery is not transactional)</li>
           <li>Exactly one turnhelm.receipt on stderr once classification starts</li>
           <li>routes.jsonl journals the task SHA-256, decision, and classifier confidence when reported — never task text</li>
         </ul>

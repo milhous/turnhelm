@@ -394,7 +394,7 @@
         "At most one Codex worker per run",
         "Sandbox read-only unless --write",
         "Child env strips credentials; ZDOTDIR redirects to the managed root; TURNHELM_MANAGED_CHILD=1 blocks recursion",
-        "Stdout carries at most one message — the final agent message of a completed run, classified at emission as strict, extracted (inert trailer dropped, trailerBytes recorded), conflict, or unstructured; failed or cancelled runs initiate no write"
+        "Stdout carries at most one message — the final agent message of a completed run, classified at emission as strict, extracted (inert trailer dropped, trailerBytes recorded), conflict, or unstructured; no write starts once failure or cancellation is observed (delivery is not transactional)"
       ]
     }
   ]

@@ -6,11 +6,11 @@
   "status": "pass",
   "visualReview": "pending",
   "provenance": "current",
-  "deliveryReceiptId": "826e38a8-5e9b-4f20-b0bc-90d882ba6dff",
+  "deliveryReceiptId": "54ed312a-da36-45d3-be48-c8e07c964fb1",
   "artifact": {
     "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html",
-    "sha256": "48ef67b6d452f65dbb23f2c08cec7f020d47a6ba8e05c4d3bdfdd326385cbdd8",
-    "bytes": 765155
+    "sha256": "9ab879d2e1027b14ba379c15fadfb5d82466106943d4d1dde6136a8c90987f24",
+    "bytes": 765201
   },
   "state": {
     "detail": "read",
@@ -1722,17 +1722,17 @@
         "file": "turnhelm-run-workflow.visual-check.html"
       },
       {
-        "sha256": "ad05455440780302763485c51697d50266ad8e1d991483ec3724ef099fc949f9",
-        "bytes": 140121,
+        "sha256": "cf24dc2d56daa6e7079b4a0fef4d788f7adebce987f63fdf091d311c4d93cd39",
+        "bytes": 140119,
         "file": "turnhelm-run-workflow.visual-check.1440x900.light.png"
       },
       {
-        "sha256": "249b9f60945de37ef9ee3360f15520b708980fa6b888b39c4cfcf013a88f9798",
-        "bytes": 149740,
+        "sha256": "a530fbf4c19eeae73e28c797fdc60fca63a26b7a36c1023087db42597b9bc2e6",
+        "bytes": 149751,
         "file": "turnhelm-run-workflow.visual-check.1440x900.dark.png"
       },
       {
-        "sha256": "c23aff098ebe8f4666c763527ac1c222bda74b0d0bb586263960f8e5a167967e",
+        "sha256": "f0e66228870bbc4a09ae6b289673aee46f03062289439a3b4ee3e49ea9a67221",
         "bytes": 211182,
         "file": "turnhelm-run-workflow.visual-check.2048x1320.light.png"
       },

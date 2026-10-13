@@ -104,15 +104,18 @@ verbatim (`payload.mode: "strict"`); a payload line plus inert trailing
 prose yields exactly the payload line (`"extracted"`, with `trailerBytes`
 in the receipt — the dropped trailer is retained nowhere); further
 structured content after the payload line, or any non-JSON message, is
-emitted verbatim (`"conflict"` / `"unstructured"`). The boundary is a
+emitted verbatim (`"conflict"` / `"unstructured"`); every emission is the
+classifier's text plus one appended newline. The boundary is a
 delimitor, not a validator, and still not a redactor; success is read from
 the exit code and receipt, never stdout presence. Input/config/preflight rejection
 has no receipt. A failed worker turn prints exactly one fixed
 `turnhelm: worker-failed: <class>` line — class from a frozen taxonomy,
-never native error text. The receipt's `worker` object always carries
-`ownedShutdown`, a boolean action record (a parent-initiated stop ladder
-ran), not a causation claim; a failed worker adds `failureClass` and
-`errorSha256` (hash only), and any death by SIGINT/SIGTERM/SIGKILL —
+never native error text. The receipt's `worker` object carries
+`ownedShutdown` — a boolean action record (a parent-initiated stop ladder
+ran), not a causation claim — only once a worker actually executed; a
+`not-started` worker object has no action fields. A failed worker adds
+the frozen `failureClass` and, only when a native error message existed,
+`errorSha256` (hash only); any death by SIGINT/SIGTERM/SIGKILL —
 failed or cancelled — adds the `signal`. Every worker receipt also carries
 `progressEvents` — the count of event frames the parent successfully
 decoded, malformed frames excluded — and, once at least one decoded,
@@ -127,8 +130,8 @@ Every run that reaches classification appends one JSON evidence line to
 whatever the outcome. It records the task's SHA-256 hash and byte length
 (never the task text), the routing status, per-backend attempts, and, on
 selection, the backend, profile, model, effort, and the classifier's
-`confidence` when the backend reports one. Journaling is best-effort: a
-missing, unwritable, or non-regular journal path (symlink, FIFO) is diagnosed
+`confidence` when the backend reports one. Journaling is best-effort: an
+unwritable or non-regular journal path (symlink, FIFO) is diagnosed
 and skipped; it never fails or blocks the run. Use it to review routing
 decisions after the fact.
 
@@ -257,9 +260,10 @@ drivers must continue only on `0`, `3`, and `4` and halt on everything else —
 of `143` is a graded case outcome inside a manifest, never a campaign-process
 `143`. Worker-write contracts execute inside the
 runner's sandboxed check launcher, whose runner-owned fd-3 outcome record
-replaces exit-code and stdout inference; the sandbox boundary is a
-path-injected fake on every platform, with a real seatbelt profile only in the
-macOS-gated test. Two harness pins landed with it: acceptance-style tests
+replaces exit-code and stdout inference; the launcher drives
+`/usr/bin/sandbox-exec` with a generated seatbelt profile (macOS), the
+hermetic tests substitute a path-injected fake on every platform, and only
+the macOS-gated test exercises the real profile. Two harness pins landed with it: acceptance-style tests
 observe actual fake-worker invocations rather than reserved records, and the
 worker receipt's `lastEventAgeMs` is pinned positive through a post-drain
 settlement gap.
