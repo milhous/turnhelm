@@ -96,8 +96,10 @@ settings to make a check pass.
 
 ## Interpret results
 
-Worker output is on stdout; fixed diagnostics and one `turnhelm.receipt` JSON
-are on stderr **once classification starts**. Input/config/preflight rejection
+Worker output on stdout is at most one message — the final agent message of
+a completed run; earlier progress messages are discarded; fixed diagnostics
+and one `turnhelm.receipt` JSON are on stderr **once classification
+starts**. Input/config/preflight rejection
 has no receipt. A failed worker turn prints exactly one fixed
 `turnhelm: worker-failed: <class>` line — class from a frozen taxonomy,
 never native error text. The receipt's `worker` object always carries
