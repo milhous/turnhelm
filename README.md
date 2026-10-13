@@ -263,8 +263,13 @@ than opened.
   a frozen taxonomy (`stream-disconnected`, `rate-limit`, `usage-limit`,
   `timeout`, `auth`, `overloaded`, `unknown`) matched against the native
   message — the message itself never crosses; only its SHA-256 does, in the
-  receipt. Worker messages go to stdout; this is
-  not a general-purpose redactor for secrets in those messages.
+  receipt. Stdout carries at most one worker message — the final agent
+  message, written once when the run completes; earlier messages are
+  decoded, counted, and discarded. A failed or cancelled run initiates no
+  write (delivery is not transactional: a cancellation landing mid-write
+  may leave bytes, so gate on the exit code and receipt). The final
+  message is arbitrary content — not guaranteed JSON — and stdout is not a
+  general-purpose redactor for secrets in that message.
 - Remove secrets and sensitive data from a task before routing; the full
   task text is sent to the configured classifier.
 - **Cancellation.** `run` and `doctor` handle SIGINT/SIGTERM, abort owned work,

@@ -88,7 +88,7 @@ type WorkerScenario = {
   trackFrameConcat?: boolean;
   trackKills?: boolean;
   settlementGuardMs?: number;
-  ackMessageDecode?: boolean;
+  outerMaxBufferBytes?: number;
 };
 
 type Recorded = {
@@ -243,16 +243,6 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
               : `setTimeout(() => { pending -= 1; callback(); }, ${scenario.drainDelayMs ?? 30});`}
       }
     })` : "output = process.stdout;"}
-    ${scenario.ackMessageDecode ? `
-    // Parent-observed decode sync point: the forwarded agent message is
-    // written synchronously inside dispatch, so this sink's write proves the
-    // frame already decoded.
-    output = new Writable({
-      write(_chunk, _encoding, callback) {
-        writeFileSync(${JSON.stringify(join(directory, "decode-ack"))}, String(Date.now()));
-        callback();
-      }
-    });` : ""}
     ${scenario.tail?.target === "diag" ? "diagSink = tailSink;" : ""}
     ${scenario.diag === "stall" ? `
     diagSink = new Writable({
@@ -408,7 +398,8 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
       TURNHELM_ALLOW_HOSTED_JEV: "1",
       TURNHELM_CONFIG: "/synthetic/turnhelm.json"
     },
-    timeout: 20_000
+    timeout: 20_000,
+    ...(scenario.outerMaxBufferBytes !== undefined ? { maxBuffer: scenario.outerMaxBufferBytes } : {})
   }).catch(async error => {
     // The outer exec timeout may kill the harness before its watchdog runs.
     const pid = Number(await readFile(join(directory, "owned.pid"), "utf8").catch(() => ""));
@@ -620,11 +611,106 @@ finish(() => {
   assert.equal(stderr, "");
 });
 
+test("stdout carries exactly the final agent message of a completed run", { timeout: 30_000 }, async t => {
+  const { recorded, stdout, stderr } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "progress narration" } });
+  emit({ type: "item.completed", item: { type: "agent_message", text: "worker result" } });
+  emit({ type: "turn.completed", usage: { input_tokens: 1 } });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(stdout, "worker result\n");
+  forbid(stdout + stderr + JSON.stringify(recorded), "progress narration");
+});
+
+test("a completed run with zero agent messages writes nothing to stdout", { timeout: 30_000 }, async t => {
+  const { recorded, stdout } = await runWorker(t, { script: "finish(() => emit({ type: 'turn.completed' }));" });
+  assert.equal(recorded.status, "completed");
+  assert.equal(stdout, "");
+});
+
+test("an empty-string final message writes exactly one newline", { timeout: 30_000 }, async t => {
+  const { recorded, stdout } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "" } });
+  emit({ type: "turn.completed" });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(stdout, "\n");
+});
+
+test("a message decoded after completion becomes the final message", { timeout: 30_000 }, async t => {
+  const { recorded, stdout } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "before" } });
+  emit({ type: "turn.completed" });
+  emit({ type: "item.completed", item: { type: "agent_message", text: "after" } });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(stdout, "after\n");
+});
+
+test("a repeated completion changes nothing", { timeout: 30_000 }, async t => {
+  const { recorded, stdout } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "settled answer" } });
+  emit({ type: "turn.completed", usage: { input_tokens: 1 } });
+  emit({ type: "turn.completed", usage: { input_tokens: 2 } });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(stdout, "settled answer\n");
+});
+
+test("a failed frame after a completion fails the run with no emission", { timeout: 30_000 }, async t => {
+  const { recorded, stdout } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "answer" } });
+  emit({ type: "turn.completed" });
+  emit({ type: "turn.failed", message: "upstream usage limit reached" });
+});
+`
+  });
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "worker");
+  assert.equal(stdout, "");
+});
+
+test("a maximal agent-message frame passes through unclipped", { timeout: 30_000 }, async t => {
+  const { recorded, stdout } = await runWorker(t, {
+    // The ~1 MiB message rides the outer exec's capture; explicit headroom
+    // keeps future harness chatter from failing as ERR_CHILD_PROCESS_STDIO_MAXBUFFER.
+    outerMaxBufferBytes: 2 * 1024 * 1024,
+    script: `
+finish(() => {
+  const text = "z".repeat(1048576 - 68); // frame stays just under MAX_EVENT_BYTES after the 67-byte JSON envelope
+  process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text } }) + "\\n");
+  emit({ type: "turn.completed" });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(stdout, "z".repeat(1048576 - 68) + "\n");
+});
+
 test("exit zero without a completion is a worker failure", { timeout: 30_000 }, async t => {
-  const { recorded } = await runWorker(t, { script: "finish(() => {});\n" });
+  const { recorded, stdout } = await runWorker(t, { script: "finish(() => {});\n" });
   assert.equal(recorded.status, "failed");
   assert.equal(recorded.error, "worker");
   assert.equal(recorded.code, 0);
+  assert.equal(stdout, "");
 });
 
 test("turn.failed stops the owned group even though the leader would exit zero", { timeout: 30_000 }, async t => {
@@ -672,36 +758,6 @@ finish(() => {
   // attempted after settlement (the deadline timer must be disposed).
   assert.equal(recorded.postSettleKills, 0, "no post-settlement ladder attempt");
   await waitForExit(Number(await readFile(join(directory, "owned.pid"), "utf8")));
-});
-
-test("a failed turn buffered past child close still discharges the cleanup obligation", { timeout: 30_000 }, async t => {
-  const { recorded, directory } = await runWorker(t, {
-    output: "blocker",
-    drainDelayMs: 800,
-    script: `
-const { spawn } = require("node:child_process");
-const child = spawn(process.execPath, ["-e", ${JSON.stringify(stubbornChild)}], { stdio: "ignore" });
-fs.writeFileSync(path.join(here, "descendant.pid"), String(child.pid));
-finish(() => {
-  setTimeout(() => {
-    // One write: the blocked sink stops the loop after the message frame, so
-    // the failed frame is only decoded after the drain — past child close.
-    process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "partial" } }) + "\\n" + JSON.stringify({ type: "turn.failed", message: "rate limit exceeded" }) + "\\n");
-    process.exit(7);
-  }, 400);
-});
-`
-  });
-  const descendant = Number(await fakeFile(directory, "descendant.pid"));
-  t.after(() => { try { process.kill(descendant, "SIGKILL"); } catch { /* already gone on the green path */ } });
-  assert.equal(recorded.status, "failed");
-  assert.equal(recorded.error, "worker");
-  assert.equal(recorded.code, 7);
-  assert.equal(recorded.failureClass, "rate-limit");
-  // The blocked sink holds the failed frame until after close: settlement
-  // must not outrun the group-cleanup obligation.
-  assert.equal(recorded.ownedShutdown, true, "the ladder must still run for a post-close failed turn");
-  await waitForExit(descendant);
 });
 
 test("failure deadline expiry escalates a still-alive leader", { timeout: 30_000 }, async t => {
@@ -782,13 +838,14 @@ finish(() => {
 });
 
 test("a transport failure during the grace supersedes immediately with its own cause", { timeout: 30_000 }, async t => {
+  // No message write exists mid-run to break the output sink, so the sink
+  // that can fail during a failed turn's grace is the diagnostics sink: its
+  // error on the worker-failed line must still supersede the deadline.
   const { recorded } = await runWorker(t, {
-    output: "blocker",
-    gate: "epipe-received",
+    diag: "error",
     script: `
 finish(() => {
   emit({ type: "turn.failed", message: "upstream overloaded" });
-  emit({ type: "item.completed", item: { type: "agent_message", text: "partial" } });
   setInterval(() => {}, 500);
 });
 `
@@ -849,36 +906,24 @@ finish(() => {
 test("a settlement gap after decode quiescence makes lastEventAgeMs positive", { timeout: 30_000 }, async t => {
   // The gap must start after the parent DECODED the frames, not after the
   // child emitted them: a descheduled parent decodes everything at close and
-  // the age collapses to zero (the bare emit-then-sleep construction reports
-  // exactly 0 under that schedule). The child therefore refuses to exit
-  // until the parent's output sink observes the forwarded message — written
-  // synchronously inside dispatch — and only then runs the hold-open gap.
-  const { recorded, directory } = await runWorker(t, {
-    ackMessageDecode: true,
+  // the age collapses to zero. The final-message write happens only at
+  // settlement, so a sink that accepts it but drains late holds the run open
+  // after the last decode — the drain gap lands between decode and finish.
+  const { recorded } = await runWorker(t, {
+    output: "blocker",
+    drainDelayMs: 300,
     script: `
 finish(() => {
   emit({ type: "item.completed", item: { type: "agent_message", text: "gap" } });
   emit({ type: "turn.completed", usage: { input_tokens: 1 } });
-  const ack = path.join(here, "decode-ack");
-  const poll = deadline => {
-    if (fs.existsSync(ack)) {
-      fs.writeFileSync(path.join(here, "gap-started"), String(Date.now()));
-      setTimeout(() => process.exit(0), 50);
-    } else if (Date.now() < deadline) setTimeout(() => poll(deadline), 10);
-    else process.exit(0); // broken protocol: the assertions below fail fast
-  };
-  poll(Date.now() + 10000);
+  process.exit(0);
 });
 `
   });
-  const ackAt = Number(await readFile(join(directory, "decode-ack"), "utf8"));
-  const gapAt = Number(await readFile(join(directory, "gap-started"), "utf8"));
-  assert.ok(Number.isFinite(ackAt) && Number.isFinite(gapAt) && gapAt >= ackAt,
-    "the parent decoded before the gap began: ack " + ackAt + ", gap " + gapAt);
   assert.equal(recorded.status, "completed");
-  assert.equal(recorded.progressEvents, 2, "both frames decode before the gap");
+  assert.equal(recorded.progressEvents, 2, "both frames decode before the settlement gap");
   assert.ok(recorded.lastEventAgeMs !== undefined && recorded.lastEventAgeMs > 0,
-    "the hold-open gap lands after the last decode: saw " + recorded.lastEventAgeMs);
+    "the blocked final write holds settlement past the last decode: saw " + recorded.lastEventAgeMs);
 });
 
 test("a malformed frame stops counting but the decoded count ships on the failed result", { timeout: 30_000 }, async t => {
@@ -907,12 +952,13 @@ test("a pre-start abort carries zero decoded events and no age", { timeout: 30_0
 });
 
 test("a cancelled mid-stream run keeps its decoded events and age", { timeout: 30_000 }, async t => {
-  const { recorded } = await runWorker(t, {
-    output: "blocker",
-    gate: "abort-received",
+  const { recorded, stdout } = await runWorker(t, {
+    gate: "abort-ready",
     script: `
 finish(() => {
   emit({ type: "item.completed", item: { type: "agent_message", text: "held" } });
+  emit({ type: "turn.completed" });
+  ready();
   setInterval(() => {}, 1000);
 });
 `
@@ -920,6 +966,7 @@ finish(() => {
   assert.equal(recorded.status, "cancelled");
   assert.ok((recorded.progressEvents ?? 0) >= 1, "the decoded message before cancellation still counts, saw " + recorded.progressEvents);
   assert.equal(typeof recorded.lastEventAgeMs, "number");
+  assert.equal(stdout, "", "a run cancelled before settlement initiates no emission");
 });
 
 test("the failed dispatch writes exactly one class-only diagnostic line", { timeout: 30_000 }, async t => {
@@ -1281,7 +1328,7 @@ finish(() => {
 });
 
 test("nonzero exit is a worker failure even with a completion", { timeout: 30_000 }, async t => {
-  const { recorded } = await runWorker(t, {
+  const { recorded, stdout } = await runWorker(t, {
     script: `
 finish(() => {
   emit({ type: "turn.completed", usage: { input_tokens: 1 } });
@@ -1292,6 +1339,7 @@ finish(() => {
   assert.equal(recorded.status, "failed");
   assert.equal(recorded.error, "worker");
   assert.equal(recorded.code, 3);
+  assert.equal(stdout, "");
 });
 
 test("the result settles at close, not when stdio ends", { timeout: 30_000 }, async t => {
@@ -1326,7 +1374,7 @@ for (const exitCode of [7, 0]) {
   });
 }
 
-test("stdout backpressure queues one message at the sink while stderr drains", { timeout: 30_000 }, async t => {
+test("the final write backpressures one message at the sink while stderr drains", { timeout: 30_000 }, async t => {
   const { recorded, stderr } = await runWorker(t, {
     output: "blocker",
     drainDelayMs: 30,
@@ -1336,24 +1384,26 @@ finish(() => {
   process.stderr.write("y".repeat(512 * 1024));
   for (let i = 0; i < 20; i++) emit({ type: "item.completed", item: { type: "agent_message", text: "message-" + i } });
   emit({ type: "turn.completed" });
+  process.exit(0);
 });
 `
   });
   assert.equal(recorded.status, "completed");
-  assert.equal(recorded.received, 20);
+  assert.equal(recorded.received, 1);
   assert.equal(recorded.maxPending, 1);
-  for (let i = 0; i < 20; i++) assert.ok((recorded.emitted ?? "").includes("message-" + i + "\n"));
+  assert.equal(recorded.emitted, "message-19\n");
   forbid(JSON.stringify(recorded) + stderr, "TEST_PRIVATE_STDERR_SENTINEL");
 });
 
 test("cancellation interrupts a stalled drain wait", { timeout: 30_000 }, async t => {
   const { recorded, stderr } = await runWorker(t, {
-    output: "blocker",
+    output: "accepted-stall",
     gate: "abort-received",
     script: `
 finish(() => {
   emit({ type: "item.completed", item: { type: "agent_message", text: "held" } });
-  setInterval(() => {}, 1000);
+  emit({ type: "turn.completed" });
+  process.exit(0);
 });
 `
   });
@@ -1370,7 +1420,8 @@ test("an output EPIPE interrupts the drain wait as an output failure", { timeout
     script: `
 finish(() => {
   emit({ type: "item.completed", item: { type: "agent_message", text: "held" } });
-  setInterval(() => {}, 1000);
+  emit({ type: "turn.completed" });
+  process.exit(0);
 });
 `
   });
@@ -1388,7 +1439,7 @@ fs.writeFileSync(path.join(here, "descendant.pid"), String(child.pid));
 finish(() => {
   emit({ type: "item.completed", item: { type: "agent_message", text: "racing" } });
   emit({ type: "turn.completed", usage: { input_tokens: 5 } });
-  setInterval(() => {}, 500);
+  process.exit(0);
 });
 `
   });
@@ -1404,7 +1455,7 @@ test("a late error ack after a settled cancelled run detaches owned sink listene
 finish(() => {
   emit({ type: "item.completed", item: { type: "agent_message", text: "racing" } });
   emit({ type: "turn.completed", usage: { input_tokens: 5 } });
-  setInterval(() => {}, 500);
+  process.exit(0);
 });
 `
   });
@@ -1467,7 +1518,7 @@ finish(() => {
   emit({ type: "item.completed", item: { type: "agent_message", text: "done" } });
   emit({ type: "error", message: "TEST_PRIVATE_ERROR_SENTINEL" });
   emit({ type: "turn.completed" });
-  setTimeout(() => {}, 10000);
+  process.exit(0);
 });
 `
     });
@@ -1480,8 +1531,6 @@ finish(() => {
 }
 
 for (const [target, action] of [
-  ["output", "destroy-error"],
-  ["output", "destroy-quiet"],
   ["diag", "destroy-error"],
   ["diag", "destroy-quiet"]
 ] as const) {
@@ -1515,7 +1564,14 @@ for (const [target, mode] of [
     const outcome = await runWorker(t, {
       ...(target === "output" ? { output: "abort-in-write" as const } : { diag: "stall" as const, gate: "abort-diag-late" as const }),
       lateDestroy: mode,
-      script: `
+      script: target === "output" ? `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "held" } });
+  emit({ type: "error", message: "TEST_PRIVATE_ERROR_SENTINEL" });
+  emit({ type: "turn.completed" });
+  process.exit(0);
+});
+` : `
 finish(() => {
   emit({ type: "item.completed", item: { type: "agent_message", text: "held" } });
   emit({ type: "error", message: "TEST_PRIVATE_ERROR_SENTINEL" });
@@ -1587,22 +1643,20 @@ test("descriptor-exhausted spawn fails without an unhandled process error", { ti
   assert.equal(recorded.error, "spawn");
 });
 
-for (const target of ["message", "diag"] as const) {
+for (const target of ["diag"] as const) {
   test(`late caller cancellation settles a prior protocol failure with pending ${target} output`, { timeout: 30_000 }, async t => {
     const { recorded } = await runWorker(t, {
-      ...(target === "message"
-        ? { output: "accepted-stall" as const }
-        : { diag: "stall" as const }),
+      diag: "stall" as const,
       gate: "abort-after-shutdown",
       script: `finish(() => {
-        emit(${target === "message" ? '{type:"item.completed",item:{type:"agent_message",text:"accepted"}}' : '{type:"error",message:"PRIVATE_PROTOCOL_CONTEXT"}'});
+        emit({type:"error",message:"PRIVATE_PROTOCOL_CONTEXT"});
         process.stdout.write("invalid-json\\n");
       });`
     });
     assert.equal(recorded.status, "failed");
     assert.equal(recorded.abortAfterShutdownReached, true, "child close and group discharge must precede cancellation");
     assert.equal(recorded.error, "protocol", "late cancellation must retain the first failure cause");
-    assert.equal(target === "message" ? recorded.received : recorded.diagWrites, 1, "the sink must retain an unacknowledged write");
+    assert.equal(recorded.diagWrites, 1, "the sink must retain an unacknowledged write");
   });
 }
 
@@ -1690,13 +1744,15 @@ test("outer harness exec error removes the detached worker group", { timeout: 30
     await rm(dir, { recursive: true, force: true });
   });
   const outcome = await runWorker(t, {
+    outerMaxBufferBytes: 64 * 1024,
     script: `
 const child = require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(stubbornChild)}], { stdio: 'ignore' });
+child.unref();
 fs.writeFileSync(${JSON.stringify(join(dir, "leader"))}, String(process.pid));
 fs.writeFileSync(${JSON.stringify(join(dir, "descendant"))}, String(child.pid));
 finish(() => {
-  for (let i = 0; i < 40; i++) emit({ type: 'item.completed', item: { type: 'agent_message', text: 'x'.repeat(65536) } });
-  setInterval(() => {}, 1000);
+  emit({ type: 'item.completed', item: { type: 'agent_message', text: 'x'.repeat(700 * 1024) } });
+  emit({ type: 'turn.completed' });
 });`
   }).then(() => ({ code: "success" }), error => error as { code: string });
   assert.equal(outcome.code, "ERR_CHILD_PROCESS_STDIO_MAXBUFFER");

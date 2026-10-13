@@ -500,7 +500,7 @@ process.stdin.on("end", () => {
     : "") + `  const finish = () => {
 ` + (options.failureMessage !== undefined
     ? `    process.stdout.write(JSON.stringify({ type: "turn.failed", message: ${JSON.stringify(options.failureMessage)} }) + "\\n");\n    process.exit(9);`
-    : `    const lines = fs.readFileSync(path.join(process.cwd(), "codex-output.txt"), "utf8").split("\\n").filter(Boolean);\n    for (const line of lines) {\n      process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: line } }) + "\\n");\n    }\n    process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1 } }) + "\\n");\n    process.exit(0);`)
+    : `    const lines = fs.readFileSync(path.join(process.cwd(), "codex-output.txt"), "utf8").split("\\n").filter(Boolean);\n    process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: lines.join("\\n") } }) + "\\n");\n    process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1 } }) + "\\n");\n    process.exit(0);`)
   + `
   };
 ` + (options.stallMs !== undefined ? `  setTimeout(finish, ${options.stallMs});` : "  finish();") + `

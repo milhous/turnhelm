@@ -556,7 +556,7 @@ test("a worker terminal failure fails the run despite exit zero", async t => {
   const f = await fixture(t, {}, {});
   const result = await f.run(["run", TASK], { input: "", env: { TEST_CODEX_MODE: "failed" } });
   assert.equal(result.code, 1);
-  assert.equal(result.stdout, AGENT_MESSAGE + "\n");
+  assert.equal(result.stdout, "");
   const receipt = parseReceipt(result.stderr);
   assert.deepEqual(receipt.worker, {
     status: "failed",
@@ -594,8 +594,8 @@ test("parent stdout EPIPE cancels the worker and exits 1", async t => {
   const f = await fixture(t);
   const child = f.spawn(["run", TASK]);
   const pending = capture(child);
-  // The CLI writes stdout only when relaying agent messages, so destroying the
-  // parent side up front guarantees the worker's first write hits EPIPE.
+  // The CLI writes stdout only at settlement, so the destroyed parent pipe
+  // makes the final write fail.
   child.stdout?.destroy();
   child.stdin?.end("");
   const result = await pending;
