@@ -23,3 +23,32 @@ export function envelopePayload(text: string): { value: unknown } | null {
   }
   return lines.slice(1).every(inertTrailerLine) ? { value } : null;
 }
+
+const PAYLOAD_ENCODER = new TextEncoder();
+
+const parsesAsJson = (text: string): boolean => {
+  try { JSON.parse(text); return true; } catch { return false; }
+};
+
+export type PayloadMode = "strict" | "extracted" | "conflict" | "unstructured";
+
+export type PayloadClassification = Readonly<{
+  mode: PayloadMode;
+  emittedText: string;
+  trailerBytes?: number;
+}>;
+
+// PE-1 §3.2: the emission classifier over the frozen envelope discipline.
+// emittedText is the extractor text — the emitter's "\n" append stays outside
+// the classifier. strict and unstructured are the whole message verbatim;
+// extracted carries exactly the first line plus the UTF-8 byte length of
+// everything after its terminating newline; conflict keeps a non-inert
+// trailer whole so a second structured answer is never silently dropped.
+export function classifyPayload(message: string): PayloadClassification {
+  if (parsesAsJson(message)) return { mode: "strict", emittedText: message };
+  const lines = message.split("\n");
+  if (!parsesAsJson(lines[0])) return { mode: "unstructured", emittedText: message };
+  const trailer = lines.slice(1).join("\n");
+  if (!lines.slice(1).every(inertTrailerLine)) return { mode: "conflict", emittedText: message };
+  return { mode: "extracted", emittedText: lines[0], trailerBytes: PAYLOAD_ENCODER.encode(trailer).length };
+}
