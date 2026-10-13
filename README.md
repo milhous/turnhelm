@@ -265,11 +265,18 @@ than opened.
   message — the message itself never crosses; only its SHA-256 does, in the
   receipt. Stdout carries at most one worker message — the final agent
   message, written once when the run completes; earlier messages are
-  decoded, counted, and discarded. A failed or cancelled run initiates no
-  write (delivery is not transactional: a cancellation landing mid-write
-  may leave bytes, so gate on the exit code and receipt). The final
-  message is arbitrary content — not guaranteed JSON — and stdout is not a
-  general-purpose redactor for secrets in that message.
+  decoded, counted, and discarded. At emission the message is classified:
+  one JSON value is emitted verbatim (`payload.mode: "strict"`); a payload
+  line plus inert trailing prose yields exactly the payload line
+  (`"extracted"`, with `trailerBytes` in the receipt — the dropped trailer
+  is retained nowhere); further structured content after the payload line,
+  or any non-JSON message, is emitted verbatim (`"conflict"` /
+  `"unstructured"`). The boundary is a delimitor, not a validator — payload
+  contents are not checked — and stdout is still not a general-purpose
+  redactor for secrets in that message. A failed or cancelled run initiates
+  no write (delivery is not transactional: a cancellation landing mid-write
+  may leave bytes, so gate on the exit code and receipt, never on stdout
+  presence). The final message is arbitrary content — not guaranteed JSON.
 - Remove secrets and sensitive data from a task before routing; the full
   task text is sent to the configured classifier.
 - **Cancellation.** `run` and `doctor` handle SIGINT/SIGTERM, abort owned work,
