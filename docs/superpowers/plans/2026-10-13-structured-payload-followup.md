@@ -4,7 +4,7 @@ Date: 2026-10-13. Branch: `feat/structured-payload-followup`. Spec: `docs/superp
 
 Authorization boundary: this plan covers offline implementation and tests only. No paid calls, no live suites, no sealed-artifact edits, no publication; merge/push stays with the user. Everything runs hermetically — no sandbox, probe, or macOS gating is involved.
 
-Scope: PE-1 only — the structured payload contract (§3 of the spec) plus its observability projection (PE-07) and docs (PE-08). The provider-refusal stop policy, calibration, and all §6 items are out of scope; the roster-authoring rule (spec §5 / FR-02) is already recorded in both documents and needs no code.
+Scope: PE-1 only — the structured payload contract (§3 of the spec) plus its observability projection (PE-07) and docs (PE-08). The provider-refusal stop policy, calibration, and all §6 items are out of scope; the roster-authoring rule (spec §5 / FR-02) is recorded here and in the spec and needs no code: **a readonly case that needs file content must inline that content in the task text or explicitly permit a bounded read command; never assume a tool inventory that preparation did not attest.**
 
 Method: sequential inline TDD per the established repo method — red test → verify it fails for the stated reason → implement → green → commit per task, conventional commits. Coverage gate stays 80/80/80 on `dist/src/**`.
 
