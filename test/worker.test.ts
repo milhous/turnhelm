@@ -659,6 +659,20 @@ finish(() => {
   assert.equal(stdout, "after\n");
 });
 
+test("a repeated completion changes nothing", { timeout: 30_000 }, async t => {
+  const { recorded, stdout } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "settled answer" } });
+  emit({ type: "turn.completed", usage: { input_tokens: 1 } });
+  emit({ type: "turn.completed", usage: { input_tokens: 2 } });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(stdout, "settled answer\n");
+});
+
 test("a failed frame after a completion fails the run with no emission", { timeout: 30_000 }, async t => {
   const { recorded, stdout } = await runWorker(t, {
     script: `
@@ -676,6 +690,9 @@ finish(() => {
 
 test("a maximal agent-message frame passes through unclipped", { timeout: 30_000 }, async t => {
   const { recorded, stdout } = await runWorker(t, {
+    // The ~1 MiB message rides the outer exec's capture; explicit headroom
+    // keeps future harness chatter from failing as ERR_CHILD_PROCESS_STDIO_MAXBUFFER.
+    outerMaxBufferBytes: 2 * 1024 * 1024,
     script: `
 finish(() => {
   const text = "z".repeat(1048576 - 68); // frame stays just under MAX_EVENT_BYTES after the 67-byte JSON envelope
