@@ -247,6 +247,7 @@ const runCommand = async (root: string, write: boolean, positionalTask: string |
       if (worker.signal !== undefined) workerReceipt.signal = worker.signal;
       if (worker.failureClass !== undefined) workerReceipt.failureClass = worker.failureClass;
       if (worker.errorSha256 !== undefined) workerReceipt.errorSha256 = worker.errorSha256;
+      if (worker.payload !== undefined) workerReceipt.payload = worker.payload;
       receipt.worker = workerReceipt;
       exitCode = workerExit(worker, signal);
     } else {

@@ -71,7 +71,8 @@ if (process.env.TEST_CODEX_MODE === "hang") {
     record("task.txt", task);
     if (process.env.TEST_CODEX_RAW_STDERR) process.stderr.write(process.env.TEST_CODEX_RAW_STDERR + "\\n");
     if (process.env.TEST_CODEX_RAW_ERROR) emit({ type: "error", message: process.env.TEST_CODEX_RAW_ERROR });
-    emit({ type: "item.completed", item: { type: "agent_message", text: ${JSON.stringify(AGENT_MESSAGE)} } });
+    const message = process.env.TEST_CODEX_MESSAGE ?? ${JSON.stringify(AGENT_MESSAGE)};
+    emit({ type: "item.completed", item: { type: "agent_message", text: message } });
     if (process.env.TEST_CODEX_MODE === "failed") {
       // Terminal failure without a completion event or usage snapshot.
     } else if (process.env.TEST_CODEX_OMIT_USAGE === "1") {
@@ -408,11 +409,13 @@ test("run routes once, executes one read-only worker, and emits one accurate rec
     [{ backend: "laya", outcome: "success" }]);
   assert.deepEqual(routing.requestCounts, { laya: 1, jev: 0 });
   assert.deepEqual(receipt.selection, { backend: "laya", profileId: "balanced", model: "gpt-6.1-sol", effort: "medium" });
-  const worker = receipt.worker as { status: string; code: number; durationMs: number; usage?: Record<string, number> };
+  const worker = receipt.worker as { status: string; code: number; durationMs: number; usage?: Record<string, number>;
+    payload?: { mode: string; trailerBytes?: number } };
   assert.equal(worker.status, "completed");
   assert.equal(worker.code, 0);
   assert.equal(typeof worker.durationMs, "number");
   assert.deepEqual(worker.usage, { input_tokens: 11, output_tokens: 7 });
+  assert.deepEqual(worker.payload, { mode: "unstructured" });
   assert.equal(receipt.classifierUsage, "unreported");
   assert.equal(receipt.wholeRunUsageScope, "unverified");
   assert.equal(JSON.stringify(receipt).includes(TASK), false, "the receipt never carries task text");
@@ -654,10 +657,24 @@ test("a completed run without usage reports it explicitly unreported", async t =
     progressEvents: 2,
     lastEventAgeMs: (receipt.worker as { lastEventAgeMs?: number }).lastEventAgeMs,
     usage: "unreported",
+    payload: { mode: "unstructured" },
     ownedShutdown: false
   });
   assert.equal(receipt.classifierUsage, "unreported");
   assert.equal(receipt.wholeRunUsageScope, "unverified");
+});
+
+test("an envelope-shaped final message yields the payload line and a bounded receipt projection", async t => {
+  const trailer = "trailer prose here";
+  const f = await fixture(t);
+  const result = await f.run(["run", TASK], { input: "", env: { TEST_CODEX_MESSAGE: '{"count":1,"sum":2}\n' + trailer } });
+  assert.equal(result.code, 0);
+  assert.equal(result.stdout, '{"count":1,"sum":2}\n');
+  const receipt = parseReceipt(result.stderr);
+  const worker = receipt.worker as { status: string; payload?: { mode: string; trailerBytes?: number } };
+  assert.equal(worker.status, "completed");
+  assert.deepEqual(worker.payload, { mode: "extracted", trailerBytes: Buffer.byteLength(trailer, "utf8") });
+  assert.equal(JSON.stringify(receipt).includes(trailer), false, "the receipt retains no trailer content");
 });
 
 for (const [name, expectedCode] of [["SIGINT", 130], ["SIGTERM", 143]] as const) {
