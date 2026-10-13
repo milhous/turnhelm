@@ -14,6 +14,7 @@ import { promisify } from "node:util";
 import { parseProjectConfig, PROFILE_IDS, type ProfileId, type ProjectConfig } from "../src/config.js";
 import { FAILURE_PHRASINGS, type FailureClass } from "../src/codex-events.js";
 import { initProject } from "../src/init.js";
+import { envelopePayload } from "../src/payload.js";
 import { readProjectFile } from "../src/project.js";
 import { routeTask } from "../src/route.js";
 import { eligibleBackends } from "../src/systemone.js";
@@ -1387,31 +1388,10 @@ const jsonEquals = (raw: string | null, expected: Readonly<{ count: number; sum:
   }
 };
 
-// WH-2: the adjudicated stdout envelope — the contract object on line 1 plus
-// any number of inert trailer lines. A trailer is inert only when it parses
-// as no JSON value, opens with no object, array, or string (after optional
-// whitespace), and is no code-fence delimiter; anything else could carry a
-// second structured payload past the oracle.
-const inertTrailerLine = (line: string): boolean => {
-  const trimmed = line.trimStart();
-  if (trimmed.startsWith("{") || trimmed.startsWith("[") || trimmed.startsWith("\"")) return false;
-  if (trimmed.startsWith("```")) return false;
-  try { JSON.parse(line); return false; } catch { return true; }
-};
-
-// VH-5: the payload-agnostic envelope fact — line 1 must parse as a JSON
-// value, and every remaining line must be inert. The value is returned
-// unvalidated; each consumer applies its own predicate to it.
-export function envelopePayload(text: string): { value: unknown } | null {
-  const lines = text.split("\n");
-  let value: unknown;
-  try {
-    value = JSON.parse(lines[0]) as unknown;
-  } catch {
-    return null;
-  }
-  return lines.slice(1).every(inertTrailerLine) ? { value } : null;
-}
+// The envelope discipline (WH-2/VH-5) is product-owned since the structured
+// payload contract: src/payload.ts is the one frozen definition, re-exported
+// here so existing import sites (test/custom-round.ts included) are unchanged.
+export { envelopePayload, inertTrailerLine } from "../src/payload.js";
 
 const envelope = (text: string, expected: Readonly<{ count: number; sum: number }>): boolean => {
   const payload = envelopePayload(text);
