@@ -211,15 +211,49 @@ be written stops all remaining spend. A run must carry exactly one CLI receipt
 to be graded; journal backend/profileId values surface only through a fixed
 whitelist; a legal profile outside the case's allowedProfiles fails its case;
 and each judged case retains its bounded `oracleInput`. After the worker runs,
-the consumer tree re-verifies against the case's allowedChanges — a write
-outside them stops the round even when the output graded fine. Task-output and
-contract-assertion failures fail their case and the roster continues to exit
-`4`; integrity failures (identity, baseline, or tree drift, missing receipts,
-timeout, output cap, cleanup, check infrastructure) and auth-, rate-limit-, or
-usage-limit-class worker receipts stop all remaining spend with exit `1`; a
-roster whose planned spend exceeds its frozen caps is refused before launch;
-SIGINT anywhere in the round, including mid-contract, settles gracefully with
-`130` and SIGTERM with `143`. Worker-write contracts execute inside the
+a fixed decision order holds: abort; unverified cleanup (a possibly-live CLI,
+stop `cleanup-unverified`); output cap (stop `output-cap` — overflow also
+raises the timeout flag, which is why it is decided first); exactly one CLI
+receipt (anything else stops `receipt`); auth-, rate-limit-, and
+usage-limit-class receipts (stop `worker-<class>`); timeout; then grading.
+Every case then passes the same settled-tree gate — root dev/ino plus
+canonical-path re-check and a re-hash against the case's allowedChanges —
+graded or timed out: a same-content root replacement stops `root-identity`,
+and a write outside the allowance stops `tree-drift`, even when the output
+graded fine. A timeout is an unjudged per-case outcome, not a stop
+(`outcome:"timeout"`): no oracle grading and no contract check, and after the
+settled-tree gate its case record is appended and the roster continues to the
+next reservation. Every case record (pass, failed, or timeout) and the
+post-CLI stop records (`cleanup-unverified`, `output-cap`, `worker-<class>`,
+`tree-drift`, `root-identity`; not the `receipt` stop, which has no single
+receipt to project) carry a `workerFailure`: a per-field projection of the
+run's single receipt worker object — a frozen status enum plus optional
+`code`, `durationMs`, `progressEvents`, `ownedShutdown`, `usage`,
+`failureClass`, `errorSha256`, `signal`, and `lastEventAgeMs`. Unselected
+receipt keys (such as the worker `payload`) are ignored, malformed fields are
+dropped individually and never coerced, and `errorSha256` is correlation-only
+— no error text or stderr bytes are retained; zero-valued counters stay as
+observations (`progressEvents:0` means zero decoded frames). These are
+parent-observed counts and ages and an action record for `ownedShutdown` — no
+liveness, stall, or causation claims ride them. Terminal evidence appends are
+load-bearing: a case record the ledger cannot take stops the round
+(`stopped {reason:"evidence-io"}`, exit `1`), and after the last case a
+`completed` record (`{phase:"completed", outcome:"pass"|"fail", cases, failed,
+timedOut}`) reconciles the case records actually written, while a signal
+discovered after the last append still settles `130`/`143` rather than a
+would-be `0`/`4`. Task-output and contract-assertion failures fail their case
+and the roster continues. Exit semantics: `0` complete all-pass; `4` complete
+roster with one or more `failed` or `timeout` cases; `1` every stop and
+refusal — identity, baseline, or tree drift, receipt count, output cap,
+cleanup, check infrastructure, stopping worker receipts, and usage or prepare
+refusals — custom-round never exits `2`, and `3` is calibration-only and never
+emitted by custom-round; a roster whose planned spend exceeds its frozen caps
+is refused before launch; SIGINT anywhere in the round, including
+mid-contract, settles gracefully with `130` and SIGTERM with `143`. Campaign
+drivers must continue only on `0`, `3`, and `4` and halt on everything else —
+`1`, `130`, `143`, and any unexpected code — and a per-case worker CLI exit
+of `143` is a graded case outcome inside a manifest, never a campaign-process
+`143`. Worker-write contracts execute inside the
 runner's sandboxed check launcher, whose runner-owned fd-3 outcome record
 replaces exit-code and stdout inference; the sandbox boundary is a
 path-injected fake on every platform, with a real seatbelt profile only in the
