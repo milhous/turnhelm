@@ -641,7 +641,7 @@ type RoundManifest = {
 };
 
 const CLI_PATH = join(REPO_ROOT, "dist", "src", "cli.js");
-const CASE_TIMEOUT_MS = 240_000;
+export const CASE_TIMEOUT_MS = 240_000;
 const CONTRACT_TIMEOUT_MS = 20_000;
 const JOURNAL_CAP_BYTES = 1 << 20;
 const SCRUBBED_ENV_KEYS = ["TURNHELM_ALLOW_HOSTED_JEV", "TYPESAFE_API_KEY", "LAYA_API_KEY", "OPENAI_API_KEY",
@@ -911,7 +911,7 @@ const ORACLE_INPUT_CAP_BYTES = 1 << 16;
 export async function executeRound(
   manifestPath: string,
   approvedSha256: string,
-  options?: Readonly<{ env?: NodeJS.ProcessEnv; signal?: AbortSignal; sandboxExecPath?: string }>
+  options?: Readonly<{ env?: NodeJS.ProcessEnv; signal?: AbortSignal; sandboxExecPath?: string; caseTimeoutMs?: number }>
 ): Promise<number> {
   // Signal ladder (spec §3.3): the first SIGINT stops gracefully — the owned
   // CLI child is signalled through its supervision abort path and the round
@@ -962,7 +962,7 @@ const rootIdentityMatches = async (
 async function runGatedRound(
   manifestPath: string,
   approvedSha256: string,
-  options: Readonly<{ env?: NodeJS.ProcessEnv; sandboxExecPath?: string }> | undefined,
+  options: Readonly<{ env?: NodeJS.ProcessEnv; sandboxExecPath?: string; caseTimeoutMs?: number }> | undefined,
   signal: AbortSignal,
   terminated: () => boolean
 ): Promise<number> {
@@ -1072,8 +1072,9 @@ async function runGatedRound(
             "--project", shQuote(item.root.canonical), ...writeArgs.map(shQuote),
             "<", shQuote(taskFileEntry === undefined ? "" : taskFileEntry.path)].join(" ")]
         };
+    // caseTimeoutMs is a test knob; the production budget stays CASE_TIMEOUT_MS.
     const observation = await superviseCli(supervision.file, supervision.args,
-      { env, timeoutMs: CASE_TIMEOUT_MS, signal });
+      { env, timeoutMs: options?.caseTimeoutMs ?? CASE_TIMEOUT_MS, signal });
     if (observation.aborted || signal.aborted) {
       await appendEvidence({ phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
       return terminated() ? 143 : 130;
@@ -1119,18 +1120,18 @@ async function runGatedRound(
       }).catch(() => {});
       return 1;
     }
-    // A wall-clock timeout is an integrity stop (spec §3.3); it sits below
-    // the receipt and stop-class gates so their evidence is still collected.
-    if (observation.timedOut) {
-      await appendEvidence({ phase: "stopped", caseId: item.id, reason: "timeout" }).catch(() => {});
-      return 1;
-    }
-
     const taskHash = sha256hex(item.task);
     const journal = await readCaseJournal(item.root.canonical, taskHash);
     const backend = journalString(journal?.backend, BACKEND_IDS);
     const profileId = journalString(journal?.profileId, PROFILE_SET);
-    let passed = observation.exitCode === 0 && gradeOutput(item.grading.mode, observation.stdout.toString("utf8"), item.grading.expected);
+    // A wall-clock timeout is an unjudged case outcome, not a stop (spec
+    // §3.3): it sits below the receipt and stop-class gates so their evidence
+    // is still collected, and nothing may be graded off a half-written state,
+    // so a timed-out case never reaches grading or the contract check — the
+    // timeout record below replaces the graded one after the settled-tree gate.
+    let passed = !observation.timedOut
+      && observation.exitCode === 0
+      && gradeOutput(item.grading.mode, observation.stdout.toString("utf8"), item.grading.expected);
     // A legal profile outside the case's declared allowance is an engineering
     // failure of the case (spec §3.6): the selection ran, so it is recorded,
     // but the case fails without stopping the roster.
@@ -1200,6 +1201,21 @@ async function runGatedRound(
       return 1;
     }
 
+    // The timeout outcome: the case spent its reservation and its tree settled
+    // within the gate, so it is recorded unjudged — the supervisor's exit code
+    // and duration, the journal attribution, the cancelled worker's projection,
+    // and no oracle input (nothing was judged) — and the roster continues. The
+    // case counts as non-pass in the exit tally.
+    if (observation.timedOut) {
+      await appendEvidence({
+        phase: "case", caseId: item.id, outcome: "timeout",
+        exitCode: observation.exitCode, durationMs: observation.durationMs, taskSha256: taskHash,
+        backend, profileId,
+        ...(workerFailure !== undefined ? { workerFailure } : {})
+      }).catch(() => {});
+      failedCases += 1;
+      continue;
+    }
     if (!passed) failedCases += 1;
     const workerPayload = receiptWorkerPayload(observation.stderr);
     // The case record fails open: the case already ran and its stop conditions

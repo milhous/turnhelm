@@ -13,7 +13,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
-import { executeRound, nodeReadClosure, prepareRound, projectWorkerReceipt, runSandboxedCheck } from "./custom-round.js";
+import { CASE_TIMEOUT_MS, executeRound, nodeReadClosure, prepareRound, projectWorkerReceipt, runSandboxedCheck } from "./custom-round.js";
 import { executableFixture } from "./executable-fixture.js";
 
 const FORGED_MARKER_LINE = "__TURNHELM_CHECK_OUTCOME__" + JSON.stringify({ pass: true });
@@ -471,7 +471,8 @@ test("a roster contract that cannot load is refused at prepare, not frozen", asy
 // The fake worker's exit path varies per scenario: the default prints the case
 // root's codex-output.txt lines and completes, a failureMessage emits one
 // turn.failed frame and exits 9 (the CLI classifies and receipts it), a
-// stallMs holds the turn open so a signal test can land mid-case, and a
+// stallMs holds the FIRST execution's turn open so a signal or timeout test
+// can land mid-case (a roster's later cases run the fake unstalled), and a
 // rebuildRoot swaps the case root for a byte-identical rebuild mid-run.
 const fakeCodexBody = (options: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string; rebuildRoot?: boolean }> = {}): string => `
 const argv = process.argv.slice(2);
@@ -494,6 +495,7 @@ let task = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", chunk => { task += chunk; });
 process.stdin.on("end", () => {
+  const firstRun = !fs.existsSync(path.join(__dirname, "invocations"));
   fs.appendFileSync(path.join(__dirname, "invocations"), "1");
   fs.writeFileSync(path.join(process.cwd(), "worker-task.txt"), task);
 ` + (options.extraWrite !== undefined
@@ -530,7 +532,9 @@ process.stdin.on("end", () => {
     : `    const lines = fs.readFileSync(path.join(process.cwd(), "codex-output.txt"), "utf8").split("\\n").filter(Boolean);\n    process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: lines.join("\\n") } }) + "\\n");\n    process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1 } }) + "\\n");\n    process.exit(0);`)
   + `
   };
-` + (options.stallMs !== undefined ? `  setTimeout(finish, ${options.stallMs});` : "  finish();") + `
+` + (options.stallMs !== undefined
+    ? `  if (firstRun) setTimeout(finish, ${options.stallMs}); else finish();`
+    : "  finish();") + `
 });
 `;
 
@@ -1473,6 +1477,130 @@ test("a worker rebuilding its own case root byte-identically stops the settled-t
       "the lone receipt's projection rides the stop record");
     assert.ok(!ledger.some(r => r.phase === "case"), "a replaced root never grades");
   });
+
+// ---------- FE-2 continuation: the timeout outcome and roster continuation ----------
+
+test("a timed-out case records an unjudged timeout outcome and the roster continues",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      },
+      {
+        id: "case-b", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ], {}, { codex: { stallMs: 8000 } });
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake, caseTimeoutMs: 1000 });
+    assert.equal(code, 4, "a complete round with a timed-out case exits four, not one");
+    assert.equal(await readFile(round.invocations, "utf8"), "11",
+      "a timeout is an outcome, not a stop: case-b still runs");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    const record = ledger.find(r => r.phase === "case" && r.caseId === "case-a");
+    assert.equal(record?.outcome, "timeout");
+    assert.equal(record?.exitCode, 130, "the CLI's own SIGINT shutdown settles the exit code");
+    assert.ok(typeof record?.durationMs === "number" && record.durationMs >= 1000,
+      "the supervisor's wall-clock budget is the duration floor");
+    assert.equal(record?.taskSha256, sha256hex("Sum the ledger rows and print the JSON result."));
+    assert.deepEqual([record?.backend, record?.profileId], ["laya", "balanced"],
+      "journal attribution is read exactly as the graded path reads it");
+    const workerFailure = record?.workerFailure as Record<string, unknown> | undefined;
+    assert.equal(workerFailure?.status, "cancelled", "the CLI's owned shutdown receipts the cancelled worker");
+    assert.equal(workerFailure?.ownedShutdown, true);
+    assert.ok(!Object.hasOwn(record ?? {}, "oracleInput"), "nothing was judged, so no oracle input is retained");
+    assert.ok(!Object.hasOwn(record ?? {}, "workerPayload"), "a cancelled worker carries no payload projection");
+    assert.deepEqual(ledger.filter(r => r.phase === "case").map(r => [r.caseId, r.outcome]).sort(),
+      [["case-a", "timeout"], ["case-b", "pass"]], "case-b still grades pass");
+    assert.ok(!ledger.some(r => r.phase === "stopped"), "no stop record on a timeout-outcome round");
+  });
+
+test("an all-pass round with the case timeout knob present still exits zero",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      },
+      {
+        id: "case-b", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ]);
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake, caseTimeoutMs: 30_000 });
+    assert.equal(code, 0, "a knob comfortably above the fast cases never fires");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    assert.deepEqual(ledger.filter(r => r.phase === "case").map(r => [r.caseId, r.outcome]).sort(),
+      [["case-a", "pass"], ["case-b", "pass"]]);
+  });
+
+test("a timed-out case that wrote outside its allowance stops as tree-drift",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      },
+      {
+        id: "case-b", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ], {}, { codex: { stallMs: 8000, extraWrite: "evil.txt" } });
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake, caseTimeoutMs: 1000 });
+    assert.equal(code, 1, "the settled-tree gate outranks the timeout outcome");
+    assert.equal(await readFile(round.invocations, "utf8"), "1", "a drift stop reserves no further case");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    const stop = ledger.at(-1);
+    assert.equal(stop?.phase, "stopped");
+    assert.equal(stop?.caseId, "case-a");
+    assert.equal(stop?.reason, "tree-drift");
+    assert.equal((stop?.workerFailure as Record<string, unknown> | undefined)?.status, "cancelled",
+      "the cancelled receipt's projection rides the stop record");
+    assert.ok(!ledger.some(r => r.phase === "case"), "a drifted timeout case never records an outcome");
+  });
+
+test("a timed-out case that rebuilt its root byte-identically stops as root-identity",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      },
+      {
+        id: "case-b", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ], {}, { codex: { stallMs: 8000, rebuildRoot: true } });
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake, caseTimeoutMs: 1000 });
+    assert.equal(code, 1, "identity is checked before any hash at the shared gate");
+    assert.equal(await readFile(round.invocations, "utf8"), "1", "an identity stop reserves no further case");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    const stop = ledger.at(-1);
+    assert.equal(stop?.phase, "stopped");
+    assert.equal(stop?.caseId, "case-a");
+    assert.equal(stop?.reason, "root-identity", "hash equality never proves identity, timeout or not");
+    assert.equal((stop?.workerFailure as Record<string, unknown> | undefined)?.status, "cancelled",
+      "the cancelled receipt's projection rides the stop record");
+    assert.ok(!ledger.some(r => r.phase === "case"), "a replaced root never records an outcome");
+  });
+
+test("the case timeout knob pins the frozen default and never reaches prepare", async t => {
+  assert.equal(CASE_TIMEOUT_MS, 240_000, "the production case budget is unchanged");
+  const scratch = await scratchRoster(t);
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const prepared = await prepareRound(scratch.rosterPath, { sandboxExecPath: fake });
+  const raw = await readFile(prepared.manifestPath, "utf8");
+  assert.equal(raw.includes("caseTimeoutMs"), false,
+    "prepare mode never reads or freezes the execute-time knob");
+});
 
 test("a roster exceeding its declared caps is refused before any spend",
   { timeout: 90_000 }, async t => {
