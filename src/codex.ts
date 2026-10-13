@@ -108,6 +108,8 @@ export function executeWorker(
     let failure: WorkerResult["error"] | undefined;
     let cancelled = false;
     let stickyFailed = false;
+    let finalMessage: string | undefined;
+    let finalEmitted = false;
     let completionSeen = false;
     let progressEvents = 0;
     let lastEventAt: number | undefined;
@@ -161,6 +163,11 @@ export function executeWorker(
       try { stdin?.destroy(); } catch { /* Teardown must not mask the failure cause. */ }
     };
 
+    // The shared completed-run predicate: settlement emission and the final
+    // status decision compute eligibility once, from the same signals.
+    const completedEligible = (): boolean =>
+      failure === undefined && !cancelled && inputDelivered && childCode === 0 && completionSeen && !stickyFailed;
+
     const finish = (): void => {
       if (finished) return;
       finished = true;
@@ -176,7 +183,7 @@ export function executeWorker(
       if (failure !== undefined) { status = "failed"; error = failure; }
       else if (cancelled) { status = "cancelled"; error = undefined; }
       else if (!inputDelivered) { status = "failed"; error = "stdin"; }
-      else if (childCode !== 0 || !completionSeen || stickyFailed) { status = "failed"; error = "worker"; }
+      else if (!completedEligible()) { status = "failed"; error = "worker"; }
       else { status = "completed"; error = undefined; }
       const result = {
         code: exitStatus(childCode, childSignal),
@@ -207,6 +214,13 @@ export function executeWorker(
     const settle = (): void => {
       if (!closed || finished || !shutdownDischarged || cancelDrainWait !== undefined) return;
       if ((pendingWrites.message !== 0 || pendingWrites.diag !== 0) && !cancelled) return;
+      // Once-only emission phase: only a completed-eligible run with a retained
+      // final agent message writes to stdout, before finishing.
+      if (!finalEmitted && finalMessage !== undefined && completedEligible()) {
+        finalEmitted = true; // Set before the sink call: ack re-entry must never re-emit.
+        emitMessage(finalMessage);
+        return; // The accepted write must flush (or fail) before the run finishes.
+      }
       finish();
     };
 
@@ -436,7 +450,9 @@ export function executeWorker(
     const dispatch = (event: WorkerEvent): void => {
       switch (event.kind) {
         case "message":
-          emitMessage(event.text);
+          // Retained, never forwarded: the last decoded message becomes the
+          // single settlement-time stdout write.
+          finalMessage = event.text;
           return;
         case "completed":
           completionSeen = true;
