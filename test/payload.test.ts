@@ -89,3 +89,73 @@ test("classifyPayload: prose, empty, and truncated first lines are unstructured,
     assert.deepEqual(classifyPayload(message), { mode: "unstructured", emittedText: message });
   }
 });
+
+// PE-06: the no-regression matrix. The sealed 2026-10-12 matrix lived in round
+// tooling, never in this repository; its shape classes are enumerated here
+// deterministically. Expectations are pinned per descriptor — never recomputed
+// by a second implementation of the rules under test.
+const JSON_FIRST_LINES = [
+  '{"count":4,"sum":17}', "[1, 2]", "42", "true", "false", "null", '"text"', '  {"a":1}'
+];
+const TRAILER_SHAPES: ReadonlyArray<{
+  trailer: string; mode: "strict" | "extracted" | "conflict";
+}> = [
+  { trailer: "", mode: "strict" },
+  { trailer: "\n", mode: "strict" },
+  { trailer: "\n\n\n", mode: "strict" },
+  { trailer: "\n  ", mode: "strict" },
+  { trailer: "\nprose summary", mode: "extracted" },
+  { trailer: "\n\n备注：未访问网络。\n", mode: "extracted" },
+  { trailer: "\n   indented explanation", mode: "extracted" },
+  { trailer: "\ncase 10: done", mode: "extracted" },
+  { trailer: "\n```", mode: "conflict" },
+  { trailer: "\n```json", mode: "conflict" },
+  { trailer: '\n{"b":false}', mode: "conflict" },
+  { trailer: "\n  [1]", mode: "conflict" },
+  { trailer: "\n7", mode: "conflict" },
+  { trailer: "\ntrue", mode: "conflict" },
+  { trailer: "\nnull", mode: "conflict" },
+  { trailer: '\n"quoted"', mode: "conflict" }
+];
+
+test("the envelope matrix: first line x trailer shape, classify and extract agree", () => {
+  for (const first of JSON_FIRST_LINES) {
+    const value = JSON.parse(first) as unknown;
+    for (const shape of TRAILER_SHAPES) {
+      const message = shape.trailer === "" ? first : first + shape.trailer;
+      // classifyPayload pins mode and extractor text; the emitter newline stays outside.
+      // trailerBytes counts everything after the first line's newline.
+      if (shape.mode === "strict") {
+        assert.deepEqual(classifyPayload(message), { mode: "strict", emittedText: message });
+      } else if (shape.mode === "extracted") {
+        assert.deepEqual(classifyPayload(message),
+          { mode: "extracted", emittedText: first, trailerBytes: new TextEncoder().encode(shape.trailer.slice(1)).length });
+      } else {
+        assert.deepEqual(classifyPayload(message), { mode: "conflict", emittedText: message });
+      }
+      // envelopePayload is the payload-agnostic fact behind the same shapes.
+      assert.deepEqual(envelopePayload(message),
+        shape.mode === "conflict" ? null : { value });
+    }
+  }
+});
+
+test("the envelope matrix: first lines that are not one JSON value", () => {
+  const specials: ReadonlyArray<{ message: string; mode: "strict" | "unstructured"; envelope: boolean }> = [
+    { message: "not json at all", mode: "unstructured", envelope: false },
+    { message: "", mode: "unstructured", envelope: false },
+    { message: "   ", mode: "unstructured", envelope: false },
+    { message: '{"a":1', mode: "unstructured", envelope: false },
+    { message: '{"a":1} {"b":2}', mode: "unstructured", envelope: false },
+    { message: "prose\n{\"a\":1}", mode: "unstructured", envelope: false },
+    { message: "prettier [\n1\n] but not whole", mode: "unstructured", envelope: false },
+    // Pretty-printed JSON parses whole: strict to the classifier, null to the
+    // line-oriented envelope fact — the two consumers, one shared definition.
+    { message: '[\n{"count":4,"sum":17}\n]', mode: "strict", envelope: false }
+  ];
+  for (const special of specials) {
+    assert.deepEqual(classifyPayload(special.message),
+      { mode: special.mode, emittedText: special.message });
+    assert.equal(envelopePayload(special.message) !== null, special.envelope);
+  }
+});
