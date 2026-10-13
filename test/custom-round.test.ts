@@ -952,10 +952,14 @@ test("a full worker object projects every whitelisted field and ignores unselect
     "the projection is exactly the whitelist — the payload key never reaches it");
 });
 
-test("a not-started worker projects only what it legitimately carries", () => {
+test("a not-started worker projects exactly what it legitimately carries", () => {
   assert.deepEqual(projectWorkerReceipt({ status: "not-started", durationMs: 0, progressEvents: 0, usage: "unreported" }),
-    { status: "not-started", usage: "unreported" },
-    "no code or ownedShutdown is fabricated and the zero placeholders are not evidence");
+    { status: "not-started", durationMs: 0, progressEvents: 0, usage: "unreported" },
+    "the zero duration and event count are real observations; no code or ownedShutdown is fabricated");
+  assert.deepEqual(
+    projectWorkerReceipt({ status: "completed", code: 0, durationMs: 0, progressEvents: 0, ownedShutdown: false, usage: "unreported" }),
+    { status: "completed", code: 0, durationMs: 0, progressEvents: 0, ownedShutdown: false, usage: "unreported" },
+    "a completed run that decoded zero frames keeps its zero — distinguishable from an absent count");
 });
 
 test("a malformed field drops alone; the rest of the projection survives", () => {

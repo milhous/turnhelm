@@ -845,13 +845,14 @@ export function projectWorkerReceipt(worker: unknown): WorkerReceiptEvidence | u
     lastEventAgeMs?: number;
   } = { status: record.status as WorkerReceiptEvidence["status"], usage: workerUsageEvidence(record.usage) };
   const { code, durationMs, progressEvents, ownedShutdown, failureClass, errorSha256, signal, lastEventAgeMs } = record;
-  if (typeof code === "number" && Number.isSafeInteger(code)) projection.code = code;
-  // A not-started worker never ran: its zero duration and zero events are
-  // placeholders, not evidence, so only positive values project.
-  if (typeof durationMs === "number" && Number.isSafeInteger(durationMs) && durationMs >= 1) {
+  // Zeros are observations, not placeholders: a run that decoded no frames
+  // keeps its progressEvents: 0 — distinguishable from an absent count, the
+  // distinction spec §4's adjudication leans on.
+  if (typeof code === "number" && Number.isSafeInteger(code) && code >= 0) projection.code = code;
+  if (typeof durationMs === "number" && Number.isSafeInteger(durationMs) && durationMs >= 0) {
     projection.durationMs = durationMs;
   }
-  if (typeof progressEvents === "number" && Number.isSafeInteger(progressEvents) && progressEvents >= 1) {
+  if (typeof progressEvents === "number" && Number.isSafeInteger(progressEvents) && progressEvents >= 0) {
     projection.progressEvents = progressEvents;
   }
   if (typeof ownedShutdown === "boolean") projection.ownedShutdown = ownedShutdown;
