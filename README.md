@@ -265,8 +265,8 @@ than opened.
   message — the message itself never crosses; only its SHA-256 does, in the
   receipt. Stdout carries at most one worker message — the final agent
   message, written once when the run completes; earlier messages are
-  decoded, counted, and discarded. A failed or cancelled run writes
-  nothing (delivery is not transactional: a cancellation landing mid-write
+  decoded, counted, and discarded. A failed or cancelled run initiates no
+  write (delivery is not transactional: a cancellation landing mid-write
   may leave bytes, so gate on the exit code and receipt). The final
   message is arbitrary content — not guaranteed JSON — and stdout is not a
   general-purpose redactor for secrets in that message.
