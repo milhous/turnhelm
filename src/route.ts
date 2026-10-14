@@ -1,6 +1,6 @@
 import type { ProfileId, ProjectConfig, TaskProfile } from "./config.js";
-import { classifierFailure, directChoiceRequest, eligibleBackends, requestTaskChoice,
-  type ChoiceRequest, type ClassifierFailure, type TaskAttempt, type TaskBackend } from "./systemone.js";
+import { classifierFailure, eligibleBackends, requestTaskChoice,
+  type AttemptTransportMode, type ChoiceRequest, type ClassifierFailure, type TaskAttempt, type TaskBackend } from "./systemone.js";
 import { validateTask } from "./task.js";
 
 export type TaskDecision = Readonly<{
@@ -40,7 +40,6 @@ export async function routeTask(
   validateTask(task);
   const started = performance.now();
   const caller = options.signal;
-  const request = options.request ?? directChoiceRequest;
   const attempts: TaskAttempt[] = [];
   const elapsed = () => Math.round(performance.now() - started);
   const cancelled = (): RoutingResult => deepFreeze({ status: "cancelled", attempts, routingMs: elapsed() });
@@ -50,18 +49,21 @@ export async function routeTask(
     if (caller?.aborted) return cancelled();
     const remaining = config.routingTimeoutMs - elapsed();
     if (remaining <= 0) break;
+    // The transport policy is derived from the frozen config once per backend
+    // and retained on the attempt through every settle branch; Laya is direct.
+    const transportMode: AttemptTransportMode = backend === "jev" ? config.backends.jev.transport.mode : "direct";
     // CPU Laya can take seconds; reserve a quarter of the remaining deadline for Jev.
     const budget = backends.length > 1 && backend === "laya" ? Math.floor(remaining * 3 / 4) : remaining;
     const signal = composeSignal(caller, AbortSignal.timeout(budget));
-    attempts.push({ backend, outcome: "success", durationMs: 0 });
+    attempts.push({ backend, transportMode, outcome: "success", durationMs: 0 });
     const attemptStarted = performance.now();
     const conclude = (outcome: "failed" | "timeout" | "cancelled", failure: ClassifierFailure, at: number): void => {
-      attempts[attempts.length - 1] = { backend, outcome, durationMs: Math.round(at - attemptStarted), failure };
+      attempts[attempts.length - 1] = { backend, transportMode, outcome, durationMs: Math.round(at - attemptStarted), failure };
     };
     try {
-      const { profileId, confidence } = await requestTaskChoice(config, task, backend, options.env, signal, request);
+      const { profileId, confidence } = await requestTaskChoice(config, task, backend, options.env, signal, options.request);
       const finished = performance.now();
-      attempts[attempts.length - 1] = { backend, outcome: "success", durationMs: Math.round(finished - attemptStarted) };
+      attempts[attempts.length - 1] = { backend, transportMode, outcome: "success", durationMs: Math.round(finished - attemptStarted) };
       if (caller?.aborted) {
         conclude("cancelled", CALLER_ABORTED, finished);
         return cancelled();

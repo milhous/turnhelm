@@ -8,7 +8,7 @@ import { mkdir, mkdtemp, open as openFile, readFile, realpath, readdir, stat, wr
 import { createHash, randomInt } from "node:crypto";
 import net from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { parseProjectConfig, PROFILE_IDS, type ProfileId, type ProjectConfig } from "../src/config.js";
@@ -87,10 +87,16 @@ export type WorkerFailureEvidence = Readonly<{
 // decode to settlement. An observation, never a liveness or stall claim.
 export type WorkerProgressEvidence = Readonly<{ events: number; lastEventAgeMs?: number }>;
 
+// Bounded transport-policy evidence (spec §7): application policy replayed
+// from the CLI's routing attempts, never a networking or exit attestation.
+export type AttemptTransportEvidence =
+  | readonly Readonly<{ backend: "laya" | "jev"; transportMode: "direct" | "http-connect" }>[]
+  | "unverified";
+
 export type SafeEvidence =
   | Readonly<{ phase: "prepared"; suite: LiveSuite; manifestSha256: string; startedAt: string }>
   | Readonly<{ phase: "reserved"; caseId: string; worker: number; backends: readonly AcceptanceBackend[] }>
-  | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number; workerUsage?: WorkerUsageEvidence; workerFailure?: WorkerFailureEvidence; workerProgress?: WorkerProgressEvidence }>
+  | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number; attemptTransports?: AttemptTransportEvidence; workerUsage?: WorkerUsageEvidence; workerFailure?: WorkerFailureEvidence; workerProgress?: WorkerProgressEvidence }>
   | Readonly<{ phase: "verified"; caseId: string; verdict: "pass" | "fail"; policy: "match" | "mismatch" | "not-applicable"; checks: Readonly<Record<string, boolean>>; oracleInput?: OracleInputEvidence }>
   | Readonly<{ phase: "completed"; outcome: "pass" | "policy-mismatch"; cases: number; policyMatches: number; policyMismatches: number }>
   | Readonly<{ phase: "completed"; outcome: "pass" | "fail"; cases: number; failed: number }>
@@ -578,7 +584,9 @@ const withBackends = (
   routingTimeoutMs: config.routingTimeoutMs,
   backends: {
     laya: { enabled: laya.enabled, url: laya.url ?? config.backends.laya.url },
-    jev: { enabled: jev.enabled }
+    // The Jev transport is frozen policy: rebinding backends never rebuilds
+    // it as direct behind the caller's selected policy.
+    jev: { enabled: jev.enabled, transport: config.backends.jev.transport }
   },
   profiles: Object.fromEntries(PROFILE_IDS.map(id => [id, {
     model: config.profiles[rebindFrom ?? id].model, effort: config.profiles[rebindFrom ?? id].effort
@@ -588,12 +596,70 @@ const withBackends = (
 const rebindAllProfiles = (source: ProfileId, config: ProjectConfig): ProjectConfig =>
   withBackends(config, { enabled: config.backends.laya.enabled }, { enabled: config.backends.jev.enabled }, source);
 
-export async function prepareAcceptance(suite: LiveSuite): Promise<{ manifestPath: string; sha256: string }> {
-  // Both frozen inputs are validated before any run root exists: a corpus or
-  // host that refuses the contract leaves nothing behind.
+// Spec §9: prepare accepts an explicit config file and the existing dual
+// fallback case selector. The frozen default stays the shipped template.
+export type PrepareAcceptanceOptions = Readonly<{ configPath?: string; caseId?: "dual-jev-write" }>;
+
+const EXPLICIT_CONFIG_MAX_BYTES = 65536;
+
+// One fixed, content-free refusal for every explicit-config failure: read,
+// decode, and parse errors never forward input bytes, JSON snippets, or
+// native URL/decoder messages.
+const explicitConfigRefusal = (): Error =>
+  new Error("prepare explicit config could not be read or validated");
+
+// The explicit config is read through the same production-safe file semantics
+// as every other config read (regular file, no symlinked final component,
+// bounded bytes), resolved at dirname/basename so no general file loader is
+// added; UTF-8 and JSON are fatal.
+const readExplicitConfig = async (configPath: string): Promise<ProjectConfig> => {
+  try {
+    const bytes = await readProjectFile(dirname(configPath), basename(configPath), EXPLICIT_CONFIG_MAX_BYTES);
+    if (bytes === undefined) throw new Error("absent");
+    return parseProjectConfig(JSON.parse(STRICT_DECODER.decode(bytes)));
+  } catch {
+    throw explicitConfigRefusal();
+  }
+};
+
+// Options are validated before anything is prepared: unknown fields, an
+// unknown selector, or a selector outside the dual suite refuse immediately.
+const parsePrepareOptions = (
+  suite: LiveSuite,
+  options: PrepareAcceptanceOptions | undefined
+): Readonly<{ configPath?: string; caseId?: "dual-jev-write" }> => {
+  if (options === undefined) return {};
+  if (!isRecord(options)) throw new Error("prepare options must be an object");
+  for (const key of Object.keys(options)) {
+    if (key !== "configPath" && key !== "caseId") {
+      throw new Error("prepare options must not contain unknown field " + JSON.stringify(key));
+    }
+  }
+  const configPath = options.configPath;
+  if (configPath !== undefined && (typeof configPath !== "string" || configPath.length === 0)) {
+    throw new Error("prepare configPath must be a nonempty string");
+  }
+  const caseId = options.caseId;
+  if (caseId !== undefined) {
+    if (caseId !== "dual-jev-write") throw new Error("prepare caseId must be dual-jev-write");
+    if (suite !== "dual") throw new Error("prepare caseId selects an existing dual fallback case");
+  }
+  return { ...(configPath !== undefined ? { configPath } : {}), ...(caseId !== undefined ? { caseId } : {}) };
+};
+
+export async function prepareAcceptance(
+  suite: LiveSuite,
+  options?: PrepareAcceptanceOptions
+): Promise<{ manifestPath: string; sha256: string }> {
+  // Options, the explicit config, and both frozen inputs are validated before
+  // any run root exists: a refusal leaves nothing behind.
+  const selected = parsePrepareOptions(suite, options);
   const corpusBytes = await readFile(CORPUS_PATH);
   const corpus = parseCorpus(JSON.parse(corpusBytes.toString("utf8")));
   const template = parseProjectConfig(JSON.parse((await readFile(TEMPLATE_PATH)).toString("utf8")));
+  // The frozen base is the shipped template unless the caller supplied an
+  // explicit v2 config; the rebinding below preserves its Jev transport.
+  const base = selected.configPath !== undefined ? await readExplicitConfig(selected.configPath) : template;
   const hostSnapshot = await readHostSnapshot();
 
   const runRoot = await mkdtemp(join(tmpdir(), "turnhelm-live-" + suite + "-"));
@@ -661,11 +727,11 @@ export async function prepareAcceptance(suite: LiveSuite): Promise<{ manifestPat
     };
   };
 
-  const layaOnly = withBackends(template, { enabled: true }, { enabled: false });
+  const layaOnly = withBackends(base, { enabled: true }, { enabled: false });
   const cases: AcceptanceCase[] = [];
   if (suite === "laya") {
     for (const [index, id] of PROFILE_IDS.entries()) {
-      const pair = template.profiles[id];
+      const pair = base.profiles[id];
       cases.push(await makeConsumer(
         `admission-${pair.model}-${pair.effort}`,
         rebindAllProfiles(id, layaOnly),
@@ -677,12 +743,12 @@ export async function prepareAcceptance(suite: LiveSuite): Promise<{ manifestPat
   } else if (suite === "jev") {
     cases.push(await makeConsumer(
       "jev-default-readonly",
-      withBackends(template, { enabled: false }, { enabled: true }),
+      withBackends(base, { enabled: false }, { enabled: true }),
       "worker-readonly",
       ["jev"]
     ));
   } else if (suite === "calibration-dev" || suite === "calibration-holdout") {
-    const calibrationConfig = withBackends(template, { enabled: true }, { enabled: false });
+    const calibrationConfig = withBackends(base, { enabled: true }, { enabled: false });
     const split = suite === "calibration-dev" ? "dev" : "holdout";
     // Trial-major roster (spec §4.2): every corpus entry of the split, once
     // per trial, in frozen table order.
@@ -692,20 +758,31 @@ export async function prepareAcceptance(suite: LiveSuite): Promise<{ manifestPat
       }
     }
   } else {
-    const dualBackends = withBackends(template, { enabled: true }, { enabled: true });
+    const dualBackends = withBackends(base, { enabled: true }, { enabled: true });
     // The fixture case gets an offline-chosen high loopback port, frozen only
-    // in its own config; execute binds it before any paid call.
+    // in its own config; execute binds it before any paid call. The fallback
+    // case is selected before any consumer exists, so the singleton manifest
+    // reserves exactly one case and never creates the lead consumer (spec §9).
     const fixtureUrl = `http://127.0.0.1:${randomInt(20000, 45000)}`;
-    cases.push(await makeConsumer("dual-laya-first", dualBackends, "worker-readonly", ["laya", "jev"]));
+    if (selected.caseId === undefined) {
+      cases.push(await makeConsumer("dual-laya-first", dualBackends, "worker-readonly", ["laya", "jev"]));
+    }
     cases.push(await makeConsumer(
       "dual-jev-write",
-      withBackends(template, { enabled: true, url: fixtureUrl }, { enabled: true }),
+      withBackends(base, { enabled: true, url: fixtureUrl }, { enabled: true }),
       "worker-write",
       ["laya", "jev"]
     ));
   }
 
-  const caps = SUITE_CAPS[suite];
+  // Caps derive from the selected reservations — the same sums the manifest
+  // parser demands at claim — so a narrowed selection reserves less than the
+  // suite; SUITE_CAPS stays the outer ceiling the parser enforces.
+  const caps = {
+    worker: cases.reduce((total, item) => total + item.reservation.worker, 0),
+    laya: cases.filter(item => item.reservation.backends.includes("laya")).length,
+    jev: cases.filter(item => item.reservation.backends.includes("jev")).length
+  };
 
   const hashFile = async (path: string) => ({ path, sha256: sha256hex(await readFile(join(REPO_ROOT, path))) });
   const sourceFiles = (await readdir(join(REPO_ROOT, "src"))).filter(name => name.endsWith(".ts")).sort();
@@ -955,6 +1032,32 @@ const projectWorkerProgress = (value: unknown): WorkerProgressEvidence | undefin
   return projection;
 };
 
+// Pure, bounded transport-policy projection (spec §7), shared by both
+// harnesses: at most two unique backends in a Laya-then-Jev subsequence.
+// Missing, non-array, invalid-enum, duplicate, reversed, oversized, or
+// backend-mode-invalid input (Laya is always direct) reads "unverified" with
+// no plausible-prefix salvage; extra keys are ignored and only the enum fields
+// are rebuilt, so re-projecting a projection is stable.
+const ATTEMPT_BACKENDS: ReadonlySet<string> = new Set(["laya", "jev"]);
+const ATTEMPT_TRANSPORT_MODES: ReadonlySet<string> = new Set(["direct", "http-connect"]);
+
+export function projectAttemptTransports(value: unknown): AttemptTransportEvidence {
+  if (!Array.isArray(value) || value.length > 2) return "unverified";
+  const projected: { backend: "laya" | "jev"; transportMode: "direct" | "http-connect" }[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) return "unverified";
+    const backend = entry.backend;
+    const transportMode = entry.transportMode;
+    if (typeof backend !== "string" || !ATTEMPT_BACKENDS.has(backend)) return "unverified";
+    if (typeof transportMode !== "string" || !ATTEMPT_TRANSPORT_MODES.has(transportMode)) return "unverified";
+    if (backend === "laya" && transportMode !== "direct") return "unverified";
+    if (projected.some(prior => prior.backend === backend)) return "unverified";
+    if (backend === "laya" && projected.length > 0) return "unverified";
+    projected.push({ backend: backend as "laya" | "jev", transportMode: transportMode as "direct" | "http-connect" });
+  }
+  return projected;
+}
+
 const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
   const raw = record as unknown as Record<string, unknown>;
   switch (raw.phase) {
@@ -986,6 +1089,7 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
         exitCode: typeof raw.exitCode === "number" && Number.isInteger(raw.exitCode) ? raw.exitCode : null,
         durationMs: evidenceCount(raw.durationMs),
         attempts: evidenceCount(raw.attempts),
+        ...(raw.attemptTransports !== undefined ? { attemptTransports: projectAttemptTransports(raw.attemptTransports) } : {}),
         ...(raw.workerUsage !== undefined ? { workerUsage: projectWorkerUsage(raw.workerUsage) } : {}),
         ...(workerFailure !== undefined ? { workerFailure } : {}),
         ...(workerProgress !== undefined ? { workerProgress } : {})
@@ -1424,6 +1528,23 @@ const withoutLayaKey = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
   return copy;
 };
 
+// Spec §7: only the two known specialized live cases carry a transport policy
+// check against their frozen config — the bounded projection above, nothing
+// else. Unknown or mismatching evidence blocks their transport PASS through
+// the ordinary verdict stop; no global gate or stop code exists.
+const SPECIALIZED_TRANSPORT_CASE_IDS: ReadonlySet<string> = new Set(["jev-default-readonly", "dual-jev-write"]);
+
+// The policy the frozen config promises per backend: Laya is always direct,
+// Jev rides its frozen transport mode, both only when the config enables them.
+const expectedAttemptTransports = (config: ProjectConfig): readonly Readonly<{
+  backend: AcceptanceBackend; transportMode: "direct" | "http-connect";
+}>[] => [
+  ...(config.backends.laya.enabled ? [{ backend: "laya" as const, transportMode: "direct" as const }] : []),
+  ...(config.backends.jev.enabled
+    ? [{ backend: "jev" as const, transportMode: config.backends.jev.transport.mode }]
+    : [])
+];
+
 export async function executeAcceptance(
   manifestPath: string,
   approvedSha256: string,
@@ -1477,18 +1598,13 @@ export async function executeAcceptance(
     }
 
     // Dual fixture: bind the exact frozen loopback port before the first paid
-    // call. A conflict stops the run with zero paid traffic; the port is never
+    // call. The 503 fixture is bound by dual-jev-write identity — including
+    // the singleton fallback manifest — never by position or port comparison.
+    // A conflict stops the run with zero paid traffic; the port is never
     // re-picked and the frozen config is never rewritten.
     let fixtureCase: AcceptanceCase | null = null;
-    if (run.manifest.suite === "dual" && run.manifest.cases.length > 1) {
-      const primary = new URL(run.manifest.cases[0].config.backends.laya.url);
-      for (const item of run.manifest.cases) {
-        const url = new URL(item.config.backends.laya.url);
-        if (url.hostname === "127.0.0.1" && url.port !== primary.port) {
-          fixtureCase = item;
-          break;
-        }
-      }
+    if (run.manifest.suite === "dual") {
+      fixtureCase = run.manifest.cases.find(item => item.id === "dual-jev-write") ?? null;
     }
     let fixtureServer: net.Server | null = null;
     const fixtureConnections = new Set<net.Socket>();
@@ -1587,7 +1703,10 @@ export async function executeAcceptance(
           selectedProfileId = profileId;
           observation = {
             phase: "observed", caseId: item.id, backend, profileId, rootMatches: "unknown",
-            exitCode: null, durationMs, attempts: attemptsMade
+            exitCode: null, durationMs, attempts: attemptsMade,
+            // Classifier-only cases carry their own route result's attempts —
+            // never a fabricated CLI receipt or worker observation.
+            attemptTransports: projectAttemptTransports(selected ? routing.decision.attempts : routing.attempts)
           };
           try {
             await appendEvidence(run, observation);
@@ -1685,6 +1804,10 @@ export async function executeAcceptance(
           observation = {
             phase: "observed", caseId: item.id, backend, profileId, rootMatches,
             exitCode: supervision.exitCode, durationMs: supervision.durationMs, attempts,
+            // Transport policy rides the same unique CLI-written journal
+            // receipt the attempts count reads; no unique receipt means
+            // unverified.
+            attemptTransports: projectAttemptTransports(receiptLine?.attempts),
             workerUsage: projectWorkerUsage(worker?.usage),
             ...(workerFailure !== undefined ? { workerFailure } : {}),
             ...(workerProgress !== undefined ? { workerProgress } : {})
@@ -1721,6 +1844,16 @@ export async function executeAcceptance(
               const configNow = await readProjectFile(item.root, ".turnhelm/config.json", 65536);
               const configUnchanged = configNow !== undefined && configNow.equals(canonicalConfigBytes(item.config));
               const gitClean = treeDiffClean(treeBefore, await hashTree(item.root), item.allowedChanges);
+              // The specialized live cases compare the receipt's projected
+              // transport policy with what their frozen config promises.
+              let transportPolicyOk = false;
+              if (SPECIALIZED_TRANSPORT_CASE_IDS.has(item.id)) {
+                const transports = observation.attemptTransports;
+                const expected = expectedAttemptTransports(item.config);
+                transportPolicyOk = Array.isArray(transports) && transports.length === expected.length
+                  && transports.every((entry, index) =>
+                    entry.backend === expected[index].backend && entry.transportMode === expected[index].transportMode);
+              }
               const stdoutText = decodeBounded(supervision.stdout);
               let oracleOk = false;
               if (item.oracle.kind === "stdout-json") {
@@ -1753,9 +1886,13 @@ export async function executeAcceptance(
                 "attempts-made": attempts >= 1,
                 // The lead dual case is a laya-first fact (spec §4): one attempt
                 // that selected laya. A natural laya failure falling back to Jev
-                // is not a laya-first success.
-                ...(run.manifest.suite === "dual" && item === run.manifest.cases[0]
+                // is not a laya-first success. The check follows the
+                // dual-laya-first identity, never array position.
+                ...(run.manifest.suite === "dual" && item.id === "dual-laya-first"
                   ? { "laya-first": backend === "laya" && attempts === 1 }
+                  : {}),
+                ...(SPECIALIZED_TRANSPORT_CASE_IDS.has(item.id)
+                  ? { "transport-policy": transportPolicyOk }
                   : {}),
                 ...(item.oracle.kind === "classifier-band" ? {} : { oracle: oracleOk })
               };

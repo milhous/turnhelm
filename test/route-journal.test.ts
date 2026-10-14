@@ -105,6 +105,9 @@ test("a selected routing appends one JSON line of route evidence", async () => {
     assert.equal(entry.confidence, 0.81);
     assert.equal(typeof entry.routingMs, "number");
     assert.ok(Array.isArray(entry.attempts) && entry.attempts.length > 0);
+    assert.deepEqual((entry.attempts as { backend: string; transportMode: string }[])
+      .map(attempt => [attempt.backend, attempt.transportMode]), [["laya", "direct"]],
+      "journaled attempts carry the frozen transport policy");
     assert.equal(typeof entry.ts, "string");
   } finally {
     await rm(root, { recursive: true, force: true });

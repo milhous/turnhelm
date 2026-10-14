@@ -15,8 +15,9 @@ Use native tools when no separate Codex child is needed.
 
 Commands use the current directory, or the exact directory passed with
 `--project <dir>`; they never discover a parent config, even inside a Git
-work tree. Requirements: Node >=24.0.0 (22.8 support dropped; validation on
-an actual 24.x >=24.5.0), Codex CLI >=0.160.0; `run` needs Git.
+work tree. Requirements: Node >=24.5.0 (24.0 support dropped; the CLI refuses
+older runtimes before any work; validation on an actual 24.x >=24.5.0), Codex
+CLI >=0.160.0; `run` needs Git.
 
 | Command | Effect |
 | --- | --- |
@@ -25,8 +26,16 @@ an actual 24.x >=24.5.0), Codex CLI >=0.160.0; `run` needs Git.
 | `turnhelm doctor [--json] [--project <dir>]` | Offline checks; no classification or worker. |
 | `turnhelm doctor --probe [--project <dir>]` | One synthetic request per eligible backend; no worker. |
 
-The sole config is `.turnhelm/config.json` (v1): `routingTimeoutMs`,
-`backends.laya`, `backends.jev`, and six `profiles`; unknown keys are rejected.
+The sole config is `.turnhelm/config.json` (v2): `routingTimeoutMs`,
+`backends.laya`, `backends.jev` — whose `transport` is required, exactly
+`{ "mode": "direct" }` or
+`{ "mode": "http-connect", "proxyUrl": "http://127.0.0.1:<port>" }` with a
+literal loopback host (`127.0.0.1` or `[::1]`) and an explicit decimal port —
+and six `profiles`; unknown keys are rejected. A version-1 or
+transport-missing config is refused before classification; nothing is
+migrated or rewritten automatically — the owner reviews and replaces it with
+a v2 config (or removes it and re-runs `init`, which preserves unrelated
+files). Transport policy is never filled from environment proxy variables.
 `init` preserves valid config and unrelated AGENTS text; repeated identical
 installation is a no-op. Conflicting or changed skill files are refused,
 not overwritten. Stop for owner reconciliation, not automatic deletion.
@@ -80,7 +89,19 @@ Laya is tried first when `backends.laya.enabled` is true. Hosted Jev requires **
 `backends.jev.enabled: true`, `TURNHELM_ALLOW_HOSTED_JEV=1`, and a nonblank
 `TYPESAFE_API_KEY`. Obtain explicit hosted authorization immediately before
 use. Do not enable gates or edit config without approval; keep write/hosted
-opt-ins out of reusable defaults. Laya may require `LAYA_API_KEY`.
+opt-ins out of reusable defaults. Laya may require `LAYA_API_KEY`. A proxy
+transport grants neither hosted nor write authority; those stay separate
+consents.
+
+Transports are explicit per backend. Laya is always direct to its loopback
+origin. Jev rides the configured `transport`: direct HTTPS to the fixed
+`https://api.typesafe.ai/v1/systemone` origin, or `http-connect`, where the
+loopback proxy sees only a CONNECT to `api.typesafe.ai:443` and the
+authorization/body travel inside verified TLS — never in CONNECT headers.
+Environment/system proxies are never inherited; each request owns one scoped
+agent and destroys its request, response, and sockets (including a pending
+CONNECT tunnel) on every outcome. Transport failures fail closed with no
+retry, redirect, or direct fallback.
 
 The full task goes to the classifier: remove secrets and consider residency,
 cost, and consent first. Keep keys out of prompts/logs/diffs/config. The child's
@@ -128,7 +149,9 @@ presence or a selected profile alone.
 Every run that reaches classification appends one JSON evidence line to
 `.turnhelm/routes.jsonl` in the project root before the worker starts,
 whatever the outcome. It records the task's SHA-256 hash and byte length
-(never the task text), the routing status, per-backend attempts, and, on
+(never the task text), the routing status, per-backend attempts with their
+transport mode (`direct` or `http-connect` — recorded policy, not proof of the
+proxy's actual exit), and, on
 selection, the backend, profile, model, effort, and the classifier's
 `confidence` when the backend reports one. Journaling is best-effort: an
 unwritable or non-regular journal path (symlink, FIFO) is diagnosed
@@ -148,13 +171,32 @@ with `worker.status: "not-started"`, no delegation succeeded; report it rather
 than silently changing gates/budget.
 
 Offline `doctor` makes no requests. An authorized `doctor --probe` checks each
-eligible classifier separately, not the worker. The repository's
+eligible classifier separately, not the worker, through the same shared
+request boundary, eligibility gates, and Jev transport policy as `run`. The repository's
 `pnpm run test:live` is a two-step acceptance run: an offline `--prepare`
 spends nothing and freezes a manifest a human must read and approve by
 sha256 before `--execute` spends the reserved per-suite caps (classifier
 requests: laya ≤ 7, jev ≤ 1, dual ≤ 2 per backend, calibration-dev and
 calibration-holdout ≤ 12 each; workers: laya ≤ 7, jev ≤ 1, dual ≤ 2, and the
-calibration suites 0). Each manifest covers exactly one suite, claims once —
+calibration suites 0). `--prepare` accepts `--config <file>` (an owner-reviewed
+v2 config read once and frozen into the manifest; execution never rereads it,
+and a refusal leaves no run root) and, for `dual` only,
+`--case dual-jev-write`; unknown, duplicate, or missing prepare flags are
+refused. The two specialized forms:
+
+```sh
+node dist/test/live.integration.js --prepare jev --config ./acceptance-config.json
+node dist/test/live.integration.js --prepare dual --config ./acceptance-config.json --case dual-jev-write
+```
+
+are future offline preparation examples, not commands to run now and not
+authorization to supply credentials. Each yields a separate fresh-sha256
+singleton (`jev` caps `{worker:1, laya:0, jev:1}`; the dual form
+`{worker:1, laya:1, jev:1}`), read and approved separately. Gate the pair
+manually: readonly Jev first; only its exit 0, complete records, and matching
+transport evidence open the write case, and any first failure closes it — no
+extra probe, worker, or retry between them, and two passes still would not
+resolve the open band/optimality/billing findings. Each manifest covers exactly one suite, claims once —
 never replayed or resumed — and the
 evidence journal stores bounded fixed fields only, degrading unknown receipt
 data to `invalid`/`unknown`, with one deliberate exception: each judged case
@@ -166,7 +208,12 @@ not secret sanitization. Observed records also carry a whitelisted
 optional correlation hash and death signal; no failure text — plus
 `workerProgress`, the receipt's decoded-event count and, when one decoded,
 the last decode's age at settlement, the same parent-observed projection
-that never claims liveness. The harness also exports its shared oracle
+that never claims liveness. Records also carry `attemptTransports`, a bounded
+per-attempt backend/transport-mode projection (Laya always direct; any
+missing, duplicate, or invalid data reads `unverified`) — frozen application
+policy, never a proxy-exit attestation, and never a gate for ordinary cases:
+only `jev-default-readonly` and `dual-jev-write` must match their frozen
+config. The harness also exports its shared oracle
 primitives — the payload-agnostic `envelopePayload` envelope fact and the
 root-parameterized `oracleSandboxPolicy` sandbox profile — so sealed-round
 tooling and tests judge against one frozen definition instead of two that

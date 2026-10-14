@@ -1,6 +1,8 @@
 import { Agent, request as httpRequest, type ClientRequest, type IncomingMessage } from "node:http";
 import { Agent as SecureAgent, request as httpsRequest } from "node:https";
-import { PROFILE_IDS, type ProfileId, type ProjectConfig } from "./config.js";
+import type { Duplex } from "node:stream";
+import { parseJevTransport, PROFILE_IDS, type JevTransport, type ProfileId, type ProjectConfig } from "./config.js";
+import { isSupportedNode } from "./runtime.js";
 
 export type TaskBackend = "laya" | "jev";
 
@@ -10,6 +12,7 @@ export type RequestSpec = Readonly<{
   body: string;
   headers: Readonly<Record<string, string>>;
   signal: AbortSignal;
+  transport: JevTransport;
 }>;
 
 // Bounded and decoded directly; never a Fetch Response or a generic client.
@@ -47,9 +50,13 @@ export function classifierFailure(error: unknown): ClassifierFailure {
   return error instanceof ClassifierRequestError ? error.failure : UNKNOWN_FAILURE;
 }
 
+// The transport policy an attempt ran under: derived from the frozen config
+// (Laya is always direct) and evidence only — never an outcome gate.
+export type AttemptTransportMode = "direct" | "http-connect";
+
 export type TaskAttempt = Readonly<
-  | { backend: TaskBackend; outcome: "success"; durationMs: number }
-  | { backend: TaskBackend; outcome: "failed" | "timeout" | "cancelled"; durationMs: number; failure: ClassifierFailure }
+  | { backend: TaskBackend; transportMode: AttemptTransportMode; outcome: "success"; durationMs: number }
+  | { backend: TaskBackend; transportMode: AttemptTransportMode; outcome: "failed" | "timeout" | "cancelled"; durationMs: number; failure: ClassifierFailure }
 >;
 
 const RESPONSE_LIMIT = 8192;
@@ -65,17 +72,100 @@ const failureCode = (error: unknown): ClassifierFailure["code"] => {
   return typeof code === "string" && FAILURE_CODES.has(code) ? code as ClassifierFailure["code"] : null;
 };
 
-export function directChoiceRequest(spec: RequestSpec): Promise<unknown> {
+// The fixed hosted origin; Laya keeps its configured numeric-loopback origin.
+const JEV_ORIGIN = "https://api.typesafe.ai/v1/systemone";
+const LOOPBACK_HOSTS: readonly string[] = ["127.0.0.1", "::1"];
+
+const refused = (message: string): Promise<never> =>
+  Promise.reject(new ClassifierRequestError({ kind: "request", httpStatus: null, code: null }, message));
+
+// The actual network boundary revalidates backend and target: Laya is a
+// direct HTTP numeric-loopback origin, Jev is exactly the fixed hosted
+// origin, and nothing may carry credentials, a query, or a fragment.
+const validTarget = (backend: TaskBackend, url: URL): boolean => {
+  if (url.username || url.password || url.search || url.hash || url.pathname !== "/v1/systemone") return false;
+  if (backend === "jev") {
+    return url.protocol === "https:" && url.hostname === "api.typesafe.ai" && url.port === "";
+  }
+  return url.protocol === "http:" && LOOPBACK_HOSTS.includes(url.hostname.replace(/^\[|\]$/g, ""));
+};
+
+export function choiceRequest(spec: RequestSpec): Promise<unknown> {
+  // Runtime floor first: an unsupported Node never creates an Agent, request,
+  // or socket, whatever the caller asks for.
+  if (!isSupportedNode()) {
+    return refused("classifier request refused on an unsupported runtime");
+  }
+  // A pre-aborted caller settles before any Agent, request, or socket exists.
+  if (spec.signal.aborted) {
+    return Promise.reject(new ClassifierRequestError(
+      { kind: "aborted", httpStatus: null, code: null },
+      "classifier request was cancelled"));
+  }
+  // The transport policy is revalidated by the single shared parser, so a
+  // malformed policy cannot pass the boundary even through a type assertion.
+  let transport: JevTransport;
+  try {
+    transport = parseJevTransport(spec.transport);
+  } catch {
+    return refused("classifier transport policy is not valid for this backend");
+  }
+  // Laya is always direct; only Jev may carry an explicit proxy policy.
+  if (spec.backend === "laya" && transport.mode !== "direct") {
+    return refused("classifier transport policy is not valid for this backend");
+  }
+  if (!validTarget(spec.backend, spec.url)) {
+    return refused("classifier request target is not valid for this backend");
+  }
   const secure = spec.url.protocol === "https:";
-  // proxyEnv:{} keeps the built-in environment proxy off where the runtime supports
-  // it; runtimes without the option ignore it, so the request stays direct either way.
-  const agent: Agent = secure
-    ? new SecureAgent({ keepAlive: false, proxyEnv: {}, rejectUnauthorized: true })
-    : new Agent({ keepAlive: false, proxyEnv: {} });
+  // One scoped Agent per actual request; proxyEnv:{} keeps the built-in
+  // environment proxy off where the runtime supports it.
+  let settled = false;
+  const ownedSockets = new Set<Duplex>();
+  // A proxy Agent owns every socket its public createConnection boundary
+  // produces: Node does not pool the socket while a CONNECT tunnel is still
+  // pending, so Agent.destroy() alone would leave it open.
+  const track = (socket: Duplex | null | undefined): void => {
+    if (socket === null || socket === undefined || ownedSockets.has(socket)) return;
+    ownedSockets.add(socket);
+    socket.once("close", () => ownedSockets.delete(socket));
+    // A socket delivered after settlement can join no request; it is
+    // destroyed immediately and its late errors can re-settle nothing.
+    if (settled) socket.destroy();
+  };
+  let agent: Agent;
+  if (secure && transport.mode === "http-connect") {
+    const proxyAgent = new SecureAgent({
+      keepAlive: false,
+      proxyEnv: { HTTPS_PROXY: transport.proxyUrl, NO_PROXY: "" },
+      rejectUnauthorized: true
+    });
+    const create = proxyAgent.createConnection.bind(proxyAgent);
+    let constructions = 0;
+    proxyAgent.createConnection = (options, callback) => {
+      // At most one connection construction: an unexpected second attempt is
+      // refused instead of dialed, with no retry or direct fallback.
+      if (constructions > 0) {
+        callback?.(new Error("classifier proxy connection construction refused"), undefined as unknown as Duplex);
+        return undefined;
+      }
+      constructions += 1;
+      const pending = create(options, (error, established) => {
+        track(established);
+        callback?.(error, established);
+      });
+      track(pending);
+      return pending === null ? undefined : pending;
+    };
+    agent = proxyAgent;
+  } else {
+    agent = secure
+      ? new SecureAgent({ keepAlive: false, proxyEnv: {}, rejectUnauthorized: true })
+      : new Agent({ keepAlive: false, proxyEnv: {} });
+  }
   return new Promise((resolve, reject) => {
     let ownedRequest: ClientRequest | undefined;
     let response: IncomingMessage | undefined;
-    let settled = false;
     const onAbort = (): void => fail("classifier request was cancelled", "aborted");
     const finish = (settle: () => void): void => {
       if (settled) return;
@@ -83,6 +173,7 @@ export function directChoiceRequest(spec: RequestSpec): Promise<unknown> {
       spec.signal.removeEventListener("abort", onAbort);
       ownedRequest?.destroy();
       response?.destroy();
+      for (const socket of ownedSockets) socket.destroy();
       void agent.destroy();
       settle();
     };
@@ -143,10 +234,6 @@ export function directChoiceRequest(spec: RequestSpec): Promise<unknown> {
         finish(() => resolve(parsed));
       });
     };
-    if (spec.signal.aborted) {
-      fail("classifier request was cancelled", "aborted");
-      return;
-    }
     spec.signal.addEventListener("abort", onAbort, { once: true });
     try {
       ownedRequest = secure
@@ -224,22 +311,32 @@ function validateChoice(reply: unknown, backend: TaskBackend): TaskChoice {
     : { profileId: route.choice as ProfileId };
 }
 
+// Laya is always direct; only Jev carries an explicit frozen transport policy.
+const LAYA_TRANSPORT: JevTransport = Object.freeze({ mode: "direct" });
+
 export async function requestTaskChoice(
   config: ProjectConfig,
   task: string,
   backend: TaskBackend,
   env: NodeJS.ProcessEnv,
   signal: AbortSignal,
-  request: ChoiceRequest = directChoiceRequest
+  request: ChoiceRequest = choiceRequest
 ): Promise<TaskChoice> {
+  // Eligibility is centralized here so no caller — seam or default — can skip
+  // the enabled/hosted/key gates for a classifier request.
+  if (!eligibleBackends(config, env).includes(backend)) {
+    if (backend === "jev") {
+      const key = env.TYPESAFE_API_KEY;
+      if (typeof key !== "string" || key.trim() === "") throw new Error("TYPESAFE_API_KEY is required");
+    }
+    throw new Error("the backend is not eligible for a classifier request");
+  }
   const url = backend === "jev"
-    ? new URL("/v1/systemone", "https://api.typesafe.ai")
+    ? new URL(JEV_ORIGIN)
     : new URL("/v1/systemone", config.backends.laya.url);
+  const transport = backend === "jev" ? config.backends.jev.transport : LAYA_TRANSPORT;
   const headers: Record<string, string> = { "content-type": "application/json" };
   const key = backend === "jev" ? env.TYPESAFE_API_KEY : env.LAYA_API_KEY;
-  if (backend === "jev" && (typeof key !== "string" || key.trim() === "")) {
-    throw new Error("TYPESAFE_API_KEY is required");
-  }
   if (typeof key === "string" && key.trim() !== "") headers.authorization = "Bearer " + key;
   const criteria: Record<string, string> = {};
   for (const id of PROFILE_IDS) criteria[id] = CHOICE_CRITERIA[id];
@@ -250,7 +347,7 @@ export async function requestTaskChoice(
     ...(backend === "laya" ? { max_len: 8192 } : {}),
     questions: { route: { type: "choice", instructions: CHOICE_INSTRUCTIONS, criteria } }
   });
-  const reply = await request({ backend, url, body, headers, signal });
+  const reply = await request({ backend, url, body, headers, signal, transport });
   try {
     return validateChoice(reply, backend);
   } catch (error) {

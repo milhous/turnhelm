@@ -2,14 +2,14 @@
 // prepare is offline; execute spends only what the claimed manifest reserves.
 // Exit codes: 2 illegal input, 1 failure or incomplete run, 0 complete pass,
 // 130/143 on SIGINT/SIGTERM. Exactly one forwarding separator is tolerated.
-import { executeAcceptance, prepareAcceptance, type LiveSuite } from "./live-acceptance.js";
+import { executeAcceptance, prepareAcceptance, type LiveSuite, type PrepareAcceptanceOptions } from "./live-acceptance.js";
 
 class UsageError extends Error {}
 
-const USAGE = "usage: node dist/test/live.integration.js --prepare laya|jev|dual|calibration-dev|calibration-holdout | --execute <manifest.json> --approve <sha256>";
+const USAGE = "usage: node dist/test/live.integration.js --prepare laya|jev|dual|calibration-dev|calibration-holdout [--config <file>] [--case dual-jev-write] | --execute <manifest.json> --approve <sha256>";
 
 type Args =
-  | { command: "prepare"; suite: LiveSuite }
+  | { command: "prepare"; suite: LiveSuite; configPath?: string; caseId?: "dual-jev-write" }
   | { command: "execute"; manifest: string; approved: string };
 
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -18,11 +18,31 @@ const parseArgs = (argv: readonly string[]): Args => {
   const args = argv.slice();
   if (args[0] === "--") args.shift();
   if (args.includes("--")) throw new UsageError("only one forwarding separator is allowed");
-  if (args.length === 2 && args[0] === "--prepare") {
+  if (args[0] === "--prepare") {
     const suite = args[1];
     if (suite !== "laya" && suite !== "jev" && suite !== "dual"
       && suite !== "calibration-dev" && suite !== "calibration-holdout") throw new UsageError("unknown suite");
-    return { command: "prepare", suite };
+    // Strict prepare options: each flag at most once, a value always present,
+    // and the case selector only for the existing dual fallback case.
+    const flags = new Map<string, string>();
+    for (let index = 2; index < args.length; index += 2) {
+      const flag = args[index];
+      if (flag !== "--config" && flag !== "--case") throw new UsageError("unknown prepare option");
+      if (flags.has(flag)) throw new UsageError("duplicate prepare option");
+      if (args[index + 1] === undefined) throw new UsageError("missing prepare option value");
+      flags.set(flag, args[index + 1] as string);
+    }
+    const configPath = flags.get("--config");
+    const caseId = flags.get("--case");
+    if (caseId !== undefined) {
+      if (caseId !== "dual-jev-write") throw new UsageError("unknown prepare case");
+      if (suite !== "dual") throw new UsageError("the case selector selects an existing dual fallback case");
+    }
+    return {
+      command: "prepare", suite,
+      ...(configPath !== undefined ? { configPath } : {}),
+      ...(caseId !== undefined ? { caseId: caseId as "dual-jev-write" } : {})
+    };
   }
   if (args.length === 4 && args[0] === "--execute" && args[2] === "--approve") {
     if (!HEX64.test(args[3])) throw new UsageError("the approved hash must be 64 lowercase hex characters");
@@ -42,7 +62,11 @@ const main = async (): Promise<number> => {
   }
   if (args.command === "prepare") {
     try {
-      const prepared = await prepareAcceptance(args.suite);
+      const options: PrepareAcceptanceOptions = {
+        ...(args.configPath !== undefined ? { configPath: args.configPath } : {}),
+        ...(args.caseId !== undefined ? { caseId: args.caseId } : {})
+      };
+      const prepared = await prepareAcceptance(args.suite, options);
       process.stdout.write(`manifest ${prepared.manifestPath}\n`);
       process.stdout.write(`sha256 ${prepared.sha256}\n`);
       return 0;

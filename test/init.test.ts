@@ -629,3 +629,38 @@ test("a large AGENTS.md still installs the managed block", async (t) => {
   assert.ok((await readAgents(root)).includes("<!-- turnhelm:begin v1 -->"));
   assert.ok((await readAgents(root)).includes("<!-- turnhelm:end -->"));
 });
+
+// Bytes and inode identities of every installation target, so a refusal is
+// provably non-overwriting rather than merely content-preserving.
+async function snapshotIdentities(root: string): Promise<Record<string, string>> {
+  const paths = ["AGENTS.md", ".turnhelm/config.json", ".agents/skills/turnhelm-routing/SKILL.md", ".agents/skills/turnhelm-routing/agents/openai.yaml"];
+  const result: Record<string, string> = {};
+  for (const relative of paths) {
+    const info = await lstat(join(root, relative));
+    result[relative] = JSON.stringify([await readFile(join(root, relative), "utf8"), info.dev, info.ino]);
+  }
+  return result;
+}
+
+test("init preserves v1 conflicts without writes", async (t) => {
+  const root = await tempProject(t);
+  assert.equal((await initProject(root, { dryRun: false })).code, 0);
+  // An owner's legacy version 1 config conflicts with the v2 parser: init
+  // must refuse with an actionable fixed message and touch no existing target.
+  const configPath = join(root, ".turnhelm", "config.json");
+  const v1 = JSON.parse(await readFile(configPath, "utf8")) as { version: number; backends: { jev: Record<string, unknown> } };
+  v1.version = 1;
+  delete v1.backends.jev.transport;
+  await writeFile(configPath, JSON.stringify(v1, null, 2) + "\n");
+  const before = await snapshotIdentities(root);
+  const dry = await initProject(root, { dryRun: true });
+  assert.equal(dry.code, 1);
+  assert.equal(dry.error, "conflict");
+  const result = await initProject(root, { dryRun: false });
+  assert.equal(result.code, 1);
+  assert.equal(result.error, "conflict");
+  assert.deepEqual(result.applied, []);
+  assert.deepEqual(await snapshotIdentities(root), before, "every target keeps its bytes and inode");
+  await assert.rejects(async () => inspectInstallation(root, await readTemplates()),
+    /is not a valid v2 project config; .*backends\.jev\.transport/);
+});

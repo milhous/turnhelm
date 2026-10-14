@@ -10,17 +10,17 @@ import { decisionReply, fakeEnv, fixtureConfig } from "./fixtures.js";
 
 const jevEnabled = () => {
   const base = fixtureConfig();
-  return parseProjectConfig({ ...base, backends: { ...base.backends, jev: { enabled: true } } });
+  return parseProjectConfig({ ...base, backends: { ...base.backends, jev: { enabled: true, transport: { mode: "direct" } } } });
 };
 
 const layaDisabled = () => {
   const base = fixtureConfig();
-  return parseProjectConfig({ ...base, backends: { laya: { enabled: false, url: base.backends.laya.url }, jev: { enabled: true } } });
+  return parseProjectConfig({ ...base, backends: { laya: { enabled: false, url: base.backends.laya.url }, jev: { enabled: true, transport: { mode: "direct" } } } });
 };
 
 const noBackends = () => {
   const base = fixtureConfig();
-  return parseProjectConfig({ ...base, backends: { laya: { enabled: false, url: base.backends.laya.url }, jev: { enabled: false } } });
+  return parseProjectConfig({ ...base, backends: { laya: { enabled: false, url: base.backends.laya.url }, jev: { enabled: false, transport: { mode: "direct" } } } });
 };
 
 const countingRequest = (log: string[], reply: (backend: TaskBackend) => unknown) => async (spec: RequestSpec) => {
@@ -44,7 +44,7 @@ test("normal max is selected by one Laya request", async () => {
 
 test("one authorized Jev attempt follows one Laya failure", async () => {
   const base = fixtureConfig();
-  const c = parseProjectConfig({ ...base, backends: { ...base.backends, jev: { enabled: true } } });
+  const c = parseProjectConfig({ ...base, backends: { ...base.backends, jev: { enabled: true, transport: { mode: "direct" } } } });
   const calls: string[] = [];
   const r = await routeTask("Investigate cross-module invariants", c, {
     env: fakeEnv, request: async s => {
@@ -72,7 +72,7 @@ test("invalid route fails with evidence, not fallback", async () => {
 test("user cancellation records the initiated request and never tries Jev", async () => {
   const ac = new AbortController();
   const base = fixtureConfig();
-  const c = parseProjectConfig({ ...base, backends: { ...base.backends, jev: { enabled: true } } });
+  const c = parseProjectConfig({ ...base, backends: { ...base.backends, jev: { enabled: true, transport: { mode: "direct" } } } });
   const calls: string[] = [];
   const r = await routeTask("Fix cache invalidation", c, {
     env: fakeEnv, signal: ac.signal, request: async s => {
@@ -153,7 +153,7 @@ for (const durationMs of [3100, 5500]) {
     assert.equal(r.decision.backend, "laya");
     assert.equal(r.decision.profileId, "frontier");
     assert.deepEqual(calls, ["laya"]);
-    assert.deepEqual(r.decision.attempts, [{ backend: "laya", outcome: "success", durationMs }]);
+    assert.deepEqual(r.decision.attempts, [{ backend: "laya", transportMode: "direct", outcome: "success", durationMs }]);
   });
 }
 
@@ -296,7 +296,7 @@ const stalledRequest = (spec: RequestSpec, guardMs: number = STALLED_GUARD_MS): 
 
 test("a Laya timeout leaves Jev only the remaining total budget", async t => {
   const base = fixtureConfig();
-  const c = parseProjectConfig({ ...base, routingTimeoutMs: 400, backends: { ...base.backends, jev: { enabled: true } } });
+  const c = parseProjectConfig({ ...base, routingTimeoutMs: 400, backends: { ...base.backends, jev: { enabled: true, transport: { mode: "direct" } } } });
   const delays: number[] = [];
   const budgets: number[] = [];
   const timeout = AbortSignal.timeout.bind(AbortSignal);
@@ -324,7 +324,7 @@ test("a Laya timeout leaves Jev only the remaining total budget", async t => {
 
 test("a final failure retains both attempts with their outcomes", async () => {
   const base = fixtureConfig();
-  const c = parseProjectConfig({ ...base, routingTimeoutMs: 400, backends: { ...base.backends, jev: { enabled: true } } });
+  const c = parseProjectConfig({ ...base, routingTimeoutMs: 400, backends: { ...base.backends, jev: { enabled: true, transport: { mode: "direct" } } } });
   const stalled = async (spec: RequestSpec) => {
     await stalledRequest(spec);
     throw new Error("unreachable after abort");
@@ -346,7 +346,8 @@ test("stalledRequest leaves zero abort listeners on every settlement path", asyn
     url: new URL("http://127.0.0.1:8765/v1/systemone"),
     body: "{}",
     headers: {},
-    signal
+    signal,
+    transport: { mode: "direct" }
   });
   // Guard-fired settlement, forced through a 10 ms guard instead of the real 5 s.
   const guarded = new AbortController();
@@ -440,7 +441,7 @@ test("a late invalid choice past its budget is timeout evidence", async () => {
 
 test("an elapsed-budget Laya failure keeps its share and still fails over", async () => {
   const base = fixtureConfig();
-  const c = parseProjectConfig({ ...base, routingTimeoutMs: 400, backends: { ...base.backends, jev: { enabled: true } } });
+  const c = parseProjectConfig({ ...base, routingTimeoutMs: 400, backends: { ...base.backends, jev: { enabled: true, transport: { mode: "direct" } } } });
   const calls: string[] = [];
   const r = await routeTask("Prove the invariants", c, {
     env: fakeEnv,
@@ -550,12 +551,13 @@ test("the Laya request carries the task, model, six criteria and credentials", a
 
 test("the Jev request targets the fixed hosted origin with its own model", async () => {
   let seen: RequestSpec | undefined;
-  await requestTaskChoice(fixtureConfig(), "Prove the coupled invariants", "jev", fakeEnv, boundedSignal,
+  await requestTaskChoice(jevEnabled(), "Prove the coupled invariants", "jev", fakeEnv, boundedSignal,
     async spec => { seen = spec; return decisionReply("deep"); });
   assert.ok(seen);
   assert.equal(seen.backend, "jev");
   assert.equal(seen.url.href, "https://api.typesafe.ai/v1/systemone");
   assert.equal(seen.headers.authorization, "Bearer TEST_JEV_SENTINEL");
+  assert.equal(seen.transport.mode, "direct");
   const body = JSON.parse(String(seen.body));
   assert.equal(body.model, "jev-latest");
   assert.deepEqual(Object.keys(body), ["state", "model", "questions"]);
@@ -570,8 +572,11 @@ test("an optional Laya credential is omitted when absent", async () => {
 });
 
 test("hosted Jev requires a nonblank key", async () => {
-  await assert.rejects(() => call(decisionReply(), "jev", {}), /TYPESAFE_API_KEY/);
-  await assert.rejects(() => call(decisionReply(), "jev", { TYPESAFE_API_KEY: "  " }), /TYPESAFE_API_KEY/);
+  const c = jevEnabled();
+  await assert.rejects(() => requestTaskChoice(c, "Prove the invariants", "jev", { LAYA_API_KEY: "k" }, boundedSignal,
+    async () => decisionReply()), /TYPESAFE_API_KEY/);
+  await assert.rejects(() => requestTaskChoice(c, "Prove the invariants", "jev", { TYPESAFE_API_KEY: "  " }, boundedSignal,
+    async () => decisionReply()), /TYPESAFE_API_KEY/);
 });
 
 test("late cancellation and deadline override a successful reply", async () => {
@@ -611,7 +616,7 @@ test("late cancellation and deadline override a successful reply", async () => {
     });
     assert.ok(r.status === "selected");
     assert.equal("failure" in r.decision.attempts[0], false);
-    assert.deepEqual(Object.keys(r.decision.attempts[0]).sort(), ["backend", "durationMs", "outcome"]);
+    assert.deepEqual(Object.keys(r.decision.attempts[0]).sort(), ["backend", "durationMs", "outcome", "transportMode"]);
   }
   // A choice-validation failure is invalid-choice and allows a null status.
   {
@@ -645,5 +650,85 @@ test("late cancellation and deadline override a successful reply", async () => {
     const [attempt] = r.attempts;
     assert.ok(attempt.outcome === "failed");
     assert.equal(attempt.failure, typed.failure);
+  }
+});
+
+test("all attempt outcomes preserve policy", async () => {
+  // The transport policy is derived from the frozen config and retained
+  // through every settle branch: Jev carries its configured policy, Laya is
+  // always direct.
+  const base = fixtureConfig();
+  const httpConnect = { mode: "http-connect" as const, proxyUrl: "http://127.0.0.1:7890" };
+  const proxy = parseProjectConfig({
+    ...base, backends: { ...base.backends, jev: { enabled: true, transport: httpConnect } }
+  });
+  const jevOnly = parseProjectConfig({
+    ...base, backends: {
+      laya: { enabled: false, url: base.backends.laya.url },
+      jev: { enabled: true, transport: httpConnect }
+    }
+  });
+
+  // A Laya failure failing over keeps each backend's own policy on its attempt.
+  const failover = await routeTask("Investigate cross-module invariants", proxy, {
+    env: fakeEnv,
+    request: async s => s.backend === "laya" ? Promise.reject(new Error("TEST_PRIVATE_SENTINEL")) : decisionReply("deep")
+  });
+  assert.ok(failover.status === "selected");
+  assert.deepEqual(failover.decision.attempts.map(a => [a.backend, a.transportMode, a.outcome]),
+    [["laya", "direct", "failed"], ["jev", "http-connect", "success"]]);
+
+  const sole = await routeTask("Prove the invariants", jevOnly, {
+    env: fakeEnv, request: async s => { assert.equal(s.backend, "jev"); return decisionReply("deep"); }
+  });
+  assert.ok(sole.status === "selected");
+  assert.deepEqual(sole.decision.attempts.map(a => [a.backend, a.transportMode, a.outcome]),
+    [["jev", "http-connect", "success"]]);
+
+  // Cap and parse failures keep the direct policy on the failed outcome.
+  for (const [name, error] of [
+    ["cap", new ClassifierRequestError({ kind: "response", httpStatus: 502, code: null }, "classifier response too large")],
+    ["parse", new ClassifierRequestError({ kind: "invalid-response", httpStatus: 200, code: null }, "invalid classifier response")]
+  ] as const) {
+    const r = await routeTask("Fix cache invalidation", fixtureConfig(), {
+      env: fakeEnv, request: async () => { throw error; }
+    });
+    assert.ok(r.status === "failed", name);
+    assert.deepEqual([r.attempts[0].backend, r.attempts[0].transportMode, r.attempts[0].outcome],
+      ["laya", "direct", "failed"], name);
+  }
+  {
+    const r = await routeTask("Fix cache invalidation", fixtureConfig(), {
+      env: fakeEnv, request: async () => ({ answers: { route: "fast" } })
+    });
+    assert.ok(r.status === "failed");
+    const [attempt] = r.attempts;
+    assert.ok(attempt.outcome === "failed");
+    assert.equal(attempt.transportMode, "direct");
+    assert.equal(attempt.failure.kind, "invalid-choice");
+  }
+  {
+    const c = parseProjectConfig({ ...JSON.parse(JSON.stringify(fixtureConfig())), routingTimeoutMs: 100 });
+    const r = await routeTask("Prove the invariants", c, {
+      env: fakeEnv,
+      request: async () => {
+        const until = performance.now() + 150;
+        while (performance.now() < until) { /* block so deadline timers cannot fire */ }
+        return decisionReply("fast");
+      }
+    });
+    assert.ok(r.status === "failed");
+    assert.deepEqual([r.attempts[0].backend, r.attempts[0].transportMode, r.attempts[0].outcome],
+      ["laya", "direct", "timeout"]);
+  }
+  {
+    const ac = new AbortController();
+    const r = await routeTask("Fix cache invalidation", fixtureConfig(), {
+      env: fakeEnv, signal: ac.signal,
+      request: async () => { ac.abort(); throw new Error("TEST_PRIVATE_SENTINEL"); }
+    });
+    assert.ok(r.status === "cancelled");
+    assert.deepEqual([r.attempts[0].backend, r.attempts[0].transportMode, r.attempts[0].outcome],
+      ["laya", "direct", "cancelled"]);
   }
 });

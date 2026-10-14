@@ -20,11 +20,11 @@ test("the module surface is exactly the project task contract", () => {
 
 test("failed routing exposes attempts and timing but never a fallback decision", async () => {
   const config = {
-    version: 1 as const,
+    version: 2 as const,
     routingTimeoutMs: 100,
     backends: {
       laya: { enabled: true, url: "http://127.0.0.1:1" },
-      jev: { enabled: false }
+      jev: { enabled: false, transport: { mode: "direct" } as const }
     },
     profiles: {
       fast: { model: "gpt-6-luna", effort: "low" as const },

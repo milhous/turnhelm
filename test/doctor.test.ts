@@ -115,7 +115,7 @@ test("offline doctor inspects without classifier requests and without writing", 
   assert.equal(actualNode?.status, "pass", "the real unmocked runtime node must pass the node check");
 });
 
-test("doctor node floor is 24.0.0", { concurrency: false }, async (t) => {
+test("doctor node floor is 24.5.0", { concurrency: false }, async (t) => {
   const root = await preparedProject(t);
   const bin = await fakeBin(t);
   const env = await doctorEnv(t, bin);
@@ -124,14 +124,14 @@ test("doctor node floor is 24.0.0", { concurrency: false }, async (t) => {
   assert.ok(descriptor !== undefined && descriptor.configurable, "process.versions.node must be configurable to simulate versions");
   try {
     for (const [version, status] of [
-      ["22.8.0", "fail"], ["23.99.99", "fail"],
-      ["24.0.0", "pass"], ["24.0.1", "pass"], ["25.0.0", "pass"]
+      ["22.8.0", "fail"], ["23.99.99", "fail"], ["24.0.0", "fail"], ["24.4.1", "fail"],
+      ["24.5.0", "pass"], ["24.5.1", "pass"], ["25.0.0", "pass"]
     ] as const) {
       Object.defineProperty(process.versions, "node", { ...descriptor, value: version });
       const result = await doctorProject(root, { probe: false, env, request });
       const node = result.checks.find(check => check.id === "node");
       assert.equal(node?.status, status, version);
-      if (status === "fail") assert.equal(node?.next, "upgrade node to 24.0.0 or newer", version);
+      if (status === "fail") assert.equal(node?.next, "upgrade node to 24.5.0 or newer", version);
     }
   } finally {
     Object.defineProperty(process.versions, "node", descriptor);
@@ -139,7 +139,7 @@ test("doctor node floor is 24.0.0", { concurrency: false }, async (t) => {
   assert.deepEqual(Object.getOwnPropertyDescriptor(process.versions, "node"), descriptor);
   assert.equal(count(), 0);
   const pkg = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { engines: { node: string } };
-  assert.equal(pkg.engines.node, ">=24.0.0");
+  assert.equal(pkg.engines.node, ">=24.5.0");
 });
 
 test("missing config fails config and skips downstream checks", async (t) => {
@@ -240,7 +240,7 @@ test("no eligible backend fails", async (t) => {
   await writeProjectConfig(root, config => {
     const backends = config.backends as Record<string, unknown>;
     backends.laya = { enabled: false, url: "http://127.0.0.1:8765" };
-    backends.jev = { enabled: false };
+    backends.jev = { enabled: false, transport: { mode: "direct" } };
   });
   const bin = await fakeBin(t);
   const result = await doctorProject(root, { probe: false, env: await doctorEnv(t, bin, { TURNHELM_ALLOW_HOSTED_JEV: undefined, TYPESAFE_API_KEY: undefined }) });
@@ -268,7 +268,7 @@ test("probe mode requests each eligible backend exactly once and persists nothin
   const root = await preparedProject(t);
   await writeProjectConfig(root, config => {
     const backends = config.backends as Record<string, unknown>;
-    backends.jev = { enabled: true };
+    backends.jev = { enabled: true, transport: { mode: "direct" } };
   });
   const bin = await fakeBin(t);
   const { request, specs, count } = countingRequest();
@@ -292,7 +292,7 @@ test("a probe that never answers terminates on its configured budget", async (t)
   await writeProjectConfig(root, config => {
     config.routingTimeoutMs = 200;
     const backends = config.backends as Record<string, unknown>;
-    backends.jev = { enabled: false };
+    backends.jev = { enabled: false, transport: { mode: "direct" } };
   });
   const bin = await fakeBin(t);
   const request: ChoiceRequest = () => new Promise(() => { /* never settles, ignores signal */ });
@@ -309,7 +309,7 @@ test("caller cancellation stops a probe without a failure", async (t) => {
   await writeProjectConfig(root, config => {
     config.routingTimeoutMs = 5000;
     const backends = config.backends as Record<string, unknown>;
-    backends.jev = { enabled: false };
+    backends.jev = { enabled: false, transport: { mode: "direct" } };
   });
   const bin = await fakeBin(t);
   const controller = new AbortController();
@@ -348,7 +348,7 @@ test("offline backend checks are unverified when eligible and skipped when unaut
   const root = await preparedProject(t);
   await writeProjectConfig(root, config => {
     const backends = config.backends as Record<string, unknown>;
-    backends.jev = { enabled: true };
+    backends.jev = { enabled: true, transport: { mode: "direct" } };
   });
   const bin = await fakeBin(t);
   const result = await doctorProject(root, { probe: false, env: await doctorEnv(t, bin) });
@@ -363,6 +363,26 @@ test("offline backend checks are unverified when eligible and skipped when unaut
   assert.equal(byId2.get("backend.laya")?.status, "unverified");
 });
 
+// Spec §7: the doctor describes the transport policy without ever carrying the
+// proxy URL (or any other configured value) into its evidence.
+test("offline backend checks describe the transport policy without the URL", async (t) => {
+  const root = await preparedProject(t);
+  await writeProjectConfig(root, config => {
+    const backends = config.backends as Record<string, unknown>;
+    backends.jev = { enabled: true, transport: { mode: "http-connect", proxyUrl: "http://127.0.0.1:7890" } };
+  });
+  const bin = await fakeBin(t);
+  const result = await doctorProject(root, { probe: false, env: await doctorEnv(t, bin) });
+  const byId = new Map(result.checks.map(check => [check.id, check]));
+  assert.ok(byId.get("backend.laya")?.evidence.includes("direct"),
+    "the laya check names its always-direct policy");
+  assert.ok(byId.get("backend.jev")?.evidence.includes("http-connect"),
+    "the jev check names the configured policy mode");
+  const text = JSON.stringify(result.checks);
+  assert.ok(!text.includes("127.0.0.1:7890"), "the proxy URL never reaches doctor evidence");
+  assert.ok(!text.includes("proxyUrl"), "the policy field name never reaches doctor evidence");
+});
+
 // E4: probes must travel the validated single-backend choice boundary — the
 // real six-criteria request with instructions — and only a valid choice
 // envelope may count as a pass.
@@ -370,7 +390,7 @@ test("probe sends the real six-criteria choice request and rejects invalid envel
   const root = await preparedProject(t);
   await writeProjectConfig(root, config => {
     const backends = config.backends as Record<string, unknown>;
-    backends.jev = { enabled: true };
+    backends.jev = { enabled: true, transport: { mode: "direct" } };
   });
   const bin = await fakeBin(t);
   const specs: RequestSpec[] = [];
@@ -436,7 +456,7 @@ test("a probe that resolves after its budget fails instead of passing (E7)", asy
   await writeProjectConfig(root, config => {
     config.routingTimeoutMs = 100;
     const backends = config.backends as Record<string, unknown>;
-    backends.jev = { enabled: false };
+    backends.jev = { enabled: false, transport: { mode: "direct" } };
   });
   const bin = await fakeBin(t);
   const request: ChoiceRequest = async () => {
@@ -511,7 +531,7 @@ test("probe deadline ignores a backward wall-clock correction (E11)", async (t) 
   await writeProjectConfig(root, config => {
     config.routingTimeoutMs = 100;
     const backends = config.backends as Record<string, unknown>;
-    backends.jev = { enabled: false };
+    backends.jev = { enabled: false, transport: { mode: "direct" } };
   });
   const bin = await fakeBin(t);
   const realNow = Date.now;
@@ -536,7 +556,7 @@ test("probe deadline ignores a forward wall-clock correction (E11)", async (t) =
   await writeProjectConfig(root, config => {
     config.routingTimeoutMs = 100;
     const backends = config.backends as Record<string, unknown>;
-    backends.jev = { enabled: false };
+    backends.jev = { enabled: false, transport: { mode: "direct" } };
   });
   const bin = await fakeBin(t);
   const realNow = Date.now;

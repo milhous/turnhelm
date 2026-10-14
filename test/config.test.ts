@@ -15,7 +15,8 @@ test("legacy global config exports no longer exist", () => {
 });
 
 test("the module surface is exactly the project task contract", () => {
-  assert.deepEqual(Object.keys(config).sort(), ["PROFILE_IDS", "parseProjectConfig", "readProjectConfig"]);
+  assert.deepEqual(Object.keys(config).sort(),
+    ["PROFILE_IDS", "parseJevTransport", "parseProjectConfig", "readProjectConfig"]);
 });
 
 test("six fixed profiles are the only routing targets", () => {

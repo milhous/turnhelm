@@ -6,8 +6,9 @@ import { initProject } from "./init.js";
 import { appendRouteJournal } from "./journal.js";
 import { inspectCodex, inspectGit } from "./preflight.js";
 import { resolveProject } from "./project.js";
+import { isSupportedNode, MIN_NODE_VERSION } from "./runtime.js";
 import { routeTask } from "./route.js";
-import { directChoiceRequest, eligibleBackends } from "./systemone.js";
+import { eligibleBackends } from "./systemone.js";
 import { readTask } from "./task.js";
 
 class UsageError extends Error {}
@@ -113,9 +114,9 @@ const doctorCommand = async (root: string, json: boolean, probe: boolean): Promi
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
   try {
-    // The direct transport is only dialed when probe mode asks for it; a plain
-    // doctor never sends a request.
-    const result = await doctorProject(root, { probe, env: process.env, request: directChoiceRequest, signal: controller.signal });
+    // Probe mode alone dials, through the shared default request chain; a
+    // plain doctor never sends a request and creates no network Agent.
+    const result = await doctorProject(root, { probe, env: process.env, signal: controller.signal });
     if (json) {
       console.log(JSON.stringify(result));
     } else {
@@ -169,7 +170,7 @@ const runCommand = async (root: string, write: boolean, positionalTask: string |
     try {
       config = await readProjectConfig(root);
     } catch {
-      diagnostic(".turnhelm/config.json is missing or not a valid v1 project config; run turnhelm init.");
+      diagnostic(".turnhelm/config.json is missing or not a valid v2 project config; run turnhelm init.");
       return 1;
     }
     const [codex, git] = await Promise.all([
@@ -269,6 +270,12 @@ const main = async (): Promise<number> => {
     if (!(error instanceof UsageError)) throw error;
     diagnostic(error.message);
     return 2;
+  }
+  // The runtime floor is checked before any command dispatch: no task input,
+  // tool inspection, or project write happens on an unsupported Node.
+  if (!isSupportedNode()) {
+    diagnostic("node " + MIN_NODE_VERSION.join(".") + " or newer is required; this runtime is unsupported and no command ran.");
+    return 1;
   }
   let root: string;
   try {

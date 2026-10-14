@@ -167,7 +167,10 @@ export async function inspectInstallation(root: string, templates: Templates): P
     try {
       parseProjectConfig(JSON.parse(config.bytes.toString("utf8")));
     } catch {
-      throw new InstallError("conflict", CONFIG_RELATIVE + " is not a valid project config");
+      // Actionable and fixed: never echoes the file's bytes, and names the
+      // v2 shape the owner must review and replace themselves.
+      throw new InstallError("conflict", CONFIG_RELATIVE + " is not a valid v2 project config; replace the legacy config"
+        + " with version 2 including an explicit backends.jev.transport, or remove it and run turnhelm init");
     }
   }
   for (const [path, template] of [[SKILL_MD_RELATIVE, templates.skill], [SKILL_YAML_RELATIVE, templates.metadata]] as const) {

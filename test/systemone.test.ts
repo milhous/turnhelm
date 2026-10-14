@@ -6,11 +6,12 @@ import * as systemone from "../src/systemone.js";
 // fetch-based buildSystemOneRequest/readDecision pair, auto-backend
 // fallback) was removed with the project task entry. Eligibility now comes
 // from ProjectConfig backends plus environment authorization
-// (eligibleBackends), classification is requestTaskChoice, and the direct
+// (eligibleBackends), classification is requestTaskChoice, and the shared
 // transport contract — redirect refusal, byte bounds, body cleanup, TLS
-// verification, proxy isolation — is pinned by direct-transport.test.ts.
-// Route-level choice validation, including own-property checks, is pinned by
-// task-routing.test.ts.
+// verification, explicit Jev routing with owned CONNECT sockets, proxy
+// isolation — is pinned by direct-transport.test.ts and
+// proxy-transport.test.ts. Route-level choice validation, including
+// own-property checks, is pinned by task-routing.test.ts.
 
 test("legacy chooseProfile path no longer exists", () => {
   assert.equal(Object.hasOwn(systemone, "chooseProfile"), false, "chooseProfile must not be exported");
@@ -20,18 +21,23 @@ test("the raw legacy request builder stays unexported", () => {
   assert.equal(Object.hasOwn(systemone, "buildSystemOneRequest"), false);
 });
 
+test("the legacy direct-only request seam stays unexported", () => {
+  assert.equal(Object.hasOwn(systemone, "directChoiceRequest"), false,
+    "the shared request seam is choiceRequest; no legacy alias may remain");
+});
+
 test("the module surface is exactly the project task contract", () => {
   assert.deepEqual(Object.keys(systemone).sort(),
-    ["ClassifierRequestError", "classifierFailure", "directChoiceRequest", "eligibleBackends", "requestTaskChoice"]);
+    ["ClassifierRequestError", "choiceRequest", "classifierFailure", "eligibleBackends", "requestTaskChoice"]);
 });
 
 test("hosted Jev eligibility requires configuration, authorization, and a key together", () => {
   const config = {
-    version: 1 as const,
+    version: 2 as const,
     routingTimeoutMs: 4000,
     backends: {
       laya: { enabled: false, url: "http://127.0.0.1:8765" },
-      jev: { enabled: true }
+      jev: { enabled: true, transport: { mode: "direct" } as const }
     },
     profiles: {
       fast: { model: "gpt-6-luna", effort: "low" as const },

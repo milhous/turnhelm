@@ -1899,9 +1899,12 @@ test("an end-to-end hostile worker failure yields class-only attribution in the 
   ].join("\n"), "node");
   await executableFixture(join(bin, "git"), "#!/bin/sh\nif [ \"$1\" = \"-C\" ]; then echo true; exit 0; fi\nexit 64\n", "shell");
   await writeFile(join(root, ".turnhelm", "config.json"), JSON.stringify({
-    version: 1,
+    version: 2,
     routingTimeoutMs: 4000,
-    backends: { laya: { enabled: true, url: `http://127.0.0.1:${port}` }, jev: { enabled: false } },
+    backends: {
+      laya: { enabled: true, url: `http://127.0.0.1:${port}` },
+      jev: { enabled: false, transport: { mode: "direct" } }
+    },
     profiles: {
       fast: { model: "gpt-6-luna", effort: "low" },
       balanced: { model: "gpt-6.1-sol", effort: "medium" },

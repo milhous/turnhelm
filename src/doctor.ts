@@ -6,6 +6,7 @@ import { classifyAgentsBlock, inspectInstallation } from "./init.js";
 import { readProjectFile } from "./project.js";
 import { readCodexSignals } from "./models.js";
 import { inspectCodex, inspectGit } from "./preflight.js";
+import { isSupportedNode, MIN_NODE_VERSION } from "./runtime.js";
 import { eligibleBackends, requestTaskChoice, type ChoiceRequest, type TaskBackend } from "./systemone.js";
 
 export type CheckStatus = "pass" | "warn" | "fail" | "unverified" | "skipped";
@@ -24,7 +25,6 @@ export type DoctorOptions = Readonly<{
   request?: ChoiceRequest;
 }>;
 
-const NODE_FLOOR: readonly [number, number, number] = [24, 0, 0];
 // Fixed synthetic task: probes only prove the classification round trip works;
 // the answer is never used for routing here.
 const PROBE_TASK = "turnhelm doctor readiness probe: reply with the lightest eligible route.";
@@ -43,18 +43,6 @@ function present(value: unknown): boolean {
   return typeof value === "string" && value.trim() !== "";
 }
 
-function numericVersion(text: string): readonly [number, number, number] {
-  const match = /(\d+)\.(\d+)\.(\d+)/.exec(text);
-  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : [0, 0, 0];
-}
-
-function atLeast(tuple: readonly number[], floor: readonly number[]): boolean {
-  for (let index = 0; index < floor.length; index++) {
-    if (tuple[index] !== floor[index]) return (tuple[index] ?? 0) > floor[index];
-  }
-  return true;
-}
-
 // Fixed, sanitized probe outcome; the injected request's error text is never
 // surfaced and nothing about the probe is persisted.
 type ProbeOutcome = "completed" | "failed" | "cancelled";
@@ -62,11 +50,12 @@ type ProbeOutcome = "completed" | "failed" | "cancelled";
 // The probe travels the validated single-backend choice boundary: it sends
 // the real six-criteria request with instructions and only a valid choice
 // envelope (type "choice", an approved profile id) can complete it (E4).
+// The optional seam passes straight through to the shared protocol default.
 async function runProbe(
   backend: TaskBackend,
   config: ProjectConfig,
   env: NodeJS.ProcessEnv,
-  request: ChoiceRequest,
+  request: ChoiceRequest | undefined,
   callerSignal: AbortSignal | undefined
 ): Promise<ProbeOutcome> {
   if (callerSignal?.aborted) return "cancelled";
@@ -207,11 +196,11 @@ export async function doctorProject(root: string, options: DoctorOptions): Promi
     checks.push(check("root", "fail", "project root is not a readable directory", "run turnhelm doctor from an existing project directory"));
   }
 
-  // node
-  const node = numericVersion(process.versions.node);
-  checks.push(atLeast(node, NODE_FLOOR)
-    ? check("node", "pass", "node " + node.join(".") + " satisfies the supported range", "")
-    : check("node", "fail", "node " + node.join(".") + " is below the supported range", "upgrade node to 24.0.0 or newer"));
+  // node (the one shared runtime floor; never a local copy of the range)
+  checks.push(isSupportedNode()
+    ? check("node", "pass", "node " + process.versions.node + " satisfies the supported range", "")
+    : check("node", "fail", "node " + process.versions.node + " is below the supported range",
+      "upgrade node to " + MIN_NODE_VERSION.join(".") + " or newer"));
 
   // codex + git (bounded non-inference CLI evidence only). E8: help output is
   // flag evidence, never proof of runtime config-key semantics.
@@ -239,10 +228,10 @@ export async function doctorProject(root: string, options: DoctorOptions): Promi
   checks.push(install.assets);
 
   checks.push(configProblem === undefined
-    ? check("config", "pass", ".turnhelm/config.json parsed as a v1 project config", "")
+    ? check("config", "pass", ".turnhelm/config.json parsed as a v2 project config", "")
     : configProblem === "missing"
       ? check("config", "fail", ".turnhelm/config.json is missing", "run turnhelm init")
-      : check("config", "fail", ".turnhelm/config.json is not a valid v1 project config", "fix or remove .turnhelm/config.json, then run turnhelm init"));
+      : check("config", "fail", ".turnhelm/config.json is not a valid v2 project config", "fix or remove .turnhelm/config.json, then run turnhelm init"));
 
   // backends
   const eligible = config ? eligibleBackends(config, env) : [];
@@ -300,10 +289,18 @@ async function backendCheck(
     return check(id, "skipped", "enabled but missing credentials or hosted opt-in", "provide TYPESAFE_API_KEY and set TURNHELM_ALLOW_HOSTED_JEV=1");
   }
   if (options.probe !== true) {
-    return check(id, "unverified", "enabled and eligible offline; reachability, authentication, and model access are unverified without --probe", "run turnhelm doctor --probe to verify the classification round trip");
+    // The policy is described by mode only; the configured proxy URL or any
+    // other transport value never reaches the evidence text.
+    const policy = backend === "jev" ? config.backends.jev.transport.mode : "direct";
+    return check(id, "unverified",
+      "transport policy " + policy + "; enabled and eligible offline; reachability, authentication, and model access are unverified without --probe",
+      "run turnhelm doctor --probe to verify the classification round trip");
   }
-  if (options.request === undefined) {
-    return check(id, "unverified", "probe mode requested but no probe request was provided", "pass an injected probe request to verify the round trip");
+  // The shared runtime floor refuses the probe itself: no request, and no
+  // Agent or socket behind one, on an unsupported Node.
+  if (!isSupportedNode()) {
+    return check(id, "unverified", "probe refused on an unsupported runtime",
+      "upgrade node to " + MIN_NODE_VERSION.join(".") + " or newer, then re-run turnhelm doctor --probe");
   }
   const outcome = await runProbe(backend, config, env, options.request, options.signal);
   const probed = PROBE_STATUS[outcome];

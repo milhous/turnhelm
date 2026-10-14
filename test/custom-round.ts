@@ -14,7 +14,7 @@ import { promisify } from "node:util";
 import type { Readable } from "node:stream";
 import { PROFILE_IDS } from "../src/config.js";
 import { validateTask } from "../src/task.js";
-import { envelopePayload, oracleSandboxPolicy, superviseCli } from "./live-acceptance.js";
+import { envelopePayload, oracleSandboxPolicy, projectAttemptTransports, superviseCli } from "./live-acceptance.js";
 
 export type CheckOutcome =
   | { status: "pass" }
@@ -1127,6 +1127,9 @@ async function runGatedRound(
     const journal = await readCaseJournal(item.root.canonical, taskHash);
     const backend = journalString(journal?.backend, BACKEND_IDS);
     const profileId = journalString(journal?.profileId, PROFILE_SET);
+    // Transport policy is evidence, never a gate: the same bounded shared
+    // projection as the live harness, off the journal's CLI-written attempts.
+    const attemptTransports = projectAttemptTransports(journal?.attempts);
     // A wall-clock timeout is an unjudged case outcome, not a stop (spec
     // §3.3): it sits below the receipt and stop-class gates so their evidence
     // is still collected, and nothing may be graded off a half-written state,
@@ -1214,7 +1217,7 @@ async function runGatedRound(
         await appendEvidence({
           phase: "case", caseId: item.id, outcome: "timeout",
           exitCode: observation.exitCode, durationMs: observation.durationMs, taskSha256: taskHash,
-          backend, profileId,
+          backend, profileId, attemptTransports,
           ...(workerFailure !== undefined ? { workerFailure } : {})
         });
       } catch {
@@ -1232,7 +1235,7 @@ async function runGatedRound(
       await appendEvidence({
         phase: "case", caseId: item.id, outcome: passed ? "pass" : "failed",
         exitCode: observation.exitCode, durationMs: observation.durationMs, taskSha256: taskHash,
-        backend, profileId,
+        backend, profileId, attemptTransports,
         ...(workerPayload !== null ? { workerPayload } : {}),
         ...(workerFailure !== undefined ? { workerFailure } : {}),
         oracleInput: observation.stdout.subarray(0, ORACLE_INPUT_CAP_BYTES).toString("utf8")

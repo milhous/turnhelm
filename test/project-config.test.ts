@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseProjectConfig } from "../src/config.js";
+import { parseJevTransport, parseProjectConfig } from "../src/config.js";
 import { fixtureConfig } from "./fixtures.js";
 
 const editable = () => JSON.parse(JSON.stringify(fixtureConfig()));
@@ -66,16 +66,17 @@ test("requires required fields to be own properties at every level", () => {
   const profile = editable();
   profile.profiles.fast = Object.create(profile.profiles.fast);
   assert.throws(() => parseProjectConfig(profile));
-  const inherited = Object.assign(Object.create({ version: 1 }), {
+  const inherited = Object.assign(Object.create({ version: 2 }), {
     routingTimeoutMs: c.routingTimeoutMs, backends: c.backends, profiles: c.profiles
   });
   assert.throws(() => parseProjectConfig(inherited));
 });
 
-test("requires version 1 and a bounded integer timeout", () => {
+test("requires version 2 and a bounded integer timeout", () => {
   const c = editable();
-  assert.throws(() => parseProjectConfig({ ...c, version: 2 }));
-  assert.throws(() => parseProjectConfig({ ...c, version: "1" }));
+  assert.equal(parseProjectConfig({ ...c, version: 2 }).version, 2);
+  assert.throws(() => parseProjectConfig({ ...c, version: 1 }), /config version must be 2/);
+  assert.throws(() => parseProjectConfig({ ...c, version: "2" }));
   const noVersion = editable();
   delete (noVersion as Record<string, unknown>).version;
   assert.throws(() => parseProjectConfig(noVersion));
@@ -154,6 +155,108 @@ test("requires typed backend settings", () => {
   const c = editable();
   assert.throws(() => parseProjectConfig({ ...c, backends: { ...c.backends, jev: {} } }));
   assert.throws(() => parseProjectConfig({ ...c, backends: { ...c.backends, jev: { enabled: "no" } } }));
+  assert.throws(() => parseProjectConfig({ ...c, backends: { ...c.backends, jev: { enabled: "no", transport: { mode: "direct" } } } }));
   assert.throws(() => parseProjectConfig({ ...c, backends: { ...c.backends, laya: { enabled: true } } }));
   assert.throws(() => parseProjectConfig({ ...c, backends: { ...c.backends, laya: { enabled: 1, url: "http://127.0.0.1:8765" } } }));
+});
+
+test("requires explicit v2 Jev transport", () => {
+  const c = editable();
+  // The shipped default: Jev disabled with an explicit direct transport.
+  assert.deepEqual(parseProjectConfig(c).backends.jev,
+    { enabled: false, transport: { mode: "direct" } });
+  // The old Jev shape (no transport) is rejected whether enabled or disabled.
+  for (const enabled of [true, false]) {
+    assert.throws(() => parseProjectConfig({ ...c, backends: { ...c.backends, jev: { enabled } } }));
+  }
+  const withTransport = (transport: unknown) => parseProjectConfig({
+    ...c, backends: { ...c.backends, jev: { enabled: true, transport } }
+  });
+  assert.throws(() => withTransport(undefined));
+  assert.throws(() => withTransport(null));
+  assert.throws(() => withTransport("direct"));
+  assert.throws(() => withTransport({}));
+  assert.throws(() => withTransport({ mode: null }));
+  assert.throws(() => withTransport({ mode: "socks5" }));
+  // Direct is exactly mode; proxy is exactly mode and proxyUrl.
+  assert.throws(() => withTransport({ mode: "direct", proxyUrl: "http://127.0.0.1:7890" }));
+  assert.throws(() => withTransport({ mode: "direct", extra: true }));
+  assert.throws(() => withTransport({ mode: "http-connect" }));
+  assert.throws(() => withTransport({ mode: "http-connect", proxyUrl: "http://127.0.0.1:7890", extra: true }));
+  // Required fields must be own properties, not inherited.
+  assert.throws(() => withTransport(Object.create({ mode: "direct" })));
+  assert.throws(() => withTransport(Object.assign(Object.create({ proxyUrl: "http://127.0.0.1:7890" }), { mode: "http-connect" })));
+  // A bad transport on a disabled backend is equally rejected.
+  assert.throws(() => parseProjectConfig({
+    ...c, backends: { ...c.backends, jev: { enabled: false, transport: { mode: "http-connect" } } }
+  }));
+  // Successful parse results are frozen.
+  const parsed = parseProjectConfig(c);
+  assert.ok(Object.isFrozen(parsed.backends.jev));
+  assert.ok(Object.isFrozen(parsed.backends.jev.transport));
+  assert.ok(Object.isFrozen(parseJevTransport({ mode: "direct" })));
+  assert.ok(Object.isFrozen(parseJevTransport({ mode: "http-connect", proxyUrl: "http://127.0.0.1:7890" })));
+});
+
+test("retains default proxy ports", () => {
+  assert.deepEqual(parseJevTransport({ mode: "http-connect", proxyUrl: "http://127.0.0.1:80/" }),
+    { mode: "http-connect", proxyUrl: "http://127.0.0.1:80" });
+  assert.deepEqual(parseJevTransport({ mode: "http-connect", proxyUrl: "http://[::1]:7890/" }),
+    { mode: "http-connect", proxyUrl: "http://[::1]:7890" });
+  assert.deepEqual(parseJevTransport({ mode: "http-connect", proxyUrl: "http://127.0.0.1:7890" }),
+    { mode: "http-connect", proxyUrl: "http://127.0.0.1:7890" });
+  assert.deepEqual(parseJevTransport({ mode: "http-connect", proxyUrl: "http://127.0.0.1:1" }),
+    { mode: "http-connect", proxyUrl: "http://127.0.0.1:1" });
+  assert.deepEqual(parseJevTransport({ mode: "http-connect", proxyUrl: "http://127.0.0.1:65535" }),
+    { mode: "http-connect", proxyUrl: "http://127.0.0.1:65535" });
+  assert.deepEqual(parseJevTransport({ mode: "direct" }), { mode: "direct" });
+  // The explicit port, including the HTTP default :80, survives a full
+  // project-config parse; only the optional trailing slash is canonicalized.
+  const c = editable();
+  const proxy = parseProjectConfig({
+    ...c,
+    backends: { ...c.backends, jev: { enabled: true, transport: { mode: "http-connect", proxyUrl: "http://127.0.0.1:80/" } } }
+  });
+  assert.deepEqual(proxy.backends.jev.transport, { mode: "http-connect", proxyUrl: "http://127.0.0.1:80" });
+});
+
+test("rejects malformed proxy policy without echoing input", () => {
+  const bad = (proxyUrl: unknown) => assert.throws(
+    () => parseJevTransport({ mode: "http-connect", proxyUrl }),
+    error => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /^jev transport/, "fixed wording, never a native URL error");
+      assert.equal(error.message.includes(String(proxyUrl)), false, "the message must not echo the input");
+      return true;
+    });
+  for (const url of [
+    "http://localhost:7890", // DNS name
+    "http://127.0.0.2:7890", // a loopback address other than 127.0.0.1
+    "http://0.0.0.0:7890",
+    "http://[::2]:7890",
+    "http://[0:0:0:0:0:0:0:1]:7890", // an alias spelling of ::1
+    "http://example.com:7890",
+    "http://user:pass@127.0.0.1:7890", // credentials
+    "http://@127.0.0.1:7890", // empty-user userinfo
+    " http://127.0.0.1:7890", // whitespace
+    "http://127.0.0.1:7890 ",
+    "http://127%2E0%2E0%2E1:7890", // percent encoding
+    "http://127.0.0.1:7890/?x=1", // query
+    "http://127.0.0.1:7890/proxy", // path
+    "http://127.0.0.1:7890#f", // fragment
+    "https://127.0.0.1:7890", // non-HTTP scheme
+    "http://127.0.0.1:0", // port 0
+    "http://127.0.0.1:65536", // port over the range
+    "http://127.0.0.1:007", // leading-zero port
+    "http://127.0.0.1", // missing port
+    "http://127.0.0.1:7890//", // extra path content
+    "http://" + "0".repeat(300) // oversized
+  ]) {
+    bad(url);
+  }
+  bad(42);
+  bad(null);
+  bad(undefined);
+  bad({});
+  bad(["http://127.0.0.1:7890"]);
 });
