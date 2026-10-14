@@ -14,7 +14,7 @@ import { initProject } from "../src/init.js";
 import { doctorProject } from "../src/doctor.js";
 import { parseProjectConfig } from "../src/config.js";
 import { isSupportedNode, MIN_NODE_VERSION } from "../src/runtime.js";
-import { ClassifierRequestError, directChoiceRequest, requestTaskChoice, type ChoiceRequest, type RequestSpec } from "../src/systemone.js";
+import { ClassifierRequestError, choiceRequest, requestTaskChoice, type ChoiceRequest, type RequestSpec } from "../src/systemone.js";
 
 const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 
@@ -141,10 +141,11 @@ test("unsupported runtime performs no work", async (t) => {
     url: new URL(`http://127.0.0.1:${address.port}/v1/systemone`),
     body: "{\"probe\":true}",
     headers: { "content-type": "application/json" },
-    signal: AbortSignal.timeout(5000)
+    signal: AbortSignal.timeout(5000),
+    transport: { mode: "direct" }
   };
   await withNodeVersion("24.4.1", async () => {
-    const error = await directChoiceRequest(spec)
+    const error = await choiceRequest(spec)
       .then(() => assert.fail("expected the transport to refuse"), (failure: unknown) => failure);
     assert.ok(error instanceof ClassifierRequestError, "the refusal is a typed transport failure");
     assert.equal(error.message, "classifier request refused on an unsupported runtime");
@@ -216,7 +217,7 @@ test("an unsupported CLI runtime refuses before dispatch without tools, requests
   await assert.rejects(() => readFile(join(bin, "codex-invocations")), { code: "ENOENT" });
 });
 
-test("enabled http-connect Jev is refused before any request", async () => {
+test("enabled http-connect Jev carries its frozen policy to the request boundary", async () => {
   const base = fixtureConfig();
   const proxied = parseProjectConfig({
     ...base,
@@ -225,15 +226,14 @@ test("enabled http-connect Jev is refused before any request", async () => {
   const specs: RequestSpec[] = [];
   const request: ChoiceRequest = spec => {
     specs.push(spec);
-    return Promise.resolve({});
+    return Promise.resolve({ answers: { route: { type: "choice", choice: "fast" } } });
   };
-  const error = await requestTaskChoice(proxied, "Investigate cross-module invariants", "jev", fakeEnv, AbortSignal.timeout(500), request)
-    .then(() => assert.fail("expected the proxy policy to be refused"), (failure: unknown) => failure);
-  assert.ok(error instanceof ClassifierRequestError, "the refusal is a typed failure");
-  assert.ok(error.message.includes("http-connect"), "the message names the refused policy");
-  assert.ok(!error.message.includes("7890"), "the message never echoes the configured proxy");
-  assert.deepEqual(error.failure, { kind: "request", httpStatus: null, code: null });
-  assert.equal(specs.length, 0, "neither a seam nor the default transport may dial for a proxy policy");
+  const choice = await requestTaskChoice(proxied, "Investigate cross-module invariants", "jev", fakeEnv, AbortSignal.timeout(500), request);
+  assert.equal(choice.profileId, "fast");
+  assert.equal(specs.length, 1, "the seam is reached once with the frozen policy");
+  assert.equal(specs[0].url.href, "https://api.typesafe.ai/v1/systemone");
+  assert.deepEqual(specs[0].transport, { mode: "http-connect", proxyUrl: "http://127.0.0.1:7890" });
+  assert.ok(Object.isFrozen(specs[0].transport), "the policy stays frozen at the boundary");
 
   // The explicit direct policy keeps reaching the request boundary unchanged.
   const direct = parseProjectConfig({
@@ -241,11 +241,11 @@ test("enabled http-connect Jev is refused before any request", async () => {
     backends: { ...base.backends, jev: { enabled: true, transport: { mode: "direct" } } }
   });
   let reached = 0;
-  const choice = await requestTaskChoice(direct, "Investigate cross-module invariants", "jev", fakeEnv,
+  const directChoice = await requestTaskChoice(direct, "Investigate cross-module invariants", "jev", fakeEnv,
     AbortSignal.timeout(500), async () => {
       reached += 1;
       return { answers: { route: { type: "choice", choice: "fast" } } };
     });
-  assert.equal(choice.profileId, "fast");
+  assert.equal(directChoice.profileId, "fast");
   assert.equal(reached, 1);
 });

@@ -1,5 +1,5 @@
 import type { ProfileId, ProjectConfig, TaskProfile } from "./config.js";
-import { classifierFailure, directChoiceRequest, eligibleBackends, requestTaskChoice,
+import { classifierFailure, eligibleBackends, requestTaskChoice,
   type ChoiceRequest, type ClassifierFailure, type TaskAttempt, type TaskBackend } from "./systemone.js";
 import { validateTask } from "./task.js";
 
@@ -40,7 +40,6 @@ export async function routeTask(
   validateTask(task);
   const started = performance.now();
   const caller = options.signal;
-  const request = options.request ?? directChoiceRequest;
   const attempts: TaskAttempt[] = [];
   const elapsed = () => Math.round(performance.now() - started);
   const cancelled = (): RoutingResult => deepFreeze({ status: "cancelled", attempts, routingMs: elapsed() });
@@ -59,7 +58,7 @@ export async function routeTask(
       attempts[attempts.length - 1] = { backend, outcome, durationMs: Math.round(at - attemptStarted), failure };
     };
     try {
-      const { profileId, confidence } = await requestTaskChoice(config, task, backend, options.env, signal, request);
+      const { profileId, confidence } = await requestTaskChoice(config, task, backend, options.env, signal, options.request);
       const finished = performance.now();
       attempts[attempts.length - 1] = { backend, outcome: "success", durationMs: Math.round(finished - attemptStarted) };
       if (caller?.aborted) {

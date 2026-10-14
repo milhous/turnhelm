@@ -50,11 +50,12 @@ type ProbeOutcome = "completed" | "failed" | "cancelled";
 // The probe travels the validated single-backend choice boundary: it sends
 // the real six-criteria request with instructions and only a valid choice
 // envelope (type "choice", an approved profile id) can complete it (E4).
+// The optional seam passes straight through to the shared protocol default.
 async function runProbe(
   backend: TaskBackend,
   config: ProjectConfig,
   env: NodeJS.ProcessEnv,
-  request: ChoiceRequest,
+  request: ChoiceRequest | undefined,
   callerSignal: AbortSignal | undefined
 ): Promise<ProbeOutcome> {
   if (callerSignal?.aborted) return "cancelled";
@@ -289,9 +290,6 @@ async function backendCheck(
   }
   if (options.probe !== true) {
     return check(id, "unverified", "enabled and eligible offline; reachability, authentication, and model access are unverified without --probe", "run turnhelm doctor --probe to verify the classification round trip");
-  }
-  if (options.request === undefined) {
-    return check(id, "unverified", "probe mode requested but no probe request was provided", "pass an injected probe request to verify the round trip");
   }
   // The shared runtime floor refuses the probe itself: no request, and no
   // Agent or socket behind one, on an unsupported Node.

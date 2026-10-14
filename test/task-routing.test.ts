@@ -346,7 +346,8 @@ test("stalledRequest leaves zero abort listeners on every settlement path", asyn
     url: new URL("http://127.0.0.1:8765/v1/systemone"),
     body: "{}",
     headers: {},
-    signal
+    signal,
+    transport: { mode: "direct" }
   });
   // Guard-fired settlement, forced through a 10 ms guard instead of the real 5 s.
   const guarded = new AbortController();
@@ -550,12 +551,13 @@ test("the Laya request carries the task, model, six criteria and credentials", a
 
 test("the Jev request targets the fixed hosted origin with its own model", async () => {
   let seen: RequestSpec | undefined;
-  await requestTaskChoice(fixtureConfig(), "Prove the coupled invariants", "jev", fakeEnv, boundedSignal,
+  await requestTaskChoice(jevEnabled(), "Prove the coupled invariants", "jev", fakeEnv, boundedSignal,
     async spec => { seen = spec; return decisionReply("deep"); });
   assert.ok(seen);
   assert.equal(seen.backend, "jev");
   assert.equal(seen.url.href, "https://api.typesafe.ai/v1/systemone");
   assert.equal(seen.headers.authorization, "Bearer TEST_JEV_SENTINEL");
+  assert.equal(seen.transport.mode, "direct");
   const body = JSON.parse(String(seen.body));
   assert.equal(body.model, "jev-latest");
   assert.deepEqual(Object.keys(body), ["state", "model", "questions"]);
@@ -570,8 +572,11 @@ test("an optional Laya credential is omitted when absent", async () => {
 });
 
 test("hosted Jev requires a nonblank key", async () => {
-  await assert.rejects(() => call(decisionReply(), "jev", {}), /TYPESAFE_API_KEY/);
-  await assert.rejects(() => call(decisionReply(), "jev", { TYPESAFE_API_KEY: "  " }), /TYPESAFE_API_KEY/);
+  const c = jevEnabled();
+  await assert.rejects(() => requestTaskChoice(c, "Prove the invariants", "jev", { LAYA_API_KEY: "k" }, boundedSignal,
+    async () => decisionReply()), /TYPESAFE_API_KEY/);
+  await assert.rejects(() => requestTaskChoice(c, "Prove the invariants", "jev", { TYPESAFE_API_KEY: "  " }, boundedSignal,
+    async () => decisionReply()), /TYPESAFE_API_KEY/);
 });
 
 test("late cancellation and deadline override a successful reply", async () => {

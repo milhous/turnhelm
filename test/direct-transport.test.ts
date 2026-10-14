@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { ClassifierRequestError, classifierFailure, directChoiceRequest, type RequestSpec } from "../src/systemone.js";
+import { ClassifierRequestError, classifierFailure, choiceRequest, type RequestSpec } from "../src/systemone.js";
 import { decisionReply } from "./fixtures.js";
 
 const execute = promisify(execFile);
@@ -63,14 +63,15 @@ uM2KXlHigxsgSIzxP5wqdwt/3BzHUaMNbPs8rzL/lhH/mys9jENHUzkXVaeoj3TK
 /JbJf0tYaAP90BnyRSU+cTJsBk57DcFPo2lk2oPRiNA=
 -----END CERTIFICATE-----`;
 
-const CHILD_SCRIPT = `const { directChoiceRequest } = await import(process.argv[2]);
+const CHILD_SCRIPT = `const { choiceRequest } = await import(process.argv[2]);
 try {
-  const reply = await directChoiceRequest({
+  const reply = await choiceRequest({
     backend: "laya",
     url: new URL(process.argv[3]),
     body: JSON.stringify({ probe: true }),
     headers: { "content-type": "application/json", authorization: "Bearer TEST" },
-    signal: AbortSignal.timeout(10000)
+    signal: AbortSignal.timeout(10000),
+    transport: { mode: "direct" }
   });
   console.log("REPLY " + JSON.stringify(reply));
 } catch (error) {
@@ -120,7 +121,7 @@ const startServer = async (t: TestContext, handler: Handler, tls: boolean = fals
 };
 
 const spec = (url: URL, signal: AbortSignal = AbortSignal.timeout(5000), body = "{\"probe\":true}"): RequestSpec =>
-  ({ backend: "laya", url, body, headers: { "content-type": "application/json" }, signal });
+  ({ backend: "laya", url, body, headers: { "content-type": "application/json" }, signal, transport: { mode: "direct" } });
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -140,7 +141,7 @@ test("posts the body and resolves the decoded JSON reply", async t => {
     response.setHeader("content-type", "application/json");
     response.end(jsonReply);
   });
-  const reply = await directChoiceRequest(spec(fixture.url));
+  const reply = await choiceRequest(spec(fixture.url));
   assert.deepEqual(reply, decisionReply("fast"));
   assert.ok(seen);
   assert.equal(seen.method, "POST");
@@ -151,12 +152,12 @@ test("posts the body and resolves the decoded JSON reply", async t => {
 
 test("accepts exactly 8192 actual bytes", async t => {
   const fixture = await startServer(t, (request, response) => { response.end(exact8192); });
-  assert.deepEqual(await directChoiceRequest(spec(fixture.url)), JSON.parse(exact8192));
+  assert.deepEqual(await choiceRequest(spec(fixture.url)), JSON.parse(exact8192));
 });
 
 test("rejects 8193 actual bytes as too large", async t => {
   const fixture = await startServer(t, (request, response) => { response.end(oversize8193); });
-  await assert.rejects(() => directChoiceRequest(spec(fixture.url)), /too large/);
+  await assert.rejects(() => choiceRequest(spec(fixture.url)), /too large/);
 });
 
 test("counts actual bytes beyond a small declared length", async t => {
@@ -164,7 +165,7 @@ test("counts actual bytes beyond a small declared length", async t => {
     response.setHeader("content-length", "10");
     response.end("x".repeat(9000));
   });
-  await assert.rejects(() => directChoiceRequest(spec(fixture.url)),
+  await assert.rejects(() => choiceRequest(spec(fixture.url)),
     error => error instanceof Error && /^classifier (request|response) (too large|failed)$/.test(error.message));
 });
 
@@ -173,7 +174,7 @@ test("rejects a declared Content-Length over the bound before reading", async t 
     response.setHeader("content-length", "9000");
     response.end(jsonReply);
   });
-  await assert.rejects(() => directChoiceRequest(spec(fixture.url)), { message: "classifier response too large" });
+  await assert.rejects(() => choiceRequest(spec(fixture.url)), { message: "classifier response too large" });
 });
 
 test("rejects a truncated body without exposing the socket error", async t => {
@@ -182,7 +183,7 @@ test("rejects a truncated body without exposing the socket error", async t => {
     response.write(jsonReply.slice(0, 20));
     response.destroy();
   });
-  await assert.rejects(() => directChoiceRequest(spec(fixture.url)),
+  await assert.rejects(() => choiceRequest(spec(fixture.url)),
     error => error instanceof Error && /^classifier (response was truncated|request failed|response failed)$/.test(error.message));
 });
 
@@ -195,18 +196,18 @@ test("reassembles split UTF-8 bodies", async t => {
     }
     response.end();
   });
-  assert.deepEqual(await directChoiceRequest(spec(fixture.url)),
+  assert.deepEqual(await choiceRequest(spec(fixture.url)),
     { answers: { route: { type: "choice", choice: "fast" } }, note: "界界界界" });
 });
 
 test("rejects malformed JSON and invalid UTF-8", async t => {
   const malformed = await startServer(t, (request, response) => { response.end("{\"answers\":"); });
-  await assert.rejects(() => directChoiceRequest(spec(malformed.url)), { message: "invalid classifier response" });
+  await assert.rejects(() => choiceRequest(spec(malformed.url)), { message: "invalid classifier response" });
   const invalidUtf8 = await startServer(t, (request, response) => {
     response.setHeader("content-length", "3");
     response.end(Buffer.from([0x7b, 0xff, 0x7d]));
   });
-  await assert.rejects(() => directChoiceRequest(spec(invalidUtf8.url)), { message: "invalid classifier response" });
+  await assert.rejects(() => choiceRequest(spec(invalidUtf8.url)), { message: "invalid classifier response" });
 });
 
 test("rejects bodyless 204 and 205 responses", async t => {
@@ -215,7 +216,7 @@ test("rejects bodyless 204 and 205 responses", async t => {
       response.statusCode = status;
       response.end();
     });
-    await assert.rejects(() => directChoiceRequest(spec(fixture.url)), { message: "classifier response has no body" });
+    await assert.rejects(() => choiceRequest(spec(fixture.url)), { message: "classifier response has no body" });
   }
 });
 
@@ -225,7 +226,7 @@ test("rejects non-2xx statuses including 304 without exposing details", async t 
       response.statusCode = status;
       response.end("service detail that must not leak");
     });
-    await assert.rejects(() => directChoiceRequest(spec(fixture.url)), { message: "classifier HTTP " + status });
+    await assert.rejects(() => choiceRequest(spec(fixture.url)), { message: "classifier HTTP " + status });
   }
 });
 
@@ -236,7 +237,7 @@ test("rejects a redirect without requesting the Location", async t => {
     response.setHeader("location", target.url.href);
     response.end();
   });
-  await assert.rejects(() => directChoiceRequest(spec(fixture.url)), { message: "classifier HTTP 302" });
+  await assert.rejects(() => choiceRequest(spec(fixture.url)), { message: "classifier HTTP 302" });
   assert.equal(target.requests.length, 0);
 });
 
@@ -246,28 +247,90 @@ test("rejects an unsupported content encoding", async t => {
       response.setHeader("content-encoding", encoding);
       response.end(jsonReply);
     });
-    await assert.rejects(() => directChoiceRequest(spec(fixture.url)), { message: "unsupported classifier response encoding" });
+    await assert.rejects(() => choiceRequest(spec(fixture.url)), { message: "unsupported classifier response encoding" });
   }
 });
 
 test("rejects a socket destroyed before the response without native error text", async t => {
   const fixture = await startServer(t, request => { request.destroy(); });
-  await assert.rejects(() => directChoiceRequest(spec(fixture.url)), { message: "classifier request failed" });
+  await assert.rejects(() => choiceRequest(spec(fixture.url)), { message: "classifier request failed" });
 });
 
 test("rejects an invalid header construction with a sanitized error", async t => {
   const fixture = await startServer(t, () => assert.fail("the fixture must not receive a request"));
-  await assert.rejects(() => directChoiceRequest({
+  await assert.rejects(() => choiceRequest({
     ...spec(fixture.url), headers: { "content-type": "application/json", authorization: "Bearer bad\nvalue" }
   }), { message: "classifier request failed" });
   assert.equal(fixture.requests.length, 0);
 });
 
+// Direct-mode Jev TLS runs in an isolated child: the official Jev target is
+// remapped onto the owned loopback fixture, and any dial outside it — most
+// importantly a real direct fallback to the hosted origin — is refused and
+// reported. Fixture remapping lives only in this isolated instrumentation.
+const TLS_CHILD = `import https from "node:https";
+import tls from "node:tls";
+import net from "node:net";
+import { syncBuiltinESMExports } from "node:module";
+const port = process.argv[4];
+const realRequest = https.request;
+https.request = function (input, ...rest) {
+  if (input instanceof URL && input.href === "https://api.typesafe.ai/v1/systemone") {
+    input = new URL("https://127.0.0.1:" + port + "/v1/systemone");
+  }
+  return realRequest.call(this, input, ...rest);
+};
+const guard = (real, label) => function (first, ...args) {
+  const options = typeof first === "number" ? { port: first } : first ?? {};
+  const host = String(options.hostname ?? options.host ?? "").replace(/^\\[|\\]$/g, "");
+  if ((host === "127.0.0.1" && String(options.port) === port) || Boolean(options.socket)) {
+    return real.apply(this, [first, ...args]);
+  }
+  console.log("GUARD_DENIED " + label + " " + host + ":" + options.port);
+  throw new Error("TEST_GUARD refused " + label);
+};
+const realNetConnect = net.connect;
+const realNetCreate = net.createConnection;
+const realTlsConnect = tls.connect;
+net.connect = guard(realNetConnect, "net.connect");
+net.createConnection = guard(realNetCreate, "net.createConnection");
+tls.connect = guard(realTlsConnect, "tls.connect");
+syncBuiltinESMExports();
+const mod = await import(process.argv[2]);
+try {
+  const reply = await mod.choiceRequest({
+    backend: "jev",
+    url: new URL("https://api.typesafe.ai/v1/systemone"),
+    body: JSON.stringify({ probe: true }),
+    headers: { "content-type": "application/json", authorization: "Bearer TEST" },
+    signal: AbortSignal.timeout(10000),
+    transport: { mode: "direct" }
+  });
+  console.log("REPLY " + JSON.stringify(reply));
+} catch (error) {
+  console.log("TRANSPORT_ERROR " + String(error && error.message));
+  process.exit(1);
+}
+`;
+
+const tlsChildOutcome = async (t: TestContext, fixtureUrl: URL, env: NodeJS.ProcessEnv = {}): Promise<string> => {
+  const directory = await mkdtemp(join(tmpdir(), "turnhelm-tls-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const script = join(directory, "tls-child.mjs");
+  await writeFile(script, TLS_CHILD);
+  const dist = pathToFileURL(fileURLToPath(new URL("../src/systemone.js", import.meta.url))).href;
+  return execute(process.execPath, [script, dist, fixtureUrl.href, fixtureUrl.port],
+    { encoding: "utf8", timeout: 30000, env: { ...process.env, ...env } })
+    .then((run: { stdout: string }) => run.stdout,
+      (failure: { stdout?: string; stderr?: string }) => String(failure.stdout ?? "") + String(failure.stderr ?? ""));
+};
+
 test("rejects a self-signed TLS certificate with verification kept on", async t => {
   const fixture = await startServer(t, (request, response) => { response.end(jsonReply); }, true);
-  const error = await directChoiceRequest(spec(fixture.url)).then(() => null, (failure: unknown) => failure);
-  assert.ok(error instanceof Error);
-  assert.equal(error.message, "classifier request failed");
+  const outcome = await tlsChildOutcome(t, fixture.url);
+  assert.match(outcome, /TRANSPORT_ERROR classifier request failed/);
+  assert.doesNotMatch(outcome, /REPLY/);
+  assert.doesNotMatch(outcome, /GUARD_DENIED/);
   assert.equal(fixture.requests.length, 0, "the request must die in the TLS handshake, not reach the server");
 });
 
@@ -277,7 +340,7 @@ test("expires the total deadline without waiting for the response", async t => {
     response.end(jsonReply);
   });
   const began = performance.now();
-  await assert.rejects(() => directChoiceRequest(spec(fixture.url, AbortSignal.timeout(60))),
+  await assert.rejects(() => choiceRequest(spec(fixture.url, AbortSignal.timeout(60))),
     { message: "classifier request was cancelled" });
   assert.ok(performance.now() - began < 900, "the deadline must not wait out the delayed response");
 });
@@ -289,7 +352,7 @@ test("honours caller cancellation mid-body", async t => {
     request.on("close", () => response.end());
   });
   const controller = new AbortController();
-  const attempt = directChoiceRequest(spec(fixture.url, controller.signal));
+  const attempt = choiceRequest(spec(fixture.url, controller.signal));
   setTimeout(() => controller.abort(), 30).unref();
   await assert.rejects(() => attempt, { message: "classifier request was cancelled" });
 });
@@ -300,7 +363,7 @@ test("accepts delayed headers and delayed bodies within the deadline", async t =
     response.setHeader("content-type", "application/json");
     response.end(jsonReply);
   });
-  assert.deepEqual(await directChoiceRequest(spec(delayedHeaders.url)), decisionReply("fast"));
+  assert.deepEqual(await choiceRequest(spec(delayedHeaders.url)), decisionReply("fast"));
   const delayedBody = await startServer(t, async (request, response) => {
     const bytes = Buffer.from(jsonReply, "utf8");
     response.setHeader("content-length", String(bytes.length));
@@ -310,7 +373,7 @@ test("accepts delayed headers and delayed bodies within the deadline", async t =
     }
     response.end();
   });
-  assert.deepEqual(await directChoiceRequest(spec(delayedBody.url)), decisionReply("fast"));
+  assert.deepEqual(await choiceRequest(spec(delayedBody.url)), decisionReply("fast"));
 });
 
 // The built-in environment proxy (NODE_USE_ENV_PROXY on the default agent)
@@ -370,17 +433,10 @@ const proxyChild = async (t: TestContext, nodePath: string) => {
 
 test("explicit verification ignores NODE_TLS_REJECT_UNAUTHORIZED=0", async t => {
   const fixture = await startServer(t, (request, response) => { response.end(jsonReply); }, true);
-  const directory = await mkdtemp(join(tmpdir(), "turnhelm-tls-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const script = join(directory, "tls-child.mjs");
-  await writeFile(script, CHILD_SCRIPT);
-  const dist = pathToFileURL(fileURLToPath(new URL("../src/systemone.js", import.meta.url))).href;
-  const env: NodeJS.ProcessEnv = { ...process.env, NODE_TLS_REJECT_UNAUTHORIZED: "0" };
-  const outcome = await execute(process.execPath, [script, dist, fixture.url.href], { encoding: "utf8", timeout: 30000, env })
-    .then((run: { stdout: string }) => run.stdout,
-      (failure: { stdout?: string }) => String(failure.stdout ?? ""));
+  const outcome = await tlsChildOutcome(t, fixture.url, { NODE_TLS_REJECT_UNAUTHORIZED: "0" });
   assert.match(outcome, /TRANSPORT_ERROR classifier request failed/);
   assert.doesNotMatch(outcome, /REPLY/);
+  assert.doesNotMatch(outcome, /GUARD_DENIED/);
   assert.equal(fixture.requests.length, 0, "the request must die in the TLS handshake");
 });
 
@@ -402,12 +458,13 @@ http.request = function (...args) {
 syncBuiltinESMExports();
 const mod = await import(process.argv[2]);
 try {
-  await mod.directChoiceRequest({
+  await mod.choiceRequest({
     backend: "laya",
     url: new URL(process.argv[3]),
     body: "{}",
     headers: { "content-type": "application/json" },
-    signal: AbortSignal.timeout(5000)
+    signal: AbortSignal.timeout(5000),
+    transport: { mode: "direct" }
   });
   console.log("UNEXPECTED_REPLY");
 } catch (error) {
@@ -420,7 +477,7 @@ try {
 `;
 
 const transportError = async (url: URL, signal: AbortSignal = AbortSignal.timeout(5000)): Promise<ClassifierRequestError> => {
-  const error = await directChoiceRequest(spec(url, signal))
+  const error = await choiceRequest(spec(url, signal))
     .then(() => assert.fail("expected the transport to reject"), (failure: unknown) => failure);
   assert.ok(error instanceof ClassifierRequestError, "every transport failure is a typed error");
   assert.ok(Object.isFrozen(error.failure), "the failure projection is frozen");
@@ -471,10 +528,20 @@ test("retains bounded classifier failure without secrets", async t => {
   const truncatedError = await transportError(truncatedUrl);
   assert.equal(truncatedError.message, "classifier response failed");
   assert.deepEqual(truncatedError.failure, { kind: "response", httpStatus: 200, code: "ECONNRESET" });
-  // A DNS failure keeps only the whitelisted request code, never the host.
-  const notFound = await transportError(new URL("http://transport-invalid-host.invalid/v1/systemone"));
-  assert.equal(notFound.message, "classifier request failed");
-  assert.deepEqual(notFound.failure, { kind: "request", httpStatus: null, code: "ENOTFOUND" });
+  // A refused loopback connection keeps only the whitelisted request code;
+  // the boundary itself never dials a non-loopback Laya host at all.
+  const refusedUrl = await new Promise<URL>(resolve => {
+    const probe = createRawServer();
+    probe.listen(0, "127.0.0.1", () => {
+      const address = probe.address();
+      assert.ok(address && typeof address !== "string");
+      const { port } = address;
+      probe.close(() => resolve(new URL(`http://127.0.0.1:${port}/v1/systemone`)));
+    });
+  });
+  const refused = await transportError(refusedUrl);
+  assert.equal(refused.message, "classifier request failed");
+  assert.deepEqual(refused.failure, { kind: "request", httpStatus: null, code: "ECONNREFUSED" });
   // Non-typed exceptions project to unknown with nothing copied.
   assert.deepEqual(classifierFailure(new Error("TEST_PRIVATE_SENTINEL")), { kind: "unknown", httpStatus: null, code: null });
   assert.deepEqual(classifierFailure("raw secret string"), { kind: "unknown", httpStatus: null, code: null });
