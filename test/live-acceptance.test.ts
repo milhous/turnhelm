@@ -1248,6 +1248,8 @@ test("duplicate receipt after observation cannot pass", async t => {
   assert.deepEqual(evidence.map(line => line.phase), ["prepared", "reserved", "observed", "verified", "stopped"]);
   assert.equal(evidence[2].backend, "invalid", "a duplicated receipt degrades the observation");
   assert.equal(evidence[2].profileId, "unknown");
+  assert.equal(evidence[2].attemptTransports, "unverified",
+    "no unique receipt frame means no transport policy evidence");
   assert.equal(evidence[3].verdict, "fail");
   assert.equal(((evidence[3].checks ?? {}) as Record<string, unknown>)["receipt-unique"], false);
   assert.equal(evidence[4].reason, "verdict");
@@ -1925,6 +1927,10 @@ test("worker and calibration cases have different pass criteria", async t => {
     }, "calibration checks never mention receipts or workers");
     assert.ok(!("oracleInput" in record), "classifier-only verdicts judge no worker output");
   }
+  const calibrationObserved = (await readEvidence(calibration.runRoot)).find(line => line.phase === "observed");
+  assert.deepEqual(calibrationObserved?.attemptTransports,
+    [{ backend: "laya", transportMode: "direct" }],
+    "classifier-only cases carry their own route result's transport policy, never fabricated CLI evidence");
 
   // An illegal classifier choice fails calibration on selection facts alone.
   classifier.scripted.push(JSON.stringify({
