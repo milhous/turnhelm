@@ -363,6 +363,26 @@ test("offline backend checks are unverified when eligible and skipped when unaut
   assert.equal(byId2.get("backend.laya")?.status, "unverified");
 });
 
+// Spec §7: the doctor describes the transport policy without ever carrying the
+// proxy URL (or any other configured value) into its evidence.
+test("offline backend checks describe the transport policy without the URL", async (t) => {
+  const root = await preparedProject(t);
+  await writeProjectConfig(root, config => {
+    const backends = config.backends as Record<string, unknown>;
+    backends.jev = { enabled: true, transport: { mode: "http-connect", proxyUrl: "http://127.0.0.1:7890" } };
+  });
+  const bin = await fakeBin(t);
+  const result = await doctorProject(root, { probe: false, env: await doctorEnv(t, bin) });
+  const byId = new Map(result.checks.map(check => [check.id, check]));
+  assert.ok(byId.get("backend.laya")?.evidence.includes("direct"),
+    "the laya check names its always-direct policy");
+  assert.ok(byId.get("backend.jev")?.evidence.includes("http-connect"),
+    "the jev check names the configured policy mode");
+  const text = JSON.stringify(result.checks);
+  assert.ok(!text.includes("127.0.0.1:7890"), "the proxy URL never reaches doctor evidence");
+  assert.ok(!text.includes("proxyUrl"), "the policy field name never reaches doctor evidence");
+});
+
 // E4: probes must travel the validated single-backend choice boundary — the
 // real six-criteria request with instructions — and only a valid choice
 // envelope may count as a pass.

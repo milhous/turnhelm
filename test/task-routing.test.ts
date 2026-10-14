@@ -153,7 +153,7 @@ for (const durationMs of [3100, 5500]) {
     assert.equal(r.decision.backend, "laya");
     assert.equal(r.decision.profileId, "frontier");
     assert.deepEqual(calls, ["laya"]);
-    assert.deepEqual(r.decision.attempts, [{ backend: "laya", outcome: "success", durationMs }]);
+    assert.deepEqual(r.decision.attempts, [{ backend: "laya", transportMode: "direct", outcome: "success", durationMs }]);
   });
 }
 
@@ -616,7 +616,7 @@ test("late cancellation and deadline override a successful reply", async () => {
     });
     assert.ok(r.status === "selected");
     assert.equal("failure" in r.decision.attempts[0], false);
-    assert.deepEqual(Object.keys(r.decision.attempts[0]).sort(), ["backend", "durationMs", "outcome"]);
+    assert.deepEqual(Object.keys(r.decision.attempts[0]).sort(), ["backend", "durationMs", "outcome", "transportMode"]);
   }
   // A choice-validation failure is invalid-choice and allows a null status.
   {
@@ -650,5 +650,85 @@ test("late cancellation and deadline override a successful reply", async () => {
     const [attempt] = r.attempts;
     assert.ok(attempt.outcome === "failed");
     assert.equal(attempt.failure, typed.failure);
+  }
+});
+
+test("all attempt outcomes preserve policy", async () => {
+  // The transport policy is derived from the frozen config and retained
+  // through every settle branch: Jev carries its configured policy, Laya is
+  // always direct.
+  const base = fixtureConfig();
+  const httpConnect = { mode: "http-connect" as const, proxyUrl: "http://127.0.0.1:7890" };
+  const proxy = parseProjectConfig({
+    ...base, backends: { ...base.backends, jev: { enabled: true, transport: httpConnect } }
+  });
+  const jevOnly = parseProjectConfig({
+    ...base, backends: {
+      laya: { enabled: false, url: base.backends.laya.url },
+      jev: { enabled: true, transport: httpConnect }
+    }
+  });
+
+  // A Laya failure failing over keeps each backend's own policy on its attempt.
+  const failover = await routeTask("Investigate cross-module invariants", proxy, {
+    env: fakeEnv,
+    request: async s => s.backend === "laya" ? Promise.reject(new Error("TEST_PRIVATE_SENTINEL")) : decisionReply("deep")
+  });
+  assert.ok(failover.status === "selected");
+  assert.deepEqual(failover.decision.attempts.map(a => [a.backend, a.transportMode, a.outcome]),
+    [["laya", "direct", "failed"], ["jev", "http-connect", "success"]]);
+
+  const sole = await routeTask("Prove the invariants", jevOnly, {
+    env: fakeEnv, request: async s => { assert.equal(s.backend, "jev"); return decisionReply("deep"); }
+  });
+  assert.ok(sole.status === "selected");
+  assert.deepEqual(sole.decision.attempts.map(a => [a.backend, a.transportMode, a.outcome]),
+    [["jev", "http-connect", "success"]]);
+
+  // Cap and parse failures keep the direct policy on the failed outcome.
+  for (const [name, error] of [
+    ["cap", new ClassifierRequestError({ kind: "response", httpStatus: 502, code: null }, "classifier response too large")],
+    ["parse", new ClassifierRequestError({ kind: "invalid-response", httpStatus: 200, code: null }, "invalid classifier response")]
+  ] as const) {
+    const r = await routeTask("Fix cache invalidation", fixtureConfig(), {
+      env: fakeEnv, request: async () => { throw error; }
+    });
+    assert.ok(r.status === "failed", name);
+    assert.deepEqual([r.attempts[0].backend, r.attempts[0].transportMode, r.attempts[0].outcome],
+      ["laya", "direct", "failed"], name);
+  }
+  {
+    const r = await routeTask("Fix cache invalidation", fixtureConfig(), {
+      env: fakeEnv, request: async () => ({ answers: { route: "fast" } })
+    });
+    assert.ok(r.status === "failed");
+    const [attempt] = r.attempts;
+    assert.ok(attempt.outcome === "failed");
+    assert.equal(attempt.transportMode, "direct");
+    assert.equal(attempt.failure.kind, "invalid-choice");
+  }
+  {
+    const c = parseProjectConfig({ ...JSON.parse(JSON.stringify(fixtureConfig())), routingTimeoutMs: 100 });
+    const r = await routeTask("Prove the invariants", c, {
+      env: fakeEnv,
+      request: async () => {
+        const until = performance.now() + 150;
+        while (performance.now() < until) { /* block so deadline timers cannot fire */ }
+        return decisionReply("fast");
+      }
+    });
+    assert.ok(r.status === "failed");
+    assert.deepEqual([r.attempts[0].backend, r.attempts[0].transportMode, r.attempts[0].outcome],
+      ["laya", "direct", "timeout"]);
+  }
+  {
+    const ac = new AbortController();
+    const r = await routeTask("Fix cache invalidation", fixtureConfig(), {
+      env: fakeEnv, signal: ac.signal,
+      request: async () => { ac.abort(); throw new Error("TEST_PRIVATE_SENTINEL"); }
+    });
+    assert.ok(r.status === "cancelled");
+    assert.deepEqual([r.attempts[0].backend, r.attempts[0].transportMode, r.attempts[0].outcome],
+      ["laya", "direct", "cancelled"]);
   }
 });

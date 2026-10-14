@@ -404,12 +404,12 @@ test("run routes once, executes one read-only worker, and emits one accurate rec
   assert.equal(receipt.type, "turnhelm.receipt");
   assert.equal(receipt.root, realpathSync(f.root));
   const routing = receipt.routing as { status: string; routingMs: number;
-    attempts: { backend: string; outcome: string; durationMs: number }[];
+    attempts: { backend: string; transportMode: string; outcome: string; durationMs: number }[];
     requestCounts: { laya: number; jev: number } };
   assert.equal(routing.status, "selected");
   assert.equal(typeof routing.routingMs, "number");
-  assert.deepEqual(routing.attempts.map(attempt => ({ backend: attempt.backend, outcome: attempt.outcome })),
-    [{ backend: "laya", outcome: "success" }]);
+  assert.deepEqual(routing.attempts.map(attempt => ({ backend: attempt.backend, transportMode: attempt.transportMode, outcome: attempt.outcome })),
+    [{ backend: "laya", transportMode: "direct", outcome: "success" }]);
   assert.deepEqual(routing.requestCounts, { laya: 1, jev: 0 });
   assert.deepEqual(receipt.selection, { backend: "laya", profileId: "balanced", model: "gpt-6.1-sol", effort: "medium" });
   const worker = receipt.worker as { status: string; code: number; durationMs: number; usage?: Record<string, number>;

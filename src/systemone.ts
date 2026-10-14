@@ -50,9 +50,13 @@ export function classifierFailure(error: unknown): ClassifierFailure {
   return error instanceof ClassifierRequestError ? error.failure : UNKNOWN_FAILURE;
 }
 
+// The transport policy an attempt ran under: derived from the frozen config
+// (Laya is always direct) and evidence only — never an outcome gate.
+export type AttemptTransportMode = "direct" | "http-connect";
+
 export type TaskAttempt = Readonly<
-  | { backend: TaskBackend; outcome: "success"; durationMs: number }
-  | { backend: TaskBackend; outcome: "failed" | "timeout" | "cancelled"; durationMs: number; failure: ClassifierFailure }
+  | { backend: TaskBackend; transportMode: AttemptTransportMode; outcome: "success"; durationMs: number }
+  | { backend: TaskBackend; transportMode: AttemptTransportMode; outcome: "failed" | "timeout" | "cancelled"; durationMs: number; failure: ClassifierFailure }
 >;
 
 const RESPONSE_LIMIT = 8192;

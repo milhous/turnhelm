@@ -289,7 +289,12 @@ async function backendCheck(
     return check(id, "skipped", "enabled but missing credentials or hosted opt-in", "provide TYPESAFE_API_KEY and set TURNHELM_ALLOW_HOSTED_JEV=1");
   }
   if (options.probe !== true) {
-    return check(id, "unverified", "enabled and eligible offline; reachability, authentication, and model access are unverified without --probe", "run turnhelm doctor --probe to verify the classification round trip");
+    // The policy is described by mode only; the configured proxy URL or any
+    // other transport value never reaches the evidence text.
+    const policy = backend === "jev" ? config.backends.jev.transport.mode : "direct";
+    return check(id, "unverified",
+      "transport policy " + policy + "; enabled and eligible offline; reachability, authentication, and model access are unverified without --probe",
+      "run turnhelm doctor --probe to verify the classification round trip");
   }
   // The shared runtime floor refuses the probe itself: no request, and no
   // Agent or socket behind one, on an unsupported Node.

@@ -87,10 +87,16 @@ export type WorkerFailureEvidence = Readonly<{
 // decode to settlement. An observation, never a liveness or stall claim.
 export type WorkerProgressEvidence = Readonly<{ events: number; lastEventAgeMs?: number }>;
 
+// Bounded transport-policy evidence (spec §7): application policy replayed
+// from the CLI's routing attempts, never a networking or exit attestation.
+export type AttemptTransportEvidence =
+  | readonly Readonly<{ backend: "laya" | "jev"; transportMode: "direct" | "http-connect" }>[]
+  | "unverified";
+
 export type SafeEvidence =
   | Readonly<{ phase: "prepared"; suite: LiveSuite; manifestSha256: string; startedAt: string }>
   | Readonly<{ phase: "reserved"; caseId: string; worker: number; backends: readonly AcceptanceBackend[] }>
-  | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number; workerUsage?: WorkerUsageEvidence; workerFailure?: WorkerFailureEvidence; workerProgress?: WorkerProgressEvidence }>
+  | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number; attemptTransports?: AttemptTransportEvidence; workerUsage?: WorkerUsageEvidence; workerFailure?: WorkerFailureEvidence; workerProgress?: WorkerProgressEvidence }>
   | Readonly<{ phase: "verified"; caseId: string; verdict: "pass" | "fail"; policy: "match" | "mismatch" | "not-applicable"; checks: Readonly<Record<string, boolean>>; oracleInput?: OracleInputEvidence }>
   | Readonly<{ phase: "completed"; outcome: "pass" | "policy-mismatch"; cases: number; policyMatches: number; policyMismatches: number }>
   | Readonly<{ phase: "completed"; outcome: "pass" | "fail"; cases: number; failed: number }>
@@ -957,6 +963,32 @@ const projectWorkerProgress = (value: unknown): WorkerProgressEvidence | undefin
   return projection;
 };
 
+// Pure, bounded transport-policy projection (spec §7), shared by both
+// harnesses: at most two unique backends in a Laya-then-Jev subsequence.
+// Missing, non-array, invalid-enum, duplicate, reversed, oversized, or
+// backend-mode-invalid input (Laya is always direct) reads "unverified" with
+// no plausible-prefix salvage; extra keys are ignored and only the enum fields
+// are rebuilt, so re-projecting a projection is stable.
+const ATTEMPT_BACKENDS: ReadonlySet<string> = new Set(["laya", "jev"]);
+const ATTEMPT_TRANSPORT_MODES: ReadonlySet<string> = new Set(["direct", "http-connect"]);
+
+export function projectAttemptTransports(value: unknown): AttemptTransportEvidence {
+  if (!Array.isArray(value) || value.length > 2) return "unverified";
+  const projected: { backend: "laya" | "jev"; transportMode: "direct" | "http-connect" }[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) return "unverified";
+    const backend = entry.backend;
+    const transportMode = entry.transportMode;
+    if (typeof backend !== "string" || !ATTEMPT_BACKENDS.has(backend)) return "unverified";
+    if (typeof transportMode !== "string" || !ATTEMPT_TRANSPORT_MODES.has(transportMode)) return "unverified";
+    if (backend === "laya" && transportMode !== "direct") return "unverified";
+    if (projected.some(prior => prior.backend === backend)) return "unverified";
+    if (backend === "laya" && projected.length > 0) return "unverified";
+    projected.push({ backend: backend as "laya" | "jev", transportMode: transportMode as "direct" | "http-connect" });
+  }
+  return projected;
+}
+
 const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
   const raw = record as unknown as Record<string, unknown>;
   switch (raw.phase) {
@@ -988,6 +1020,7 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
         exitCode: typeof raw.exitCode === "number" && Number.isInteger(raw.exitCode) ? raw.exitCode : null,
         durationMs: evidenceCount(raw.durationMs),
         attempts: evidenceCount(raw.attempts),
+        ...(raw.attemptTransports !== undefined ? { attemptTransports: projectAttemptTransports(raw.attemptTransports) } : {}),
         ...(raw.workerUsage !== undefined ? { workerUsage: projectWorkerUsage(raw.workerUsage) } : {}),
         ...(workerFailure !== undefined ? { workerFailure } : {}),
         ...(workerProgress !== undefined ? { workerProgress } : {})
@@ -1589,7 +1622,10 @@ export async function executeAcceptance(
           selectedProfileId = profileId;
           observation = {
             phase: "observed", caseId: item.id, backend, profileId, rootMatches: "unknown",
-            exitCode: null, durationMs, attempts: attemptsMade
+            exitCode: null, durationMs, attempts: attemptsMade,
+            // Classifier-only cases carry their own route result's attempts —
+            // never a fabricated CLI receipt or worker observation.
+            attemptTransports: projectAttemptTransports(selected ? routing.decision.attempts : routing.attempts)
           };
           try {
             await appendEvidence(run, observation);
@@ -1687,6 +1723,10 @@ export async function executeAcceptance(
           observation = {
             phase: "observed", caseId: item.id, backend, profileId, rootMatches,
             exitCode: supervision.exitCode, durationMs: supervision.durationMs, attempts,
+            // Transport policy rides the same unique CLI-written journal
+            // receipt the attempts count reads; no unique receipt means
+            // unverified.
+            attemptTransports: projectAttemptTransports(receiptLine?.attempts),
             workerUsage: projectWorkerUsage(worker?.usage),
             ...(workerFailure !== undefined ? { workerFailure } : {}),
             ...(workerProgress !== undefined ? { workerProgress } : {})

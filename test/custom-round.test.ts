@@ -571,6 +571,7 @@ const scratchExecuteRound = async (
     choice?: string;
     codex?: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string; rebuildRoot?: boolean }>;
     poisonJournal?: boolean;
+    journalAttempts?: unknown;
     baselineFiles?: readonly string[];
   }>
 ): Promise<{
@@ -627,6 +628,14 @@ const scratchExecuteRound = async (
       // backend and an unknown profile: whatever reads it must whitelist.
       await writeFile(join(root, ".turnhelm", "routes.jsonl"),
         JSON.stringify({ taskSha256: sha256hex(taskText), backend: { evil: 1 }, profileId: "not-a-profile" }) + "\n");
+    }
+    if (options?.journalAttempts !== undefined) {
+      // A seeded first journal line whose attribution stays valid but whose
+      // routing attempts carry the injected transport mode: only the mode is
+      // hostile, so the receipt, output, and tree all stay valid.
+      await writeFile(join(root, ".turnhelm", "routes.jsonl"),
+        JSON.stringify({ taskSha256: sha256hex(taskText), backend: "laya", profileId: "balanced",
+          attempts: options.journalAttempts }) + "\n");
     }
     const contract = join(base, spec.id + "-contract.mjs");
     await writeFile(contract,
@@ -1235,6 +1244,76 @@ test("journal values outside the whitelist degrade to null", { timeout: 90_000 }
   const record = ledger.find(r => r.phase === "case");
   assert.equal(record?.backend, null, "an object backend never reaches the ledger");
   assert.equal(record?.profileId, null, "an unknown profile id never reaches the ledger");
+  assert.equal(record?.attemptTransports, "unverified", "absent routing attempts degrade to unverified");
+});
+
+test("unknown mode does not stop ordinary rounds", { timeout: 240_000 }, async t => {
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const passing = (id: string): ExecuteCaseSpec => ({
+    id, kind: "worker-readonly", transport: "arg",
+    grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+  });
+
+  // The clean baseline: both cases pass, both workers actually launch, and the
+  // case records carry the CLI's own laya-direct transport policy.
+  const clean = await scratchExecuteRound(t, [passing("case-a"), passing("case-b")]);
+  assert.equal(await executeRound(clean.manifestPath, clean.approvalSha256,
+    { env: clean.env, sandboxExecPath: fake }), 0);
+  const cleanCases = (await readLedger(join(clean.evidenceRoot, "custom-round-evidence.jsonl")))
+    .filter(r => r.phase === "case");
+  assert.deepEqual(cleanCases.map(r => [r.caseId, r.outcome]), [["case-a", "pass"], ["case-b", "pass"]]);
+  assert.deepEqual(cleanCases.map(r => r.attemptTransports),
+    [[{ backend: "laya", transportMode: "direct" }], [{ backend: "laya", transportMode: "direct" }]],
+    "a clean round projects the frozen laya-direct policy on every case record");
+  assert.equal(await readFile(clean.invocations, "utf8"), "11", "both workers actually launch");
+
+  // A malformed or missing transport mode is evidence, never a gate: the
+  // outcomes, worker launches, continuation, and exit code all stay unchanged.
+  for (const [name, attempts] of [
+    ["malformed mode", [{ backend: "laya", transportMode: "socks5", outcome: "success", durationMs: 5 }]],
+    ["missing mode", [{ backend: "laya", outcome: "success", durationMs: 5 }]]
+  ] as const) {
+    const poisoned = await scratchExecuteRound(t, [passing("case-a"), passing("case-b")],
+      {}, { journalAttempts: attempts });
+    assert.equal(await executeRound(poisoned.manifestPath, poisoned.approvalSha256,
+      { env: poisoned.env, sandboxExecPath: fake }), 0, name + " keeps the pass round at zero");
+    const ledger = await readLedger(join(poisoned.evidenceRoot, "custom-round-evidence.jsonl"));
+    const cases = ledger.filter(r => r.phase === "case");
+    assert.deepEqual(cases.map(r => [r.caseId, r.outcome]), [["case-a", "pass"], ["case-b", "pass"]],
+      name + " preserves outcomes and continuation");
+    assert.ok(cases.every(r => r.attemptTransports === "unverified"),
+      name + " degrades to unverified on every case record");
+    assert.ok(!ledger.some(r => r.phase === "stopped"), name + " never stops the roster");
+    assert.equal(await readFile(poisoned.invocations, "utf8"), "11", name + " still launches both workers");
+  }
+
+  // A failed case keeps the same protocol: the failure is graded exactly as
+  // without the field, and the roster runs on to a completed failure (exit 4).
+  const failed = await scratchExecuteRound(t, [
+    { ...passing("case-a"), outputLines: ['{"count":9,"sum":9}'] },
+    passing("case-b")
+  ], {}, { journalAttempts: [{ backend: "laya", transportMode: "socks5" }] });
+  assert.equal(await executeRound(failed.manifestPath, failed.approvalSha256,
+    { env: failed.env, sandboxExecPath: fake }), 4, "the failed round keeps its completed-failure exit");
+  const failedLedger = await readLedger(join(failed.evidenceRoot, "custom-round-evidence.jsonl"));
+  assert.deepEqual(failedLedger.filter(r => r.phase === "case").map(r => [r.caseId, r.outcome]),
+    [["case-a", "failed"], ["case-b", "pass"]], "the failed outcome and continuation are unchanged");
+  assert.ok(!failedLedger.some(r => r.phase === "stopped"), "an ordinary failure never becomes a stop");
+
+  // A timeout outcome is unjudged, continuable evidence: the same shape holds.
+  const timedOut = await scratchExecuteRound(t, [passing("case-a"), passing("case-b")],
+    {}, { journalAttempts: [{ backend: "laya" }], codex: { stallMs: 8000 } });
+  assert.equal(await executeRound(timedOut.manifestPath, timedOut.approvalSha256,
+    { env: timedOut.env, sandboxExecPath: fake, caseTimeoutMs: 1000 }), 4,
+    "the timed-out round still completes the roster");
+  const timeoutLedger = await readLedger(join(timedOut.evidenceRoot, "custom-round-evidence.jsonl"));
+  const timeoutCases = timeoutLedger.filter(r => r.phase === "case");
+  assert.deepEqual(timeoutCases.map(r => [r.caseId, r.outcome]),
+    [["case-a", "timeout"], ["case-b", "pass"]], "the timeout outcome and continuation are unchanged");
+  assert.equal(timeoutCases.every(r => r.attemptTransports === "unverified"), true,
+    "the timeout record degrades to unverified like the graded one");
+  assert.ok(!timeoutLedger.some(r => r.phase === "stopped"), "a timeout never becomes a stop");
+  assert.equal(await readFile(timedOut.invocations, "utf8"), "11", "both workers actually launch");
 });
 
 test("refused executions leave no abort listeners behind", { timeout: 90_000 }, async t => {

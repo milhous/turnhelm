@@ -16,8 +16,8 @@ import { parseProjectConfig } from "../src/config.js";
 import { readProjectFile } from "../src/project.js";
 import {
   appendEvidence, claimAcceptance, envelopePayload, executeAcceptance, findOnPath, oracleSandboxPolicy,
-  prepareAcceptance, superviseCli,
-  type AcceptanceManifest, type ClaimedRun, type SafeEvidence
+  prepareAcceptance, projectAttemptTransports, superviseCli,
+  type AcceptanceManifest, type AttemptTransportEvidence, type ClaimedRun, type SafeEvidence
 } from "./live-acceptance.js";
 
 
@@ -1438,6 +1438,80 @@ test("the sanitizer projects worker usage without throwing", async t => {
   const last = (await readFile(run.evidencePath, "utf8")).trim().split("\n")
     .map(line => JSON.parse(line) as Record<string, unknown>).at(-1);
   assert.ok(last && !("workerUsage" in last), "no worker usage is invented where none was observed");
+});
+
+test("transport evidence is bounded and idempotent", async t => {
+  // The projection contract: extra keys are ignored, only the enum fields are
+  // rebuilt, and re-projecting a projection is stable.
+  const raw = [{ backend: "jev", transportMode: "http-connect", proxyUrl: "SECRET-URL" }];
+  const projected: AttemptTransportEvidence = projectAttemptTransports(raw);
+  assert.deepEqual(projected, [{ backend: "jev", transportMode: "http-connect" }]);
+  assert.deepEqual(projectAttemptTransports(projected), projected);
+  assert.equal(projectAttemptTransports([{ backend: "laya", transportMode: "http-connect" }]), "unverified");
+
+  // Empty attempts and every legal Laya-then-Jev subsequence stay verifiable.
+  assert.deepEqual(projectAttemptTransports([]), []);
+  assert.deepEqual(projectAttemptTransports([
+    { backend: "laya", transportMode: "direct", outcome: "success", durationMs: 4 }
+  ]), [{ backend: "laya", transportMode: "direct" }]);
+  assert.deepEqual(projectAttemptTransports([{ backend: "jev", transportMode: "direct" }]),
+    [{ backend: "jev", transportMode: "direct" }]);
+  assert.deepEqual(projectAttemptTransports([
+    { backend: "laya", transportMode: "direct", failure: null },
+    { backend: "jev", transportMode: "http-connect", proxyUrl: "http://127.0.0.1:7890" }
+  ]), [{ backend: "laya", transportMode: "direct" }, { backend: "jev", transportMode: "http-connect" }]);
+  assert.deepEqual(
+    projectAttemptTransports(projectAttemptTransports([{ backend: "jev", transportMode: "http-connect" }])),
+    [{ backend: "jev", transportMode: "http-connect" }]);
+
+  // Missing, non-array, invalid-enum, duplicate, reversed, and oversized input
+  // reads unverified — never an exception, never a coerced value.
+  for (const bad of [
+    undefined, null, "laya", 7, {}, ["laya"], [null],
+    [{ backend: "jev" }],
+    [{ backend: "gpt-worker", transportMode: "direct" }],
+    [{ backend: "jev", transportMode: "socks5" }],
+    [{ backend: "laya", transportMode: "direct" }, { backend: "laya", transportMode: "direct" }],
+    [{ backend: "jev", transportMode: "direct" }, { backend: "laya", transportMode: "direct" }],
+    [{ backend: "laya", transportMode: "direct" }, { backend: "jev", transportMode: "direct" },
+      { backend: "jev", transportMode: "direct" }]
+  ]) {
+    assert.equal(projectAttemptTransports(bad), "unverified", JSON.stringify(bad) + " reads unverified");
+  }
+  // No plausible-prefix salvage: a valid first element never rescues a broken
+  // second, and a valid pair is never truncated out of an oversized array.
+  assert.equal(projectAttemptTransports([
+    { backend: "laya", transportMode: "direct" },
+    { backend: "laya", transportMode: "http-connect" }
+  ]), "unverified");
+
+  // The sanitizer revalidates the same limited schema at evidence writing:
+  // idempotent, bounded, and free of any URL the raw attempts carried.
+  const prepared = await prepareAcceptance("jev");
+  t.after(() => rm(dirname(prepared.manifestPath), { recursive: true, force: true }));
+  const run = await claimAcceptance(prepared.manifestPath, prepared.sha256);
+  t.after(() => run.handle.close());
+  const base = {
+    phase: "observed", caseId: "jev-default-readonly", backend: "jev", profileId: "default",
+    rootMatches: true, exitCode: 0, durationMs: 5, attempts: 1
+  };
+  await appendEvidence(run, { ...base, attemptTransports: raw } as unknown as SafeEvidence);
+  await appendEvidence(run, { ...base, attemptTransports: "unverified" } as unknown as SafeEvidence);
+  await appendEvidence(run, {
+    ...base, attemptTransports: [{ backend: "jev", transportMode: "tunnel", proxyUrl: "SECRET-URL" }]
+  } as unknown as SafeEvidence);
+  const lines = (await readFile(run.evidencePath, "utf8")).trim().split("\n")
+    .map(line => JSON.parse(line) as Record<string, unknown>);
+  assert.deepEqual(lines.map(line => line.attemptTransports),
+    [[{ backend: "jev", transportMode: "http-connect" }], "unverified", "unverified"],
+    "the sanitizer projects, keeps the literal, and degrades invalid modes to unverified");
+  assert.deepEqual(Object.keys(lines[0]).sort(),
+    ["attemptTransports", "attempts", "backend", "caseId", "durationMs", "exitCode", "phase", "profileId", "rootMatches"]);
+  const journal = await readFile(run.evidencePath, "utf8");
+  assert.ok(!journal.includes("SECRET-URL") && !journal.includes("proxyUrl"),
+    "no proxy URL or policy field reaches the evidence journal");
+  const persisted = lines[0].attemptTransports;
+  assert.deepEqual(projectAttemptTransports(persisted), persisted, "revalidating the persisted record is stable");
 });
 
 test("observed records carry the decoded-event progress projection", async t => {
