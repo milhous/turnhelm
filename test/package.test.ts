@@ -131,6 +131,14 @@ test("the packed distribution installs offline and serves the project entry end 
     for (const fragment of ["Node.js `>=24.5.0`", "Node 24.0 support has been dropped", "`24.x >=24.5.0`"]) {
       assert.ok(readme.includes(fragment), "packed README must state the current Node requirement: " + fragment);
     }
+    for (const fragment of [
+      "\"jev\": { \"enabled\": false, \"transport\": { \"mode\": \"direct\" } }",
+      "{ \"mode\": \"http-connect\", \"proxyUrl\": \"http://127.0.0.1:7890\" }",
+      "Version 1 configs (a `jev` entry without `transport`)",
+      "node dist/test/live.integration.js --prepare dual --config ./acceptance-config.json --case dual-jev-write"
+    ]) {
+      assert.ok(readme.includes(fragment), "packed README must document the explicit Jev transport contract: " + fragment);
+    }
 
     // 3. Install offline into an unrelated temporary Git project whose root
     //    path contains spaces; no registry access is possible.
@@ -156,6 +164,13 @@ test("the packed distribution installs offline and serves the project entry end 
     const installedSkill = await readFile(join(installed, ".agents", "skills", "turnhelm-routing", "SKILL.md"), "utf8");
     for (const fragment of ["Node >=24.5.0", "24.0 support dropped", "24.x >=24.5.0"]) {
       assert.ok(installedSkill.includes(fragment), "packed skill must state the current Node requirement: " + fragment);
+    }
+    for (const fragment of [
+      ".turnhelm/config.json` (v2)",
+      "{ \"mode\": \"http-connect\", \"proxyUrl\": \"http://127.0.0.1:<port>\" }",
+      "node dist/test/live.integration.js --prepare jev --config ./acceptance-config.json"
+    ]) {
+      assert.ok(installedSkill.includes(fragment), "packed skill must state the explicit Jev transport contract: " + fragment);
     }
     assert.equal((await readdir(join(installed, "dist", "src"))).includes("cli.js"), true);
     const bin = join(consumer, "node_modules", ".bin", "turnhelm");

@@ -117,17 +117,17 @@ classified within the routing deadline.
 
 ## Project configuration
 
-`.turnhelm/config.json` (version 1) is Turnhelm's only configuration file. There
+`.turnhelm/config.json` (version 2) is Turnhelm's only configuration file. There
 is no global or home-directory Turnhelm config; Codex manages its own settings
 and authentication separately. Unknown project config keys are rejected.
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "routingTimeoutMs": 10000,
   "backends": {
     "laya": { "enabled": true, "url": "http://127.0.0.1:8765" },
-    "jev": { "enabled": false }
+    "jev": { "enabled": false, "transport": { "mode": "direct" } }
   },
   "profiles": {
     "fast": { "model": "gpt-6-luna", "effort": "low" },
@@ -142,9 +142,27 @@ and authentication separately. Unknown project config keys are rejected.
 
 - `routingTimeoutMs` is the total classification budget, an integer from 100
   to 30000; the current template uses 10000ms, not a latency guarantee.
-  Existing project configs are not automatically updated.
 - `backends.laya.url` must be an HTTP loopback origin without credentials,
   path, query, or fragment.
+- `backends.jev.transport` is required whether Jev is enabled or not, and is
+  exactly `{ "mode": "direct" }` or
+  `{ "mode": "http-connect", "proxyUrl": "http://127.0.0.1:7890" }`. A
+  `proxyUrl` must be the literal `http://127.0.0.1:<port>` or
+  `http://[::1]:<port>` — an explicit decimal port from 1 to 65535 without
+  leading zeroes, at most one trailing slash, at most 256 characters, and no
+  userinfo, path, query, fragment, whitespace, or percent encoding. That proxy
+  example shows configuration shape, not execution authority or permission to
+  edit an existing project's config. Transport policy is never taken from the
+  environment (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, and case variants are
+  ignored); a missing or malformed transport is a config failure, never an
+  implicit direct connection.
+- Version 1 configs (a `jev` entry without `transport`) and any other invalid
+  config are refused by `run` and `doctor --probe` before classification, and
+  reported as a config failure by offline `doctor`. Nothing is migrated,
+  rewritten, or deleted automatically: the owner reviews and replaces the file
+  with a version-2 config, or removes it and re-runs `turnhelm init` (unrelated
+  files are preserved). A valid existing version-2 config is preserved and
+  repeated `init` stays a no-op.
 - All six profiles are required; each names a model and reasoning effort.
 
 ## Six profiles and automatic selection
@@ -210,7 +228,26 @@ quarter for authorized Jev failover. This avoids a fixed one-second cutoff for
 CPU inference. Jev receives only the time left on the shared deadline; an early
 Laya failure leaves it more time, while scheduling delays can leave it less.
 A sole eligible backend receives the total remaining budget. These allocations
-are engineering limits, not latency guarantees. Hosted Jev is attempted only
+are engineering limits, not latency guarantees.
+
+Each backend rides one explicit transport from the frozen config. Laya is
+always direct HTTP to its configured loopback origin and never transits the
+proxy. Jev uses
+`backends.jev.transport`: direct HTTPS to the fixed origin
+`https://api.typesafe.ai/v1/systemone`, or `http-connect`, where the configured
+loopback proxy receives only a CONNECT to `api.typesafe.ai:443` — the
+authorization header and request body travel inside TLS after certificate and
+hostname verification, never in CONNECT headers. Each request uses one scoped
+agent with keep-alive off; every outcome — success, failure, size cap, or
+abort — destroys the request, its response, its sockets (including a CONNECT
+tunnel still pending), and the agent exactly once. A transport failure (407,
+dead port, disconnect, timeout, TLS rejection) fails that attempt closed: no
+retry, redirect following, or fallback to a direct connection, and no
+environment or system proxy is consulted. The transport recorded in evidence
+is application policy — what Turnhelm was configured to dial, not proof of the
+proxy's actual exit node, route, or receipt.
+
+Hosted Jev is attempted only
 when **all** of the following hold: `backends.jev.enabled` is true in the
 project config, `TURNHELM_ALLOW_HOSTED_JEV=1` is present in the environment,
 and `TYPESAFE_API_KEY` is nonblank. The config and environment gates require
@@ -228,8 +265,9 @@ Every `run` that reaches classification appends one JSON line to
 `.turnhelm/routes.jsonl` in the project root before the worker starts,
 regardless of whether routing selected, failed, or was cancelled. Each line
 records the timestamp, the task's SHA-256 hash and byte length (never the task
-text), the routing status, attempts with per-backend outcomes and durations,
-and, for a selection, the backend, profile, model, effort, and the classifier's
+text), the routing status, attempts with per-backend transport mode (`direct`
+or `http-connect`), outcomes, and durations, and, for a selection, the backend,
+profile, model, effort, and the classifier's
 `confidence` when the backend reports one. The journal is evidence for
 reviewing routing decisions; it is written best-effort — an append failure is
 reported on stderr and never fails the run. A journal path that is not a
@@ -339,7 +377,9 @@ increasing the budget or retrying a different model/backend.
 
 To exercise both eligible classifiers, obtain separate request/hosted consent
 before `turnhelm doctor --probe --json --project "$PROJECT"`. It sends one
-synthetic request per eligible backend but no worker. Both probe results plus
+synthetic request per eligible backend but no worker, through the same shared
+request boundary, eligibility gates, and explicit Jev transport policy as
+`run` — the probe has no separate network path. Both probe results plus
 one successful real task prove only those observed paths, not general quality,
 all six model/effort combinations, whole-task cost, or savings.
 
@@ -358,7 +398,33 @@ is fully offline and spends nothing: it freezes a private run root, writes
 `manifest.json` (per-case roots, identities, task hashes, configs, oracle
 facts, and reservation caps), and prints the manifest path plus its sha256. A
 human reads the complete manifest and explicitly approves that sha256;
-`--execute <manifest.json> --approve <sha256>` then runs. Each manifest is one
+`--execute <manifest.json> --approve <sha256>` then runs. `--prepare` also
+accepts `--config <file>`, an owner-reviewed version-2 config read once —
+regular file, at most 65536 bytes, strict UTF-8 and JSON — and frozen into the
+manifest; execution never rereads the external file, and any read or
+validation refusal happens before a run root exists and prints one fixed
+content-free diagnostic. With the `dual` suite only, `--case dual-jev-write`
+narrows the roster to the existing Jev write fallback case; unknown, duplicate,
+or missing prepare flags are refused, and prepare options are not accepted on
+`--execute`. The two reachable specialized forms are:
+
+```sh
+node dist/test/live.integration.js --prepare jev --config ./acceptance-config.json
+node dist/test/live.integration.js --prepare dual --config ./acceptance-config.json --case dual-jev-write
+```
+
+These are future offline preparation examples, not commands to run now and not
+authorization to supply credentials or prepare real consumer roots. Each
+creates a separate singleton manifest with its own fresh sha256 and
+reservations — the `jev` form caps `{worker:1, laya:0, jev:1}`, the
+`dual --case` form `{worker:1, laya:1, jev:1}` — and each is read and approved
+separately. The pair is gated manually: execute the readonly Jev case first
+and reconcile its exit code, complete records, and transport evidence
+yourself; only an explicit owner approval opens the write case, and any first
+failure or incompleteness closes it. No extra probe, worker, retry, or
+deadline extension runs between them. Two successful cases would remain two
+observed executions: they would not resolve the open band-policy, optimality,
+or billing findings. Each manifest is one
 suite only; reservations never carry across suites. The manifest claims
 exactly once (a second execute refuses), so a run is never replayed or
 resumed; drift in the baseline, corpus, or any frozen case file stops it
@@ -382,7 +448,16 @@ the frozen failure class plus the `ownedShutdown` action boolean, with an
 optional correlation hash and observed death signal; no failure text —
 plus `workerProgress`, the receipt's decoded-event count and, when one
 decoded, the last decode's age at settlement, the same parent-observed
-projection that never claims liveness. The harness also exports its shared
+projection that never claims liveness. Observed and case records also carry
+`attemptTransports`, a bounded projection of the per-attempt backend and
+transport mode — at most two entries in a Laya-then-Jev subsequence with Laya
+always direct; missing, duplicate, reversed, oversized, or otherwise invalid
+data reads `unverified`, with nothing fabricated. It records the frozen
+application policy, never a proxy exit, route, or receipt attestation, and it
+never gates an ordinary case: only the `jev-default-readonly` and
+`dual-jev-write` cases add a `transport-policy` check that their observed
+attempts match the frozen config, and a mismatch fails that case through the
+ordinary verdict path. The harness also exports its shared
 oracle primitives — the payload-agnostic `envelopePayload` envelope fact
 and the root-parameterized `oracleSandboxPolicy` sandbox profile — so
 sealed-round tooling and tests judge against one frozen definition instead
