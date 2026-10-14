@@ -342,6 +342,8 @@ test("a valid roster freezes a manifest with the exact baseline and zero spend",
     "the runner and shared-primitive modules stay in the baseline");
   assert.ok(baselinePaths.includes("dist/src/cli.js") && baselinePaths.includes("dist/src/task.js"),
     "the executed code itself is baseline-hashed, not just the harness around it");
+  assert.ok(baselinePaths.includes("dist/src/runtime.js"),
+    "the runtime floor module stays in the dynamically enumerated baseline");
   assert.ok(baselinePaths.every(path => path.startsWith("dist/")), "the baseline covers only built consumed code");
   for (const file of baselineFiles.files) {
     assert.equal(file.sha256, sha256hex(await readFile(join(REPO_ROOT, file.path))), file.path + " hashes its live bytes");

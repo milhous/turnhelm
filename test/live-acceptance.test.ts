@@ -7,7 +7,8 @@ import type { FileHandle } from "node:fs/promises";
 import { chmod, copyFile, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
-import type { AddressInfo } from "node:net";
+import type { IncomingMessage } from "node:http";
+import { connect as netConnect, type AddressInfo, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -940,6 +941,7 @@ type CraftedCase = {
   fixtureUrl?: string;
   reservation?: readonly ("laya" | "jev")[];
   jevEnabled?: boolean;
+  jevTransport?: { mode: "direct" } | { mode: "http-connect"; proxyUrl: string };
 };
 
 const readEvidence = async (runRoot: string): Promise<Record<string, unknown>[]> =>
@@ -989,7 +991,7 @@ const buildRun = async (
       routingTimeoutMs: 1000,
       backends: {
         laya: { enabled: suite !== "jev", url: entry.fixtureUrl ?? layaUrl },
-        jev: { enabled: entry.jevEnabled ?? suite !== "laya", transport: { mode: "direct" } }
+        jev: { enabled: entry.jevEnabled ?? suite !== "laya", transport: entry.jevTransport ?? { mode: "direct" } }
       },
       profiles: template.profiles
     });
@@ -1086,10 +1088,19 @@ test("entry refuses absent approval and unknown args", async t => {
     ["--prepare"],
     ["--prepare", "bogus"],
     ["--prepare", "laya", "extra"],
+    ["--prepare", "dual", "--case", "bogus"],
+    ["--prepare", "dual", "--case"],
+    ["--prepare", "dual", "--case", "dual-jev-write", "--case", "dual-jev-write"],
+    ["--prepare", "dual", "--config"],
+    ["--prepare", "dual", "--config", join(scratch, "one.json"), "--config", join(scratch, "two.json")],
+    ["--prepare", "laya", "--case", "dual-jev-write"],
+    ["--prepare", "dual", "--probe", "x"],
     ["--execute", join(scratch, "manifest.json")],
     ["--approve", "0".repeat(64)],
     ["--execute", join(scratch, "manifest.json"), "--approve", "zz"],
     ["--execute", join(scratch, "manifest.json"), "--approve", "0".repeat(64), "--extra"],
+    ["--execute", join(scratch, "manifest.json"), "--approve", "0".repeat(64), "--case", "dual-jev-write"],
+    ["--execute", join(scratch, "manifest.json"), "--approve", "0".repeat(64), "--config", join(scratch, "one.json")],
     ["--", "--prepare", "laya", "--", "x"]
   ];
   for (const args of variants) {
@@ -1109,6 +1120,23 @@ test("entry refuses absent approval and unknown args", async t => {
   const prepared = lines[0].slice("manifest ".length);
   await stat(prepared);
   t.after(() => rm(dirname(prepared), { recursive: true, force: true }));
+  // The strict prepare grammar accepts exactly the two option flags, alone or
+  // together, and never on execute.
+  const validConfig = join(scratch, "explicit.json");
+  await writeFile(validConfig, await readFile(TEMPLATE_PATH));
+  for (const args of [
+    ["--prepare", "dual", "--case", "dual-jev-write"],
+    ["--prepare", "dual", "--config", validConfig],
+    ["--prepare", "dual", "--config", validConfig, "--case", "dual-jev-write"]
+  ] as const) {
+    const run = await runEntry([...args]);
+    assert.equal(run.code, 0, JSON.stringify(args) + " prepares");
+    const optionLines = run.stdout.trim().split("\n");
+    assert.equal(optionLines.length, 2, JSON.stringify(args) + " prints exactly the manifest and hash");
+    assert.match(optionLines[0], /^manifest \//);
+    assert.match(optionLines[1], /^sha256 [0-9a-f]{64}$/);
+    t.after(() => rm(dirname(optionLines[0].slice("manifest ".length)), { recursive: true, force: true }));
+  }
 });
 
 test("a malformed manifest fails bounded without leaking manifest bytes", async t => {
@@ -2316,7 +2344,7 @@ test("dual fixture port conflict stops before any paid call", async t => {
 
   const run = await buildRun(t, "dual", classifier.url, [
     { id: "lead", kind: "worker-readonly" },
-    { id: "fixture", kind: "worker-write", fixtureUrl: `http://127.0.0.1:${blockedPort}` }
+    { id: "dual-jev-write", kind: "worker-write", fixtureUrl: `http://127.0.0.1:${blockedPort}` }
   ]);
   const code = await executeAcceptance(run.manifestPath, run.sha256, {
     env: {
@@ -2350,7 +2378,7 @@ test("a dead-peer fixture client cannot wedge the fail-stop exit", async t => {
   // fixture server is still bound and torn down on the fail-stop path.
   const run = await buildRun(t, "dual", classifier.url, [
     { id: "lead", kind: "worker-readonly" },
-    { id: "fixture", kind: "worker-write", fixtureUrl: `http://127.0.0.1:${fixturePort}` }
+    { id: "dual-jev-write", kind: "worker-write", fixtureUrl: `http://127.0.0.1:${fixturePort}` }
   ]);
   const entry = spawn(process.execPath, [ENTRY_PATH, "--execute", run.manifestPath, "--approve", run.sha256], {
     env: {
@@ -2608,12 +2636,13 @@ test("dual first case must be a genuine laya-first selection", async t => {
 
   // Both dual cases share the fixture port, so no 503 fixture case exists and
   // the run completes fully offline through the classifier fixture on laya.
+  // The lead check follows the dual-laya-first identity, not position.
   const run = await buildRun(t, "dual", classifier.url, [
-    { id: "lead", kind: "worker-readonly" },
+    { id: "dual-laya-first", kind: "worker-readonly" },
     { id: "second", kind: "worker-readonly" }
   ]);
   assert.equal(await executeAcceptance(run.manifestPath, run.sha256, { env: dualEnv }), 0);
-  const leadVerified = (await readEvidence(run.runRoot)).find(line => line.phase === "verified" && line.caseId === "lead");
+  const leadVerified = (await readEvidence(run.runRoot)).find(line => line.phase === "verified" && line.caseId === "dual-laya-first");
   assert.ok(leadVerified);
   assert.equal((leadVerified.checks as Record<string, unknown>)["laya-first"], true,
     "the lead dual case passes only when laya alone was attempted and selected");
@@ -2629,9 +2658,9 @@ test("dual first case must be a genuine laya-first selection", async t => {
     routingMs: 5, attempts: [{ backend: "laya", outcome: "success", durationMs: 5 }],
     backend: "laya", profileId: "fast", model: "gpt-6-luna", effort: "low"
   });
-  const bad = await buildRun(t, "dual", classifier.url, [{ id: "lead-bad", kind: "worker-readonly", journalSeed: [seedLine] }]);
+  const bad = await buildRun(t, "dual", classifier.url, [{ id: "dual-laya-first", kind: "worker-readonly", journalSeed: [seedLine] }]);
   assert.equal(await executeAcceptance(bad.manifestPath, bad.sha256, { env: dualEnv }), 1);
-  const badVerified = (await readEvidence(bad.runRoot)).find(line => line.phase === "verified" && line.caseId === "lead-bad");
+  const badVerified = (await readEvidence(bad.runRoot)).find(line => line.phase === "verified" && line.caseId === "dual-laya-first");
   assert.ok(badVerified);
   assert.equal((badVerified.checks as Record<string, unknown>)["laya-first"], false,
     "a lead case that never made a valid laya selection is not laya-first");
@@ -2641,7 +2670,7 @@ test("dual first case must be a genuine laya-first selection", async t => {
   // (The transport cannot be intercepted — systemone destructures the
   // node:https request binding at import time — so the journal is the
   // authoritative offline proof.)
-  for (const [root, ids] of [[run.runRoot, ["lead", "second"]], [bad.runRoot, ["lead-bad"]]] as const) {
+  for (const [root, ids] of [[run.runRoot, ["dual-laya-first", "second"]], [bad.runRoot, ["dual-laya-first"]]] as const) {
     for (const id of ids) {
       const journal = await readFile(join(root, "consumers", id, ".turnhelm", "routes.jsonl"), "utf8");
       assert.ok(!journal.includes("\"backend\":\"jev\""),
@@ -3791,3 +3820,638 @@ test("RR05 terminal boundary is fail closed", async t => {
   assert.equal(await signalEntry("SIGTERM"), 143, "SIGTERM maps to 143 through the real entry");
 });
 
+
+// ---- Task 4: explicit transport preparation and singleton fallback ----
+
+// The same isolated synthetic CA and Jev leaf material as the proxy-transport
+// suite (test files cannot import each other without re-registering their
+// tests): the CA is trusted only by fixture children through
+// NODE_EXTRA_CA_CERTS; the product itself never gains a CA or bypass.
+const FIXTURE_CA = `
+-----BEGIN CERTIFICATE-----
+MIIDHzCCAgegAwIBAgIUI3tweswFiXS3htjx7LZJA4oKa+8wDQYJKoZIhvcNAQEL
+BQAwHjEcMBoGA1UEAwwTVHVybmhlbG0gRml4dHVyZSBDQTAgFw0yNjEwMTQxMjEy
+NThaGA8yMTI2MDkyMDEyMTI1OFowHjEcMBoGA1UEAwwTVHVybmhlbG0gRml4dHVy
+ZSBDQTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAL2iOZIE5jAVHBbn
+qH/1FTuuxzpe9lAs8rr8t1qOYJRzLdImdtT92V1NE90fOQa+xRIDDp26OeT3aUtm
+0gjq3ArZQw3OWLbb7Ybzwj7BCAld8FqyUok9DUpLhvXcM2hummsksaHU9SanUEbT
+wb680MaUY4x9YakBZ7BAyLgO1T/AApGWTJOUfageJhSKQX7P+pHHDoNX6Vl6lhci
+4w60b2zI3irqLrny4ovaJAUCNuuhDdzIOt0CMu2p9u9+JMwaKQBcSx/QPu8OJYrf
+ApDuwDA3BFGRM+bdRKGgKwB3lsNXc9fsiEeq3jPBUOu+btaYrr+f5QM2YMj8Mn+c
+9rfsjcMCAwEAAaNTMFEwHQYDVR0OBBYEFJANyyVLYHVkFRpwD0iVjPjj7ZjOMB8G
+A1UdIwQYMBaAFJANyyVLYHVkFRpwD0iVjPjj7ZjOMA8GA1UdEwEB/wQFMAMBAf8w
+DQYJKoZIhvcNAQELBQADggEBAEzJMgF50nN9mnFsEwmue8Mq751SvBVf+b9YDdyy
+0K0ZannEMyb7k4Z6EOwlpwCvfHHW2rftbMqGEz51n28p6HWnJWB6rzL3syFInjMf
+eF2iHCMFgVSurm9RCAbfPUedlTEHv+El3cqzaIixKCe31hHlTmBnbI80J2EPEVlj
+QTsqlGb2yr4GoXlBefUhCVqJ8IoSK7Rm/YCHGXRS0u0s40ymMj5au6I91R+IuzvV
+nWug9fAL1qro5PjB/LzRHDNt163VTW7Rd7rsMKdJvwXLKDTQlarkH2X6lE9v85K/
+I1CYrliM8Rb4vV9fs9yovzdERB/nHsAMb1zY5KjfLstrVV8=
+-----END CERTIFICATE-----
+`;
+const JEV_KEY = `
+-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCbRm/koJ9+adBK
+ndXrg2mwhYuOkZdGJ2ZL2PdZS7ZX+1jTB3pKgjMN56RH+88hVn927u02J5pyJ95g
+jRi4w9sGYxhotwxqyKIgDvO3THPS0QZnYoKZQ0B7X2SdDYsDas4IErypyN/CTzPb
+IbXATYGSNIeHOQwxOnBtDrwrAJ7zZKeueAcyqyRgrgjpgphSHLEwhybmHrds4Nsj
+8XCr0ZOlnmTyxO8kr5oWxJsxK52Q7m06kqlamlVu8lC2g6gSKdObmoBhmZLRtt5m
+d/qmhMBKnD75+UAKL97PqFBPHMse7g3g0oTRvgH/fNmXPFWQLdnt5IthEQClO+wa
+ieCPRBmFAgMBAAECggEAFCZsI1p/0CcZp3E7n0xGtShjb60vmSRIR2wAz1b+swS0
+ZnBYO56RUwrePBQusUgZEv1XDbnOdmV7m4J79JBAFmBaPM6SXzIpreja0kzq0+8Z
+umVjhtGeJtR+iU4GXftogM4zqwHdHclq9JM3k5zLRYapFtB9p07K47AvlZIHTpTr
+zK1zQ6jNol4aPYhpl2mu2hpj7rZQDPySYLde4sItxEJ1+qXxjKoAzlcbctl/aBQF
+OFXwXM9aMTB7XblKGc7UOTkyyOLC1beR2POoyWV0lFPwDeqjisw8zjBRdDzvwAf7
+T59n3n0ULI9N5Dr7Qd4yDfd33lZGUZ8e/z54PCS+gQKBgQDQX7d4p1Dbb5PGaH5D
+CMvW9f5cQAsslL55uuVxl82CBbseTR/lOsGx4qd2g+RwdDlKB58kx2uFwOnLuAX6
+2TGpkP0Dualtto2ihXbviCXs6m0q+Zz/VyBLkrNRFvxbuZ7PKoR2e/ifyqF4vQqz
+eeRGn5EmksWcl3VkRj6Bo9RMBQKBgQC+w9RP7muELr/dHs0E5l28M7WO18Pypyvv
+H7a5p34x1ZSwyWv94LOrnYWjGgTVdMzB9m+vcjGDQpVIyzWgybgGpC1JLloX3MW/
+rLvZeSHVqZG27TAWqmIlaPIWghCtfqXAgPWwD/vceMuP0th3pFO8nU1XSAhxINLY
+hMLyavePgQKBgQCnZl4VFgXFZEwJt2TIIcbwuMtR/Tl85TpovRcbPOMis8vxufAH
+zj5R1E7IzYi2NwjXSmw1tefRmnu45+wV7GsTWKGLXpqYw3HhwOsd3/jn7iUpw0K3
+d51AWWipmpe+cM7+i5/DODEy3iz+vJBeQ2x6uDJ6FKug86ShnDUXHTCuqQKBgEqg
+hWA3nyv4teok8INoM2c6u14EHo3AxDkpqOv8ECwip6Z5RZvt2ZvbZbompZlztd5z
+L8Hs5F27IHd3t6UNBMbkVyr3zRrkrR+MzXgIISpaybxMEbHsObT01y/i9e9JSkKC
+sJqNxjO7tbav/yreyDtTNjxc26CV/KXjWfhHzE0BAoGAQP1uAEZmwFYu9dYy2dla
+sKtjJPXi98KOF8GAHu0Md7gUTudNcVVP4uPknI+9fPepQmNtOycSq0Qft4K/80vP
+pmHLTkZ2kfe+NKMSwGCxCeER5xRyaDxZH2bOfLiLV+PYkNDjtnqVACwmr3ew5i9J
+JNtOYHqkQ4y3MaQi6eb/iG8=
+-----END PRIVATE KEY-----
+`;
+const JEV_CERT = `
+-----BEGIN CERTIFICATE-----
+MIIDOzCCAiOgAwIBAgIUVwXPvJ0bZ5oN7Dlt5GRCCd2jj9cwDQYJKoZIhvcNAQEL
+BQAwHjEcMBoGA1UEAwwTVHVybmhlbG0gRml4dHVyZSBDQTAgFw0yNjEwMTQxMjEy
+NThaGA8yMTI2MDkyMDEyMTI1OFowGjEYMBYGA1UEAwwPYXBpLnR5cGVzYWZlLmFp
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAm0Zv5KCffmnQSp3V64Np
+sIWLjpGXRidmS9j3WUu2V/tY0wd6SoIzDeekR/vPIVZ/du7tNieacifeYI0YuMPb
+BmMYaLcMasiiIA7zt0xz0tEGZ2KCmUNAe19knQ2LA2rOCBK8qcjfwk8z2yG1wE2B
+kjSHhzkMMTpwbQ68KwCe82SnrngHMqskYK4I6YKYUhyxMIcm5h63bODbI/Fwq9GT
+pZ5k8sTvJK+aFsSbMSudkO5tOpKpWppVbvJQtoOoEinTm5qAYZmS0bbeZnf6poTA
+Spw++flACi/ez6hQTxzLHu4N4NKE0b4B/3zZlzxVkC3Z7eSLYREApTvsGongj0QZ
+hQIDAQABo3MwcTAaBgNVHREEEzARgg9hcGkudHlwZXNhZmUuYWkwEwYDVR0lBAww
+CgYIKwYBBQUHAwEwHQYDVR0OBBYEFALx7SK0A86WlaiawMEty9aI8GxXMB8GA1Ud
+IwQYMBaAFJANyyVLYHVkFRpwD0iVjPjj7ZjOMA0GCSqGSIb3DQEBCwUAA4IBAQBT
+LQAkWzpPPg07C5gihqk6Toq8Ygr++65QelEVufCQhK81vj5/a4VDCIiIfSpKi3P3
+4DjJ9ZvTdil6abiyNmUxDMacBgfDzgrqNUskpiURP+jaYz+RFaQl0C44G4eh40Fp
+5D2D7NQhqYMVJqrslmOOBAsN7g3y6koy1ADo/A2omyya5mwGxeLkc9Ry+sjm2Wa4
+3rs+FTg2jGk82L9prBbPz1VegkVDH+q1hMBDzDxnVH6IM1ZkZu9lsu/fVhLWAq1X
+fOU20i6kBjY2BMUAVdXHPzXJyOxt/DZtwoHFAxytbYgVR4c3rMqZD3NJbFEDl5uB
+2A34I64xqxPPd6rm9tni
+-----END CERTIFICATE-----
+`;
+
+// An owned TLS origin for the fixed Jev host, reached only through the owned
+// CONNECT proxy: one choice reply per request, nothing else kept.
+const startTlsOrigin = async (t: TestContext): Promise<{
+  port: number; requests: number; authorizations: string[];
+}> => {
+  let requests = 0;
+  const authorizations: string[] = [];
+  const sockets = new Set<Socket>();
+  const server = https.createServer({ key: JEV_KEY.trim(), cert: JEV_CERT.trim() }, (request, response) => {
+    requests += 1;
+    authorizations.push(String(request.headers.authorization ?? ""));
+    response.on("error", () => { /* a rejected peer must not crash the fixture */ });
+    request.resume();
+    request.on("end", () => {
+      response.setHeader("content-type", "application/json");
+      response.end(choiceBody("fast"));
+    });
+  });
+  server.on("connection", (socket: Socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+  });
+  t.after(async () => {
+    for (const socket of sockets) socket.destroy();
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  return { port: (server.address() as AddressInfo).port, get requests() { return requests; }, authorizations };
+};
+
+// A tunnelling CONNECT proxy: one tunnel per CONNECT to the owned origin,
+// recording the target and any authorization the client tried to send.
+const startConnectProxy = async (t: TestContext, originPort: number): Promise<{
+  port: number; connects: { target: string | undefined; authorization: string | undefined }[];
+}> => {
+  const connects: { target: string | undefined; authorization: string | undefined }[] = [];
+  const upstreams = new Set<Socket>();
+  // A CONNECT tunnel socket is detached from the HTTP server's connection
+  // tracking, so the fixture owns every tunnelled client socket itself.
+  const tunnels = new Set<Socket>();
+  const server = http.createServer();
+  server.on("connect", (request: IncomingMessage, client: Socket, head: Buffer) => {
+    connects.push({ target: request.url, authorization: request.headers.authorization });
+    tunnels.add(client);
+    client.on("close", () => tunnels.delete(client));
+    const upstream = netConnect(originPort, "127.0.0.1");
+    upstreams.add(upstream);
+    const fail = (): void => { upstream.destroy(); client.destroy(); };
+    upstream.on("error", fail);
+    client.on("error", fail);
+    client.on("close", () => upstream.destroy());
+    upstream.on("close", () => upstreams.delete(upstream));
+    upstream.on("connect", () => {
+      client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      if (head.length > 0) upstream.write(head);
+      client.pipe(upstream);
+      upstream.pipe(client);
+      client.on("end", () => client.end());
+    });
+  });
+  t.after(async () => {
+    for (const socket of tunnels) socket.destroy();
+    for (const socket of upstreams) socket.destroy();
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  return { port: (server.address() as AddressInfo).port, connects };
+};
+
+const writeFixtureCa = async (directory: string): Promise<string> => {
+  const path = join(directory, "fixture-ca.pem");
+  await writeFile(path, FIXTURE_CA.trim() + "\n");
+  return path;
+};
+
+// A loopback port that was free a moment ago, reserved then released: the same
+// probe trick as the dead-peer fixture test.
+const freeLoopbackPort = async (): Promise<number> => {
+  const probe = http.createServer();
+  await new Promise<void>(resolve => probe.listen(0, "127.0.0.1", resolve));
+  const port = (probe.address() as AddressInfo).port;
+  await new Promise<void>(resolve => probe.close(() => resolve()));
+  return port;
+};
+
+// The dial guard keeps every CLI child on owned loopback ports: any dial the
+// product attempts outside the fixture set is refused and reported, so a
+// direct-fallback bug can never reach the real hosted origin.
+const DIAL_GUARD_CJS = `const net = require("node:net");
+const tls = require("node:tls");
+const owned = new Set(String(process.env.TEST_OWNED_PORTS ?? "").split(",").map(Number).filter(Number.isInteger));
+const guarded = (original, label) => function (first, second) {
+  const options = typeof first === "number"
+    ? { host: typeof second === "string" ? second : undefined, port: first }
+    : first;
+  const host = String((options && (options.hostname ?? options.host)) ?? "").replace(/^\\[|\\]$/g, "");
+  const ridesOwnedSocket = Boolean(options && options.socket);
+  const port = Number(options && options.port);
+  const loopback = host === "127.0.0.1" || host === "::1" || host === "localhost";
+  if (ridesOwnedSocket || (loopback && owned.has(port))) {
+    return original.apply(this, arguments);
+  }
+  console.log("GUARD_DENIED " + label + " " + host + ":" + port);
+  throw new Error("TEST_GUARD refused " + label);
+};
+net.connect = guarded(net.connect, "net.connect");
+net.createConnection = guarded(net.createConnection, "net.createConnection");
+tls.connect = guarded(tls.connect, "tls.connect");
+`;
+
+const runEntryLines = (args: readonly string[]): Promise<{ code: number | null; stdout: string; stderr: string }> =>
+  new Promise(resolve => {
+    execFile(process.execPath, [ENTRY_PATH, ...args],
+      { cwd: REPO_ROOT, env: { PATH: process.env.PATH ?? "" }, encoding: "utf8" },
+      (error, stdout, stderr) => {
+        const code = error !== null && typeof (error as { code?: unknown }).code === "number"
+          ? (error as { code: number }).code
+          : error === null ? 0 : null;
+        resolve({ code, stdout: String(stdout), stderr: String(stderr) });
+      });
+  });
+
+// The Task 4 prepare surface under test: prepareAcceptance(suite, options?)
+// with the explicit config path and the existing dual fallback selector.
+const prepareExplicit: typeof prepareAcceptance = prepareAcceptance;
+
+test("explicit prepare config is frozen before approval", async t => {
+  const scratch = await mkdtemp(join(tmpdir(), "turnhelm-explicit-"));
+  t.after(() => rm(scratch, { recursive: true, force: true }));
+  const liveRoots = async (): Promise<string[]> =>
+    (await readdir(tmpdir())).filter(name => name.startsWith("turnhelm-live-")).sort();
+  const templateText = await readFile(TEMPLATE_PATH, "utf8");
+  const writeVariant = async (name: string, mutate: (config: Record<string, unknown>) => void): Promise<string> => {
+    const config = JSON.parse(templateText) as Record<string, unknown>;
+    mutate(config);
+    const path = join(scratch, name);
+    await writeFile(path, JSON.stringify(config, null, 2) + "\n");
+    return path;
+  };
+
+  // Every explicit-input refusal is one fixed, content-free diagnostic and
+  // happens before any run root exists: no filesystem residue, no network.
+  const REFUSAL = /prepare explicit config could not be read or validated/;
+  const oversized = join(scratch, "oversized.json");
+  await writeFile(oversized, Buffer.concat([Buffer.from(templateText), Buffer.alloc(65537, 0x20)]));
+  const badUtf8 = join(scratch, "bad-utf8.json");
+  await writeFile(badUtf8, Buffer.from([0xff, 0xfe, 0xfd, 0x0a]));
+  const v1 = await writeVariant("v1.json", config => { config.version = 1; });
+  const badUrl = await writeVariant("bad-url.json", config => {
+    (config.backends as Record<string, unknown>).jev = {
+      enabled: true, transport: { mode: "http-connect", proxyUrl: "http://198.51.100.7:7890/leaky?x=1" }
+    };
+  });
+  const linked = join(scratch, "linked.json");
+  await symlink(badUrl, linked);
+  const fifo = join(scratch, "fifo.json");
+  await execute("mkfifo", [fifo]);
+  const directory = join(scratch, "adirectory");
+  await mkdir(directory);
+  const before = await liveRoots();
+  for (const configPath of [oversized, badUtf8, v1, badUrl, linked, fifo, join(scratch, "absent.json"), directory]) {
+    await assert.rejects(() => prepareExplicit("dual", { configPath }), REFUSAL, configPath + " must refuse");
+  }
+  assert.deepEqual(await liveRoots(), before, "a refused explicit config leaves no run root behind");
+
+  // A valid explicit config freezes the caller's exact v2 policy into every
+  // case and consumer root, canonicalized by the shared parser.
+  const valid = await writeVariant("valid.json", config => {
+    config.routingTimeoutMs = 2500;
+    (config.backends as Record<string, unknown>).jev = {
+      enabled: true, transport: { mode: "http-connect", proxyUrl: "http://127.0.0.1:3128/" }
+    };
+  });
+  const prepared = await prepareExplicit("dual", { configPath: valid });
+  t.after(() => rm(dirname(prepared.manifestPath), { recursive: true, force: true }));
+  const manifest = await loadManifest(prepared.manifestPath);
+  assert.equal(manifest.suite, "dual");
+  assert.equal(manifest.cases.length, 2, "an explicit config without a case selector keeps the full dual");
+  for (const item of manifest.cases) {
+    assert.deepEqual(item.config.backends.jev.transport, { mode: "http-connect", proxyUrl: "http://127.0.0.1:3128" },
+      item.id + " freezes the caller's canonicalized transport policy");
+    assert.equal(item.config.backends.jev.enabled, true);
+    assert.equal(item.config.routingTimeoutMs, 2500, item.id + " keeps the caller's routing timeout");
+    const onDisk = await readFile(join(item.root, ".turnhelm/config.json"));
+    assert.ok(onDisk.equals(Buffer.from(JSON.stringify(item.config, null, 2) + "\n", "utf8")),
+      item.id + " consumer config is the frozen manifest bytes");
+  }
+  // The external file is prepare-time input only: once frozen, removing it
+  // changes nothing the approval already pinned.
+  await rm(valid);
+  const defaults = await prepareExplicit("dual");
+  t.after(() => rm(dirname(defaults.manifestPath), { recursive: true, force: true }));
+  const defaultManifest = await loadManifest(defaults.manifestPath);
+  assert.deepEqual(defaultManifest.cases.map(item => item.config.backends.jev.transport),
+    [{ mode: "direct" }, { mode: "direct" }], "shipped defaults stay direct without an explicit config");
+  assert.deepEqual(defaultManifest.caps, { worker: 2, laya: 2, jev: 2 });
+
+  // Entry-level canaries: malformed JSON and a malformed proxy URL never
+  // forward their bytes through a native error message into stderr.
+  const canaryJson = join(scratch, "canary-json.json");
+  await writeFile(canaryJson, '{"version":2,"backends":{"CANARY_UNTERMINATED":');
+  const canaryUrl = await writeVariant("canary-url.json", config => {
+    (config.backends as Record<string, unknown>).jev = {
+      enabled: true, transport: { mode: "http-connect", proxyUrl: "http://[::ffff:127.0.0.1]:7890/CANARYURL" }
+    };
+  });
+  for (const configPath of [canaryJson, canaryUrl]) {
+    const run = await runEntryLines(["--prepare", "dual", "--config", configPath]);
+    assert.equal(run.code, 1, configPath + " refuses through the entry");
+    assert.equal(run.stderr, "prepare failed: prepare explicit config could not be read or validated\n",
+      configPath + " prints exactly the fixed diagnostic");
+    assert.ok(!run.stderr.includes("CANARY"), "no canary bytes reach stderr");
+  }
+});
+
+test("fallback-only prepare reserves exactly one existing case", async t => {
+  const fallback = await prepareExplicit("dual", { caseId: "dual-jev-write" });
+  t.after(() => rm(dirname(fallback.manifestPath), { recursive: true, force: true }));
+  const manifest = await loadManifest(fallback.manifestPath);
+  assert.equal(manifest.suite, "dual");
+  assert.deepEqual(manifest.caps, { worker: 1, laya: 1, jev: 1 },
+    "the fallback-only manifest reserves exactly the singleton scope");
+  assert.equal(manifest.cases.length, 1, "exactly one existing case is selected");
+  const [only] = manifest.cases;
+  assert.equal(only.id, "dual-jev-write");
+  assert.equal(only.kind, "worker-write");
+  assert.deepEqual(only.allowedChanges, ["out/summary.json"]);
+  assert.deepEqual(only.reservation, { worker: 1, backends: ["laya", "jev"] });
+  const runRoot = await realpath(dirname(fallback.manifestPath));
+  assert.deepEqual((await readdir(join(runRoot, "consumers"))).sort(), ["dual-jev-write"],
+    "no lead consumer is ever created for the fallback-only manifest");
+  assert.ok(manifest.baseline.dist.some(entry => entry.path === "dist/src/runtime.js"),
+    "the runtime floor stays in the dynamically enumerated baseline");
+
+  // The fallback manifest claims cleanly under the frozen suite ceiling:
+  // caps match the selected reservations and stay inside SUITE_CAPS/parser
+  // equality.
+  const claimed = await claimAcceptance(fallback.manifestPath, fallback.sha256);
+  t.after(() => claimed.handle.close().catch(() => {}));
+
+  // The default full dual is unchanged: both existing cases and full caps.
+  const dual = await prepareExplicit("dual");
+  t.after(() => rm(dirname(dual.manifestPath), { recursive: true, force: true }));
+  const dualManifest = await loadManifest(dual.manifestPath);
+  assert.deepEqual(dualManifest.caps, { worker: 2, laya: 2, jev: 2 });
+  assert.deepEqual(dualManifest.cases.map(item => item.id), ["dual-laya-first", "dual-jev-write"]);
+  assert.deepEqual((await readdir(join(await realpath(dirname(dual.manifestPath)), "consumers"))).sort(),
+    ["dual-jev-write", "dual-laya-first"]);
+});
+
+test("singleton fallback binds its frozen 503 fixture", async t => {
+  const fakeBin = await writeFakeCodex(t);
+  const scratch = await mkdtemp(join(tmpdir(), "turnhelm-singleton-"));
+  t.after(() => rm(scratch, { recursive: true, force: true }));
+  const origin = await startTlsOrigin(t);
+  const proxy = await startConnectProxy(t, origin.port);
+  const caPath = await writeFixtureCa(scratch);
+  const guard = join(scratch, "dial-guard.cjs");
+  await writeFile(guard, DIAL_GUARD_CJS);
+  const invocations = join(scratch, "invocations.log");
+  const templateText = await readFile(TEMPLATE_PATH, "utf8");
+
+  const configPath = join(scratch, "explicit-config.json");
+  {
+    const config = JSON.parse(templateText) as Record<string, unknown>;
+    (config.backends as Record<string, unknown>).jev = {
+      enabled: true, transport: { mode: "http-connect", proxyUrl: `http://127.0.0.1:${proxy.port}/` }
+    };
+    await writeFile(configPath, JSON.stringify(config, null, 2) + "\n");
+  }
+  const prepareFallback = async (): Promise<{ manifestPath: string; sha256: string; manifest: AcceptanceManifest; port: number }> => {
+    const prepared = await prepareExplicit("dual", { configPath, caseId: "dual-jev-write" });
+    t.after(() => rm(dirname(prepared.manifestPath), { recursive: true, force: true }));
+    const manifest = await loadManifest(prepared.manifestPath);
+    assert.equal(manifest.cases.length, 1, "the fallback manifest carries only the fallback case");
+    return { ...prepared, manifest, port: Number(new URL(manifest.cases[0].config.backends.laya.url).port) };
+  };
+  const caseEnv = (ownedPorts: readonly number[]): NodeJS.ProcessEnv => ({
+    PATH: fakeBin + ":" + (process.env.PATH ?? ""),
+    TURNHELM_TEST_WORKER: "ok-write",
+    TURNHELM_TEST_INVOCATIONS: invocations,
+    TURNHELM_ALLOW_HOSTED_JEV: "1",
+    TYPESAFE_API_KEY: "fixture-only-synthetic-key",
+    NODE_EXTRA_CA_CERTS: caPath,
+    NODE_OPTIONS: "--require " + guard,
+    TEST_OWNED_PORTS: ownedPorts.join(",")
+  });
+
+  const happy = await prepareFallback();
+  assert.deepEqual(happy.manifest.cases[0].config.backends.jev.transport,
+    { mode: "http-connect", proxyUrl: `http://127.0.0.1:${proxy.port}` },
+    "the frozen policy is the caller's canonicalized explicit transport");
+  const conflict = await prepareFallback();
+  const drifted = await prepareFallback();
+  const runtimeDrift = await prepareFallback();
+  // Execution never rereads the external input: it is gone before any run.
+  await rm(configPath);
+
+  assert.equal(await executeAcceptance(happy.manifestPath, happy.sha256,
+    { env: caseEnv([happy.port, proxy.port, origin.port]) }), 0, "the singleton fallback completes");
+  const evidence = await readEvidence(dirname(happy.manifestPath));
+  const observed = evidence.find(line => line.phase === "observed");
+  assert.ok(observed);
+  assert.equal(observed.caseId, "dual-jev-write");
+  assert.equal(observed.backend, "jev", "the receipt selects the jev fallback");
+  assert.equal(observed.attempts, 2, "Laya 503 then Jev: exactly two attempts");
+  assert.deepEqual(observed.attemptTransports,
+    [{ backend: "laya", transportMode: "direct" }, { backend: "jev", transportMode: "http-connect" }]);
+  const journal = await readFile(
+    join(happy.manifest.runRoot.canonical, "consumers", "dual-jev-write", ".turnhelm", "routes.jsonl"), "utf8");
+  const receipt = JSON.parse(journal.trim().split("\n")[0]) as { attempts?: { backend: string; outcome: string }[] };
+  assert.equal(receipt.attempts?.[0]?.backend, "laya");
+  assert.equal(receipt.attempts?.[0]?.outcome, "failed", "the frozen 503 fixture fails the laya attempt");
+  assert.equal(receipt.attempts?.[1]?.backend, "jev");
+  assert.equal(receipt.attempts?.[1]?.outcome, "success");
+  const verified = evidence.find(line => line.phase === "verified");
+  assert.ok(verified);
+  assert.equal(verified.verdict, "pass");
+  const checks = verified.checks as Record<string, unknown>;
+  assert.equal(checks["transport-policy"], true, "the specialized fallback case verifies its frozen transport policy");
+  assert.ok(!("laya-first" in checks), "the singleton fallback has no laya-first requirement");
+  assert.deepEqual(evidence.at(-1), { phase: "completed", outcome: "pass", cases: 1, failed: 0 });
+  assert.equal(proxy.connects.length, 1, "exactly one CONNECT through the owned proxy");
+  assert.equal(proxy.connects[0].target, "api.typesafe.ai:443", "the CONNECT target is the fixed Jev origin");
+  assert.equal(proxy.connects[0].authorization, undefined, "Origin authorization never appears in CONNECT");
+  assert.equal(origin.requests, 1, "exactly one origin request inside the tunnel");
+  assert.ok(origin.authorizations[0].startsWith("Bearer "), "the synthetic key rides inside TLS");
+  assert.equal(await countInvocations(invocations), 1, "one fake worker start for the whole singleton run");
+  const connectsBefore = proxy.connects.length;
+  const workersBefore = await countInvocations(invocations);
+
+  // A frozen-port conflict refuses before paid traffic: zero origin calls,
+  // zero worker starts, and no port re-pick or config rewrite.
+  const blocker = http.createServer((_request, response) => {
+    response.writeHead(500);
+    response.end();
+  });
+  await new Promise<void>(resolve => blocker.listen(conflict.port, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>(resolve => blocker.close(() => resolve())));
+  assert.equal(await executeAcceptance(conflict.manifestPath, conflict.sha256,
+    { env: caseEnv([proxy.port, origin.port]) }), 1, "a frozen-port conflict fails the run");
+  assert.equal(proxy.connects.length, connectsBefore, "zero origin calls on a port conflict");
+  assert.equal(await countInvocations(invocations), workersBefore, "zero worker starts on a port conflict");
+  const conflictEvidence = await readEvidence(dirname(conflict.manifestPath));
+  assert.deepEqual(conflictEvidence.map(line => line.phase), ["prepared", "stopped"]);
+  assert.equal(conflictEvidence[1].reason, "drift");
+  assert.equal(conflictEvidence[1].caseId, null);
+  const frozenConfig = await readFile(
+    join(conflict.manifest.runRoot.canonical, "consumers", "dual-jev-write", ".turnhelm", "config.json"));
+  assert.ok(frozenConfig.equals(Buffer.from(JSON.stringify(conflict.manifest.cases[0].config, null, 2) + "\n", "utf8")),
+    "the refused run leaves the frozen config bytes untouched");
+
+  // Consumer config drift refuses at claim, before any spend at all: the
+  // frozen case bytes are re-verified there, so nothing is ever reserved.
+  const driftRoot = join(drifted.manifest.runRoot.canonical, "consumers", "dual-jev-write");
+  const driftConfig = JSON.parse(await readFile(join(driftRoot, ".turnhelm", "config.json"), "utf8")) as Record<string, unknown>;
+  driftConfig.routingTimeoutMs = 999;
+  await writeFile(join(driftRoot, ".turnhelm", "config.json"), JSON.stringify(driftConfig, null, 2) + "\n");
+  assert.equal(await executeAcceptance(drifted.manifestPath, drifted.sha256,
+    { env: caseEnv([drifted.port, proxy.port, origin.port]) }), 1, "consumer config drift refuses");
+  await assert.rejects(() => stat(join(dirname(drifted.manifestPath), "evidence", "evidence.jsonl")),
+    { code: "ENOENT" }, "config drift claims nothing");
+  assert.equal(proxy.connects.length, connectsBefore, "config drift spends nothing");
+  assert.equal(await countInvocations(invocations), workersBefore, "config drift starts no worker");
+
+  // A drifted runtime.js baseline entry refuses at claim, before any spend.
+  const tampered = JSON.parse(await readFile(runtimeDrift.manifestPath, "utf8")) as {
+    baseline: { dist: { path: string; sha256: string }[] };
+  };
+  const runtimeEntry = tampered.baseline.dist.find(entry => entry.path === "dist/src/runtime.js");
+  assert.ok(runtimeEntry, "the live baseline dynamically includes the runtime floor module");
+  runtimeEntry.sha256 = "0".repeat(64);
+  const tamperedBytes = Buffer.from(JSON.stringify(tampered, null, 2) + "\n", "utf8");
+  await writeFile(runtimeDrift.manifestPath, tamperedBytes);
+  assert.equal(await executeAcceptance(runtimeDrift.manifestPath, sha256hex(tamperedBytes),
+    { env: caseEnv([runtimeDrift.port, proxy.port, origin.port]) }), 1, "runtime.js drift refuses");
+  await assert.rejects(() => stat(join(dirname(runtimeDrift.manifestPath), "evidence", "evidence.jsonl")),
+    { code: "ENOENT" }, "a drifted baseline claims nothing");
+  assert.equal(proxy.connects.length, connectsBefore, "baseline drift spends nothing");
+});
+
+test("specialized transport policy gates the two known live cases", async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  const scratch = await mkdtemp(join(tmpdir(), "turnhelm-policy-"));
+  t.after(() => rm(scratch, { recursive: true, force: true }));
+  const origin = await startTlsOrigin(t);
+  const proxy = await startConnectProxy(t, origin.port);
+  const caPath = await writeFixtureCa(scratch);
+  const guard = join(scratch, "dial-guard.cjs");
+  await writeFile(guard, DIAL_GUARD_CJS);
+  const classifierPort = Number(new URL(classifier.url).port);
+  const corpus = JSON.parse(await readFile(CORPUS_PATH, "utf8")) as { workerReadonlyTask: string; workerWriteTask: string };
+  const template = JSON.parse(await readFile(TEMPLATE_PATH, "utf8")) as {
+    profiles: Record<string, { model: string; effort: string }>;
+  };
+
+  // A unique, CLI-written-looking receipt whose attempts are the caller's
+  // choice: the journal is frozen read-only so the CLI's own best-effort
+  // append fails and the seed stays the only task-matching line.
+  const seededReceipt = (task: string, attempts: readonly unknown[]): string => {
+    const bytes = Buffer.from(task, "utf8");
+    return JSON.stringify({
+      type: "turnhelm.route", ts: "2026-10-14T00:00:00.000Z",
+      taskSha256: sha256hex(bytes), taskBytes: bytes.length, status: "selected",
+      routingMs: 5, attempts,
+      backend: "jev", profileId: "fast",
+      model: template.profiles.fast.model, effort: template.profiles.fast.effort
+    });
+  };
+  const freezeJournal = async (run: { runRoot: string }, id: string): Promise<void> => {
+    await chmod(join(run.runRoot, "consumers", id, ".turnhelm", "routes.jsonl"), 0o444);
+  };
+  const policyEnv = (workerMode: string, ownedPorts: readonly number[]): NodeJS.ProcessEnv => ({
+    PATH: fakeBin + ":" + (process.env.PATH ?? ""),
+    TURNHELM_TEST_WORKER: workerMode,
+    TURNHELM_ALLOW_HOSTED_JEV: "1",
+    TYPESAFE_API_KEY: "fixture-only-synthetic-key",
+    NODE_EXTRA_CA_CERTS: caPath,
+    NODE_OPTIONS: "--require " + guard,
+    TEST_OWNED_PORTS: ownedPorts.join(",")
+  });
+
+  // The specialized jev singleton case passes when the receipt matches its
+  // frozen policy: one http-connect attempt through the owned proxy.
+  const jevMatch = await buildRun(t, "jev", classifier.url, [
+    { id: "jev-default-readonly", kind: "worker-readonly",
+      jevTransport: { mode: "http-connect", proxyUrl: `http://127.0.0.1:${proxy.port}` } }
+  ]);
+  assert.equal(await executeAcceptance(jevMatch.manifestPath, jevMatch.sha256,
+    { env: policyEnv("ok-readonly", [proxy.port, origin.port]) }), 0,
+    "the specialized jev case passes with a matching policy");
+  const jevVerified = (await readEvidence(jevMatch.runRoot)).find(line => line.phase === "verified");
+  assert.ok(jevVerified);
+  assert.equal((jevVerified.checks as Record<string, unknown>)["transport-policy"], true);
+
+  // The same case with a seeded direct-policy receipt on a frozen
+  // http-connect config: every other check passes (the CLI itself succeeded),
+  // the transport check alone blocks the PASS through the verdict stop.
+  const jevMismatch = await buildRun(t, "jev", classifier.url, [
+    { id: "jev-default-readonly", kind: "worker-readonly",
+      jevTransport: { mode: "http-connect", proxyUrl: `http://127.0.0.1:${proxy.port}` },
+      journalSeed: [seededReceipt(corpus.workerReadonlyTask,
+        [{ backend: "jev", transportMode: "direct", outcome: "success", durationMs: 5 }])] }
+  ]);
+  await freezeJournal(jevMismatch, "jev-default-readonly");
+  assert.equal(await executeAcceptance(jevMismatch.manifestPath, jevMismatch.sha256,
+    { env: policyEnv("ok-readonly", [proxy.port, origin.port]) }), 1,
+    "a mismatching specialized policy stops the run");
+  const jevMismatchEvidence = await readEvidence(jevMismatch.runRoot);
+  const jevMismatchVerified = jevMismatchEvidence.find(line => line.phase === "verified");
+  assert.ok(jevMismatchVerified);
+  const jevMismatchChecks = jevMismatchVerified.checks as Record<string, unknown>;
+  assert.equal(jevMismatchChecks["transport-policy"], false,
+    "the seeded direct policy does not match the frozen http-connect policy");
+  assert.equal(jevMismatchChecks["receipt-unique"], true);
+  assert.equal(jevMismatchChecks["exit-zero"], true, "the CLI itself succeeded: the transport check is the blocking fact");
+  assert.equal(jevMismatchEvidence.at(-1)?.reason, "verdict", "the stop rides the existing verdict gate");
+  assert.deepEqual(jevMismatchEvidence.find(line => line.phase === "observed")?.attemptTransports,
+    [{ backend: "jev", transportMode: "direct" }]);
+
+  // The specialized fallback case with evidence that cannot project: the
+  // unverified marker equally blocks its transport PASS.
+  const fixturePort = await freeLoopbackPort();
+  const dualUnverified = await buildRun(t, "dual", classifier.url, [
+    { id: "dual-jev-write", kind: "worker-write", fixtureUrl: `http://127.0.0.1:${fixturePort}`,
+      jevTransport: { mode: "http-connect", proxyUrl: `http://127.0.0.1:${proxy.port}` },
+      journalSeed: [seededReceipt(corpus.workerWriteTask, [
+        { backend: "laya", outcome: "failed", durationMs: 5 },
+        { backend: "jev", transportMode: "http-connect", outcome: "success", durationMs: 5 }
+      ])] }
+  ]);
+  await freezeJournal(dualUnverified, "dual-jev-write");
+  assert.equal(await executeAcceptance(dualUnverified.manifestPath, dualUnverified.sha256,
+    { env: policyEnv("ok-write", [fixturePort, proxy.port, origin.port]) }), 1,
+    "unverified transport evidence blocks the specialized case");
+  const unverifiedEvidence = await readEvidence(dualUnverified.runRoot);
+  const unverifiedVerified = unverifiedEvidence.find(line => line.phase === "verified");
+  assert.ok(unverifiedVerified);
+  assert.equal((unverifiedVerified.checks as Record<string, unknown>)["transport-policy"], false);
+  assert.equal(unverifiedEvidence.find(line => line.phase === "observed")?.attemptTransports, "unverified");
+  assert.equal(unverifiedEvidence.at(-1)?.reason, "verdict");
+
+  // An ordinary case never carries the gate: the same mismatching evidence
+  // on an unknown id passes and completes.
+  const ordinary = await buildRun(t, "dual", classifier.url, [
+    { id: "ordinary-write", kind: "worker-write",
+      journalSeed: [seededReceipt(corpus.workerWriteTask, [
+        { backend: "laya", transportMode: "direct", outcome: "success", durationMs: 5 },
+        { backend: "jev", transportMode: "direct", outcome: "success", durationMs: 5 }
+      ])] }
+  ]);
+  await freezeJournal(ordinary, "ordinary-write");
+  assert.equal(await executeAcceptance(ordinary.manifestPath, ordinary.sha256,
+    { env: policyEnv("ok-write", [classifierPort, proxy.port, origin.port]) }), 0,
+    "an ordinary case never carries the specialized gate");
+  const ordinaryEvidence = await readEvidence(ordinary.runRoot);
+  const ordinaryVerified = ordinaryEvidence.find(line => line.phase === "verified");
+  assert.ok(ordinaryVerified);
+  assert.ok(!("transport-policy" in (ordinaryVerified.checks as Record<string, unknown>)));
+  assert.equal(ordinaryVerified.verdict, "pass", "mismatching transport evidence never gates an ordinary case");
+  assert.deepEqual(ordinaryEvidence.find(line => line.phase === "observed")?.attemptTransports,
+    [{ backend: "laya", transportMode: "direct" }, { backend: "jev", transportMode: "direct" }]);
+  assert.equal(ordinaryEvidence.at(-1)?.phase, "completed");
+});
+
+test("dual identity checks follow case ids not positions", async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  const scratch = await mkdtemp(join(tmpdir(), "turnhelm-identity-"));
+  t.after(() => rm(scratch, { recursive: true, force: true }));
+  const origin = await startTlsOrigin(t);
+  const proxy = await startConnectProxy(t, origin.port);
+  const caPath = await writeFixtureCa(scratch);
+  const guard = join(scratch, "dial-guard.cjs");
+  await writeFile(guard, DIAL_GUARD_CJS);
+  const fixturePort = await freeLoopbackPort();
+
+  // The fallback case sits first: the 503 fixture and the transport gate must
+  // follow its dual-jev-write identity, and the lead check the dual-laya-first
+  // identity — never array position or port comparison. Both cases are write
+  // cases so the shared ok-write worker mode stays within each write scope.
+  const run = await buildRun(t, "dual", classifier.url, [
+    { id: "dual-jev-write", kind: "worker-write", fixtureUrl: `http://127.0.0.1:${fixturePort}`,
+      jevTransport: { mode: "http-connect", proxyUrl: `http://127.0.0.1:${proxy.port}` } },
+    { id: "dual-laya-first", kind: "worker-write" }
+  ]);
+  const classifierPort = Number(new URL(classifier.url).port);
+  const debugCode = await executeAcceptance(run.manifestPath, run.sha256, {
+    env: {
+      PATH: fakeBin + ":" + (process.env.PATH ?? ""),
+      TURNHELM_TEST_WORKER: "ok-write",
+      TURNHELM_ALLOW_HOSTED_JEV: "1",
+      TYPESAFE_API_KEY: "fixture-only-synthetic-key",
+      NODE_EXTRA_CA_CERTS: caPath,
+      NODE_OPTIONS: "--require " + guard,
+      TEST_OWNED_PORTS: [fixturePort, classifierPort, proxy.port, origin.port].join(",")
+    }
+  });
+  assert.equal(debugCode, 0, "the identity-bound dual run completes");
+  const evidence = await readEvidence(run.runRoot);
+  const fallback = evidence.find(line => line.phase === "verified" && line.caseId === "dual-jev-write");
+  const lead = evidence.find(line => line.phase === "verified" && line.caseId === "dual-laya-first");
+  assert.ok(fallback && lead);
+  const fallbackChecks = fallback.checks as Record<string, unknown>;
+  const leadChecks = lead.checks as Record<string, unknown>;
+  assert.ok(!("laya-first" in fallbackChecks), "the position-zero fallback case carries no lead requirement");
+  assert.equal(fallbackChecks["transport-policy"], true, "the fallback gate follows the dual-jev-write identity");
+  assert.ok(!("transport-policy" in leadChecks), "the lead case carries no specialized transport gate");
+  assert.equal(leadChecks["laya-first"], true, "the lead check follows the dual-laya-first identity");
+  assert.equal(proxy.connects.length, 1, "only the fallback case traverses the proxy");
+});
