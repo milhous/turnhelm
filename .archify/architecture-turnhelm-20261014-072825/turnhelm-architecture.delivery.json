@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "4a88c91c-d212-4593-b39f-6ac0c9347419",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/candidate.json",
+  "output": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/turnhelm-architecture.html",
+  "specification": {
+    "sha256": "8bc0e2726d3c2f15aeb8ae8d0af445807eddb8dfcaddef7c3ddd7141687cfc4a",
+    "bytes": 10227
+  },
+  "artifact": {
+    "sha256": "3e6d3f9d132d74ae75d8cf4ea873698bd5896c9fd89454d009043183f4852072",
+    "bytes": 768087
+  }
+}

@@ -3,18 +3,18 @@
   "ok": true,
   "command": "finalize",
   "status": "pass",
-  "type": "architecture",
+  "type": "workflow",
   "quality": "showcase",
-  "startedAt": "2026-10-13T08:53:40.925Z",
+  "startedAt": "2026-10-13T23:44:38.170Z",
   "specification": {
-    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/candidate.json",
-    "sha256": "24a7479c8808242c1386336b9619ef2973071d6fc8feb2ee9d1545e3fb2a3cbb",
-    "bytes": 9331
+    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/candidate.json",
+    "sha256": "d80d04ac3277932f0c8c406b6a9eda6b1fcbdab0fcb3c45c994beec65fc02375",
+    "bytes": 9046
   },
   "artifact": {
-    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.html",
-    "sha256": "5865941087573c3278719d6e3c50d1c4d568b1c05d74f4bb65a254de63ad64d8",
-    "bytes": 767946
+    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html",
+    "sha256": "9ab879d2e1027b14ba379c15fadfb5d82466106943d4d1dde6136a8c90987f24",
+    "bytes": 765201
   },
   "stages": {
     "validate": {
@@ -26,9 +26,9 @@
         "/opt/homebrew/Cellar/node/26.5.0/bin/node",
         "/Users/zhangxiao/.agents/skills/archify/bin/archify.mjs",
         "deliver",
-        "architecture",
-        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/candidate.json",
-        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.html",
+        "workflow",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/candidate.json",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html",
         "--quality",
         "showcase",
         "--repo-root",
@@ -40,8 +40,8 @@
         "ok": true,
         "command": "validate",
         "specification": {
-          "sha256": "24a7479c8808242c1386336b9619ef2973071d6fc8feb2ee9d1545e3fb2a3cbb",
-          "bytes": 9331
+          "sha256": "d80d04ac3277932f0c8c406b6a9eda6b1fcbdab0fcb3c45c994beec65fc02375",
+          "bytes": 9046
         },
         "validation": {
           "checksPassed": 9,
@@ -56,14 +56,14 @@
     "deliver": {
       "status": "pass",
       "exitCode": 0,
-      "durationMs": 293,
+      "durationMs": 438,
       "command": [
         "/opt/homebrew/Cellar/node/26.5.0/bin/node",
         "/Users/zhangxiao/.agents/skills/archify/bin/archify.mjs",
         "deliver",
-        "architecture",
-        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/candidate.json",
-        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.html",
+        "workflow",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/candidate.json",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html",
         "--quality",
         "showcase",
         "--repo-root",
@@ -72,19 +72,19 @@
       ],
       "receipt": {
         "schemaVersion": 1,
-        "receiptId": "eaea9c80-0228-4362-a4f9-273afda08293",
+        "receiptId": "54ed312a-da36-45d3-be48-c8e07c964fb1",
         "ok": true,
         "command": "deliver",
-        "type": "architecture",
-        "input": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/candidate.json",
-        "output": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.html",
+        "type": "workflow",
+        "input": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/candidate.json",
+        "output": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html",
         "specification": {
-          "sha256": "24a7479c8808242c1386336b9619ef2973071d6fc8feb2ee9d1545e3fb2a3cbb",
-          "bytes": 9331
+          "sha256": "d80d04ac3277932f0c8c406b6a9eda6b1fcbdab0fcb3c45c994beec65fc02375",
+          "bytes": 9046
         },
         "artifact": {
-          "sha256": "5865941087573c3278719d6e3c50d1c4d568b1c05d74f4bb65a254de63ad64d8",
-          "bytes": 767946
+          "sha256": "9ab879d2e1027b14ba379c15fadfb5d82466106943d4d1dde6136a8c90987f24",
+          "bytes": 765201
         },
         "validation": {
           "checksPassed": 9,
@@ -97,8 +97,8 @@
         "evidence": {
           "verified": true,
           "repository": "git@github.com:milhous/turnhelm",
-          "revision": "f713e08a754e86a5361100f27dcc041b26fdc2c0",
-          "references": 19,
+          "revision": "733753eb2fe0762176c695410ce6a51fba23a8d3",
+          "references": 15,
           "linkMode": "local-only"
         },
         "update": {
@@ -117,20 +117,20 @@
     "check": {
       "status": "pass",
       "exitCode": 0,
-      "durationMs": 133,
+      "durationMs": 123,
       "command": [
         "/opt/homebrew/Cellar/node/26.5.0/bin/node",
         "/Users/zhangxiao/.agents/skills/archify/bin/archify.mjs",
         "check",
-        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.html",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html",
         "--require-provenance"
       ],
       "receipt": {
         "ok": true,
-        "file": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.html",
+        "file": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html",
         "artifact": {
-          "sha256": "5865941087573c3278719d6e3c50d1c4d568b1c05d74f4bb65a254de63ad64d8",
-          "bytes": 767946
+          "sha256": "9ab879d2e1027b14ba379c15fadfb5d82466106943d4d1dde6136a8c90987f24",
+          "bytes": 765201
         },
         "checks": [
           {
@@ -197,16 +197,16 @@
             "containerBorderRuns": 0,
             "labelRouteClearanceIssues": 0,
             "labelCanvasOverflowIssues": 0,
-            "minLabelRouteClearance": 14.1,
+            "minLabelRouteClearance": 18.4,
             "desktopReadabilityIssues": 0,
             "viewportHeightIssues": 0,
-            "minProjectedNodeTextPx": 7.146315789473684,
-            "maxBends": 4,
-            "routesOverSuggestedBends": 1,
-            "maxStretch": 1.756,
+            "minProjectedNodeTextPx": 6.695266272189349,
+            "maxBends": 2,
+            "routesOverSuggestedBends": 0,
+            "maxStretch": 1.361,
             "routesOverSuggestedStretch": 1,
-            "minSegmentPx": 24,
-            "minInteriorSegmentPx": 78,
+            "minSegmentPx": 20.4,
+            "minInteriorSegmentPx": 120,
             "shortSegmentCount": 0,
             "shortEndpointSegmentCount": 0,
             "shortInteriorSegmentCount": 0,
@@ -223,72 +223,20 @@
             "detours": [
               {
                 "relationship": {
-                  "id": "conSpawn",
-                  "from": "turnhelmCli",
-                  "to": "codexWorker",
-                  "label": "spawn ≤1 Codex worker",
-                  "collectionIndex": 8,
-                  "artifactIndex": 9
-                },
-                "bends": 4,
-                "stretch": 1.176,
-                "directCorridorBlockers": [
-                  {
-                    "id": "router",
-                    "label": "Router",
-                    "box": [
-                      510,
-                      340,
-                      150,
-                      64
-                    ]
-                  }
-                ]
-              },
-              {
-                "relationship": {
-                  "id": "conOutput",
-                  "from": "codexWorker",
-                  "to": "parentSession",
-                  "label": "stdout · final agent message",
-                  "collectionIndex": 9,
-                  "artifactIndex": 10
+                  "id": "edgeReject",
+                  "from": "intake",
+                  "to": "rejected",
+                  "label": "invalid input",
+                  "collectionIndex": 6,
+                  "artifactIndex": 7
                 },
                 "bends": 2,
-                "stretch": 1.756,
-                "directCorridorBlockers": [
-                  {
-                    "id": "turnhelmCli",
-                    "label": "turnhelm CLI",
-                    "box": [
-                      270,
-                      340,
-                      150,
-                      64
-                    ]
-                  },
-                  {
-                    "id": "router",
-                    "label": "Router",
-                    "box": [
-                      510,
-                      340,
-                      150,
-                      64
-                    ]
-                  }
-                ]
+                "stretch": 1.361
               }
             ]
           },
           "leadingSpace": {
-            "measured": true,
-            "emptyTopPx": 130,
-            "emptyTopRatio": 0.174,
-            "occupiedTop": 130,
-            "viewBoxTop": 0,
-            "canvasHeight": 748,
-            "typicalNodeHeight": 64,
+            "measured": false,
             "reviewSuggested": false
           },
           "desktopReadability": {
@@ -297,33 +245,33 @@
             "availableDiagramWidth": 930,
             "actualBudgetPx": 930,
             "limit": "legacy",
-            "requestedTargetPx": 7.5,
-            "requestedTargetMet": false,
+            "requestedTargetPx": null,
+            "requestedTargetMet": null,
             "hardFloorPx": 6,
             "hardFloorMet": true,
             "minimumOwner": {
               "kind": "node",
-              "id": "codexWorker"
+              "id": "receipt"
             },
             "minimumSourceTextPx": 7.3,
-            "minimumProjectedTextPx": 7.146315789473684,
-            "semanticTextCount": 31
+            "minimumProjectedTextPx": 6.695266272189349,
+            "semanticTextCount": 28
           },
           "issues": []
         },
         "provenance": "current",
-        "deliveryReceiptId": "eaea9c80-0228-4362-a4f9-273afda08293"
+        "deliveryReceiptId": "54ed312a-da36-45d3-be48-c8e07c964fb1"
       }
     },
     "browser-check": {
       "status": "pass",
       "exitCode": 0,
-      "durationMs": 5530,
+      "durationMs": 1034,
       "command": [
         "/opt/homebrew/Cellar/node/26.5.0/bin/node",
         "/Users/zhangxiao/.agents/skills/archify/bin/archify.mjs",
         "browser-check",
-        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.html",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html",
         "--json",
         "--require-provenance"
       ],
@@ -336,11 +284,11 @@
         "status": "pass",
         "visualReview": "not-requested",
         "provenance": "current",
-        "deliveryReceiptId": "eaea9c80-0228-4362-a4f9-273afda08293",
+        "deliveryReceiptId": "54ed312a-da36-45d3-be48-c8e07c964fb1",
         "artifact": {
-          "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.html",
-          "sha256": "5865941087573c3278719d6e3c50d1c4d568b1c05d74f4bb65a254de63ad64d8",
-          "bytes": 767946
+          "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html",
+          "sha256": "9ab879d2e1027b14ba379c15fadfb5d82466106943d4d1dde6136a8c90987f24",
+          "bytes": 765201
         },
         "state": {
           "detail": "read",
@@ -369,27 +317,78 @@
               "overflowDisposition": "contained",
               "readerLayout": "adaptive",
               "readerOverflow": null,
-              "readerFit": "intrinsic-height",
+              "readerFit": null,
               "ok": true,
-              "readerWidth": 980,
-              "diagramWidth": 950,
+              "readerWidth": 1190,
+              "diagramWidth": 1160,
               "pageComposition": {
                 "bodyPaddingPx": 12,
                 "headerPx": 52,
                 "diagramChromePx": 78,
-                "svgPx": 748,
+                "svgPx": 746,
                 "cardsPx": 0,
-                "viewBoxHeight": 748
+                "viewBoxHeight": 652
               },
-              "viewBoxWidth": 950,
+              "viewBoxWidth": 1014,
+              "workflowLanes": [
+                {
+                  "frameId": "lane-0",
+                  "heightPx": 119,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "submit",
+                    "receipt"
+                  ],
+                  "nodeSpanPx": 59,
+                  "spaceAboveNodesPx": 47,
+                  "spaceBelowNodesPx": 13
+                },
+                {
+                  "frameId": "lane-1",
+                  "heightPx": 119,
+                  "nodeCount": 3,
+                  "nodeIds": [
+                    "intake",
+                    "decision",
+                    "worker"
+                  ],
+                  "nodeSpanPx": 59,
+                  "spaceAboveNodesPx": 47,
+                  "spaceBelowNodesPx": 13
+                },
+                {
+                  "frameId": "lane-2",
+                  "heightPx": 119,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "laya",
+                    "jev"
+                  ],
+                  "nodeSpanPx": 59,
+                  "spaceAboveNodesPx": 47,
+                  "spaceBelowNodesPx": 13
+                },
+                {
+                  "frameId": "lane-3",
+                  "heightPx": 119,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "rejected",
+                    "failclosed"
+                  ],
+                  "nodeSpanPx": 59,
+                  "spaceAboveNodesPx": 47,
+                  "spaceBelowNodesPx": 13
+                }
+              ],
               "minimumProjectedNodeTextPx": 7.3,
               "minimumProjectedNonEdgeTextPx": 7.3,
               "minimumProjectedEdgeTextPx": 8,
-              "minimumProjectedNodeText": "≤1 · read-only / workspace-write",
+              "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
               "minimumProjectedNodeTextDetail": "context",
               "minimumProjectedNodeTextOwner": {
                 "kind": "node",
-                "id": "codexWorker"
+                "id": "receipt"
               },
               "minimumRequiredNodeTextPx": 6,
               "readabilityOk": true,
@@ -419,27 +418,78 @@
               "overflowDisposition": "contained",
               "readerLayout": "adaptive",
               "readerOverflow": null,
-              "readerFit": "intrinsic-height",
+              "readerFit": null,
               "ok": true,
-              "readerWidth": 1021,
-              "diagramWidth": 991,
+              "readerWidth": 1243,
+              "diagramWidth": 1213,
               "pageComposition": {
                 "bodyPaddingPx": 64,
                 "headerPx": 60,
                 "diagramChromePx": 84,
                 "svgPx": 780,
                 "cardsPx": 0,
-                "viewBoxHeight": 748
+                "viewBoxHeight": 652
               },
-              "viewBoxWidth": 950,
+              "viewBoxWidth": 1014,
+              "workflowLanes": [
+                {
+                  "frameId": "lane-0",
+                  "heightPx": 124,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "submit",
+                    "receipt"
+                  ],
+                  "nodeSpanPx": 62,
+                  "spaceAboveNodesPx": 49,
+                  "spaceBelowNodesPx": 13
+                },
+                {
+                  "frameId": "lane-1",
+                  "heightPx": 124,
+                  "nodeCount": 3,
+                  "nodeIds": [
+                    "intake",
+                    "decision",
+                    "worker"
+                  ],
+                  "nodeSpanPx": 62,
+                  "spaceAboveNodesPx": 49,
+                  "spaceBelowNodesPx": 13
+                },
+                {
+                  "frameId": "lane-2",
+                  "heightPx": 124,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "laya",
+                    "jev"
+                  ],
+                  "nodeSpanPx": 62,
+                  "spaceAboveNodesPx": 49,
+                  "spaceBelowNodesPx": 13
+                },
+                {
+                  "frameId": "lane-3",
+                  "heightPx": 124,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "rejected",
+                    "failclosed"
+                  ],
+                  "nodeSpanPx": 62,
+                  "spaceAboveNodesPx": 49,
+                  "spaceBelowNodesPx": 13
+                }
+              ],
               "minimumProjectedNodeTextPx": 7.3,
               "minimumProjectedNonEdgeTextPx": 7.3,
               "minimumProjectedEdgeTextPx": 8,
-              "minimumProjectedNodeText": "≤1 · read-only / workspace-write",
+              "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
               "minimumProjectedNodeTextDetail": "context",
               "minimumProjectedNodeTextOwner": {
                 "kind": "node",
-                "id": "codexWorker"
+                "id": "receipt"
               },
               "minimumRequiredNodeTextPx": 6,
               "readabilityOk": true,
@@ -469,27 +519,78 @@
               "overflowDisposition": "contained",
               "readerLayout": "adaptive",
               "readerOverflow": null,
-              "readerFit": "intrinsic-height",
+              "readerFit": null,
               "ok": true,
-              "readerWidth": 1122,
-              "diagramWidth": 1092,
+              "readerWidth": 1367,
+              "diagramWidth": 1337,
               "pageComposition": {
                 "bodyPaddingPx": 64,
                 "headerPx": 60,
                 "diagramChromePx": 84,
                 "svgPx": 860,
                 "cardsPx": 0,
-                "viewBoxHeight": 748
+                "viewBoxHeight": 652
               },
-              "viewBoxWidth": 950,
+              "viewBoxWidth": 1014,
+              "workflowLanes": [
+                {
+                  "frameId": "lane-0",
+                  "heightPx": 137,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "submit",
+                    "receipt"
+                  ],
+                  "nodeSpanPx": 69,
+                  "spaceAboveNodesPx": 54,
+                  "spaceBelowNodesPx": 15
+                },
+                {
+                  "frameId": "lane-1",
+                  "heightPx": 137,
+                  "nodeCount": 3,
+                  "nodeIds": [
+                    "intake",
+                    "decision",
+                    "worker"
+                  ],
+                  "nodeSpanPx": 69,
+                  "spaceAboveNodesPx": 54,
+                  "spaceBelowNodesPx": 15
+                },
+                {
+                  "frameId": "lane-2",
+                  "heightPx": 137,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "laya",
+                    "jev"
+                  ],
+                  "nodeSpanPx": 69,
+                  "spaceAboveNodesPx": 54,
+                  "spaceBelowNodesPx": 15
+                },
+                {
+                  "frameId": "lane-3",
+                  "heightPx": 137,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "rejected",
+                    "failclosed"
+                  ],
+                  "nodeSpanPx": 69,
+                  "spaceAboveNodesPx": 54,
+                  "spaceBelowNodesPx": 15
+                }
+              ],
               "minimumProjectedNodeTextPx": 7.3,
               "minimumProjectedNonEdgeTextPx": 7.3,
               "minimumProjectedEdgeTextPx": 8,
-              "minimumProjectedNodeText": "≤1 · read-only / workspace-write",
+              "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
               "minimumProjectedNodeTextDetail": "context",
               "minimumProjectedNodeTextOwner": {
                 "kind": "node",
-                "id": "codexWorker"
+                "id": "receipt"
               },
               "minimumRequiredNodeTextPx": 6,
               "readabilityOk": true,
@@ -519,27 +620,78 @@
               "overflowDisposition": "contained",
               "readerLayout": "adaptive",
               "readerOverflow": null,
-              "readerFit": "intrinsic-height",
+              "readerFit": null,
               "ok": true,
-              "readerWidth": 1424,
-              "diagramWidth": 1374,
+              "readerWidth": 1733,
+              "diagramWidth": 1683,
               "pageComposition": {
                 "bodyPaddingPx": 64,
                 "headerPx": 68,
                 "diagramChromePx": 94,
                 "svgPx": 1082,
                 "cardsPx": 0,
-                "viewBoxHeight": 748
+                "viewBoxHeight": 652
               },
-              "viewBoxWidth": 950,
+              "viewBoxWidth": 1014,
+              "workflowLanes": [
+                {
+                  "frameId": "lane-0",
+                  "heightPx": 173,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "submit",
+                    "receipt"
+                  ],
+                  "nodeSpanPx": 86,
+                  "spaceAboveNodesPx": 68,
+                  "spaceBelowNodesPx": 18
+                },
+                {
+                  "frameId": "lane-1",
+                  "heightPx": 173,
+                  "nodeCount": 3,
+                  "nodeIds": [
+                    "intake",
+                    "decision",
+                    "worker"
+                  ],
+                  "nodeSpanPx": 86,
+                  "spaceAboveNodesPx": 68,
+                  "spaceBelowNodesPx": 18
+                },
+                {
+                  "frameId": "lane-2",
+                  "heightPx": 173,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "laya",
+                    "jev"
+                  ],
+                  "nodeSpanPx": 86,
+                  "spaceAboveNodesPx": 68,
+                  "spaceBelowNodesPx": 18
+                },
+                {
+                  "frameId": "lane-3",
+                  "heightPx": 173,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "rejected",
+                    "failclosed"
+                  ],
+                  "nodeSpanPx": 86,
+                  "spaceAboveNodesPx": 68,
+                  "spaceBelowNodesPx": 18
+                }
+              ],
               "minimumProjectedNodeTextPx": 7.3,
               "minimumProjectedNonEdgeTextPx": 7.3,
               "minimumProjectedEdgeTextPx": 8,
-              "minimumProjectedNodeText": "≤1 · read-only / workspace-write",
+              "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
               "minimumProjectedNodeTextDetail": "context",
               "minimumProjectedNodeTextOwner": {
                 "kind": "node",
-                "id": "codexWorker"
+                "id": "receipt"
               },
               "minimumRequiredNodeTextPx": 6,
               "readabilityOk": true,
@@ -622,27 +774,78 @@
               "overflowDisposition": "contained",
               "readerLayout": "adaptive",
               "readerOverflow": null,
-              "readerFit": "intrinsic-height",
+              "readerFit": null,
               "ok": true,
-              "readerWidth": 980,
-              "diagramWidth": 950,
+              "readerWidth": 1190,
+              "diagramWidth": 1160,
               "pageComposition": {
                 "bodyPaddingPx": 12,
                 "headerPx": 52,
                 "diagramChromePx": 78,
-                "svgPx": 748,
+                "svgPx": 746,
                 "cardsPx": 0,
-                "viewBoxHeight": 748
+                "viewBoxHeight": 652
               },
-              "viewBoxWidth": 950,
+              "viewBoxWidth": 1014,
+              "workflowLanes": [
+                {
+                  "frameId": "lane-0",
+                  "heightPx": 119,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "submit",
+                    "receipt"
+                  ],
+                  "nodeSpanPx": 59,
+                  "spaceAboveNodesPx": 47,
+                  "spaceBelowNodesPx": 13
+                },
+                {
+                  "frameId": "lane-1",
+                  "heightPx": 119,
+                  "nodeCount": 3,
+                  "nodeIds": [
+                    "intake",
+                    "decision",
+                    "worker"
+                  ],
+                  "nodeSpanPx": 59,
+                  "spaceAboveNodesPx": 47,
+                  "spaceBelowNodesPx": 13
+                },
+                {
+                  "frameId": "lane-2",
+                  "heightPx": 119,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "laya",
+                    "jev"
+                  ],
+                  "nodeSpanPx": 59,
+                  "spaceAboveNodesPx": 47,
+                  "spaceBelowNodesPx": 13
+                },
+                {
+                  "frameId": "lane-3",
+                  "heightPx": 119,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "rejected",
+                    "failclosed"
+                  ],
+                  "nodeSpanPx": 59,
+                  "spaceAboveNodesPx": 47,
+                  "spaceBelowNodesPx": 13
+                }
+              ],
               "minimumProjectedNodeTextPx": 7.3,
               "minimumProjectedNonEdgeTextPx": 7.3,
               "minimumProjectedEdgeTextPx": 8,
-              "minimumProjectedNodeText": "≤1 · read-only / workspace-write",
+              "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
               "minimumProjectedNodeTextDetail": "context",
               "minimumProjectedNodeTextOwner": {
                 "kind": "node",
-                "id": "codexWorker"
+                "id": "receipt"
               },
               "minimumRequiredNodeTextPx": 6,
               "readabilityOk": true,
@@ -672,27 +875,78 @@
               "overflowDisposition": "contained",
               "readerLayout": "adaptive",
               "readerOverflow": null,
-              "readerFit": "intrinsic-height",
+              "readerFit": null,
               "ok": true,
-              "readerWidth": 1021,
-              "diagramWidth": 991,
+              "readerWidth": 1243,
+              "diagramWidth": 1213,
               "pageComposition": {
                 "bodyPaddingPx": 64,
                 "headerPx": 60,
                 "diagramChromePx": 84,
                 "svgPx": 780,
                 "cardsPx": 0,
-                "viewBoxHeight": 748
+                "viewBoxHeight": 652
               },
-              "viewBoxWidth": 950,
+              "viewBoxWidth": 1014,
+              "workflowLanes": [
+                {
+                  "frameId": "lane-0",
+                  "heightPx": 124,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "submit",
+                    "receipt"
+                  ],
+                  "nodeSpanPx": 62,
+                  "spaceAboveNodesPx": 49,
+                  "spaceBelowNodesPx": 13
+                },
+                {
+                  "frameId": "lane-1",
+                  "heightPx": 124,
+                  "nodeCount": 3,
+                  "nodeIds": [
+                    "intake",
+                    "decision",
+                    "worker"
+                  ],
+                  "nodeSpanPx": 62,
+                  "spaceAboveNodesPx": 49,
+                  "spaceBelowNodesPx": 13
+                },
+                {
+                  "frameId": "lane-2",
+                  "heightPx": 124,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "laya",
+                    "jev"
+                  ],
+                  "nodeSpanPx": 62,
+                  "spaceAboveNodesPx": 49,
+                  "spaceBelowNodesPx": 13
+                },
+                {
+                  "frameId": "lane-3",
+                  "heightPx": 124,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "rejected",
+                    "failclosed"
+                  ],
+                  "nodeSpanPx": 62,
+                  "spaceAboveNodesPx": 49,
+                  "spaceBelowNodesPx": 13
+                }
+              ],
               "minimumProjectedNodeTextPx": 7.3,
               "minimumProjectedNonEdgeTextPx": 7.3,
               "minimumProjectedEdgeTextPx": 8,
-              "minimumProjectedNodeText": "≤1 · read-only / workspace-write",
+              "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
               "minimumProjectedNodeTextDetail": "context",
               "minimumProjectedNodeTextOwner": {
                 "kind": "node",
-                "id": "codexWorker"
+                "id": "receipt"
               },
               "minimumRequiredNodeTextPx": 6,
               "readabilityOk": true,
@@ -722,27 +976,78 @@
               "overflowDisposition": "contained",
               "readerLayout": "adaptive",
               "readerOverflow": null,
-              "readerFit": "intrinsic-height",
+              "readerFit": null,
               "ok": true,
-              "readerWidth": 1122,
-              "diagramWidth": 1092,
+              "readerWidth": 1367,
+              "diagramWidth": 1337,
               "pageComposition": {
                 "bodyPaddingPx": 64,
                 "headerPx": 60,
                 "diagramChromePx": 84,
                 "svgPx": 860,
                 "cardsPx": 0,
-                "viewBoxHeight": 748
+                "viewBoxHeight": 652
               },
-              "viewBoxWidth": 950,
+              "viewBoxWidth": 1014,
+              "workflowLanes": [
+                {
+                  "frameId": "lane-0",
+                  "heightPx": 137,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "submit",
+                    "receipt"
+                  ],
+                  "nodeSpanPx": 69,
+                  "spaceAboveNodesPx": 54,
+                  "spaceBelowNodesPx": 15
+                },
+                {
+                  "frameId": "lane-1",
+                  "heightPx": 137,
+                  "nodeCount": 3,
+                  "nodeIds": [
+                    "intake",
+                    "decision",
+                    "worker"
+                  ],
+                  "nodeSpanPx": 69,
+                  "spaceAboveNodesPx": 54,
+                  "spaceBelowNodesPx": 15
+                },
+                {
+                  "frameId": "lane-2",
+                  "heightPx": 137,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "laya",
+                    "jev"
+                  ],
+                  "nodeSpanPx": 69,
+                  "spaceAboveNodesPx": 54,
+                  "spaceBelowNodesPx": 15
+                },
+                {
+                  "frameId": "lane-3",
+                  "heightPx": 137,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "rejected",
+                    "failclosed"
+                  ],
+                  "nodeSpanPx": 69,
+                  "spaceAboveNodesPx": 54,
+                  "spaceBelowNodesPx": 15
+                }
+              ],
               "minimumProjectedNodeTextPx": 7.3,
               "minimumProjectedNonEdgeTextPx": 7.3,
               "minimumProjectedEdgeTextPx": 8,
-              "minimumProjectedNodeText": "≤1 · read-only / workspace-write",
+              "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
               "minimumProjectedNodeTextDetail": "context",
               "minimumProjectedNodeTextOwner": {
                 "kind": "node",
-                "id": "codexWorker"
+                "id": "receipt"
               },
               "minimumRequiredNodeTextPx": 6,
               "readabilityOk": true,
@@ -772,27 +1077,78 @@
               "overflowDisposition": "contained",
               "readerLayout": "adaptive",
               "readerOverflow": null,
-              "readerFit": "intrinsic-height",
+              "readerFit": null,
               "ok": true,
-              "readerWidth": 1424,
-              "diagramWidth": 1374,
+              "readerWidth": 1733,
+              "diagramWidth": 1683,
               "pageComposition": {
                 "bodyPaddingPx": 64,
                 "headerPx": 68,
                 "diagramChromePx": 94,
                 "svgPx": 1082,
                 "cardsPx": 0,
-                "viewBoxHeight": 748
+                "viewBoxHeight": 652
               },
-              "viewBoxWidth": 950,
+              "viewBoxWidth": 1014,
+              "workflowLanes": [
+                {
+                  "frameId": "lane-0",
+                  "heightPx": 173,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "submit",
+                    "receipt"
+                  ],
+                  "nodeSpanPx": 86,
+                  "spaceAboveNodesPx": 68,
+                  "spaceBelowNodesPx": 18
+                },
+                {
+                  "frameId": "lane-1",
+                  "heightPx": 173,
+                  "nodeCount": 3,
+                  "nodeIds": [
+                    "intake",
+                    "decision",
+                    "worker"
+                  ],
+                  "nodeSpanPx": 86,
+                  "spaceAboveNodesPx": 68,
+                  "spaceBelowNodesPx": 18
+                },
+                {
+                  "frameId": "lane-2",
+                  "heightPx": 173,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "laya",
+                    "jev"
+                  ],
+                  "nodeSpanPx": 86,
+                  "spaceAboveNodesPx": 68,
+                  "spaceBelowNodesPx": 18
+                },
+                {
+                  "frameId": "lane-3",
+                  "heightPx": 173,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "rejected",
+                    "failclosed"
+                  ],
+                  "nodeSpanPx": 86,
+                  "spaceAboveNodesPx": 68,
+                  "spaceBelowNodesPx": 18
+                }
+              ],
               "minimumProjectedNodeTextPx": 7.3,
               "minimumProjectedNonEdgeTextPx": 7.3,
               "minimumProjectedEdgeTextPx": 8,
-              "minimumProjectedNodeText": "≤1 · read-only / workspace-write",
+              "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
               "minimumProjectedNodeTextDetail": "context",
               "minimumProjectedNodeTextOwner": {
                 "kind": "node",
-                "id": "codexWorker"
+                "id": "receipt"
               },
               "minimumRequiredNodeTextPx": 6,
               "readabilityOk": true,
@@ -827,27 +1183,78 @@
               "overflowDisposition": "contained",
               "readerLayout": "adaptive",
               "readerOverflow": null,
-              "readerFit": "intrinsic-height",
+              "readerFit": null,
               "ok": true,
-              "readerWidth": 980,
-              "diagramWidth": 950,
+              "readerWidth": 1190,
+              "diagramWidth": 1160,
               "pageComposition": {
                 "bodyPaddingPx": 12,
                 "headerPx": 52,
                 "diagramChromePx": 78,
-                "svgPx": 748,
+                "svgPx": 746,
                 "cardsPx": 0,
-                "viewBoxHeight": 748
+                "viewBoxHeight": 652
               },
-              "viewBoxWidth": 950,
+              "viewBoxWidth": 1014,
+              "workflowLanes": [
+                {
+                  "frameId": "lane-0",
+                  "heightPx": 119,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "submit",
+                    "receipt"
+                  ],
+                  "nodeSpanPx": 59,
+                  "spaceAboveNodesPx": 47,
+                  "spaceBelowNodesPx": 13
+                },
+                {
+                  "frameId": "lane-1",
+                  "heightPx": 119,
+                  "nodeCount": 3,
+                  "nodeIds": [
+                    "intake",
+                    "decision",
+                    "worker"
+                  ],
+                  "nodeSpanPx": 59,
+                  "spaceAboveNodesPx": 47,
+                  "spaceBelowNodesPx": 13
+                },
+                {
+                  "frameId": "lane-2",
+                  "heightPx": 119,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "laya",
+                    "jev"
+                  ],
+                  "nodeSpanPx": 59,
+                  "spaceAboveNodesPx": 47,
+                  "spaceBelowNodesPx": 13
+                },
+                {
+                  "frameId": "lane-3",
+                  "heightPx": 119,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "rejected",
+                    "failclosed"
+                  ],
+                  "nodeSpanPx": 59,
+                  "spaceAboveNodesPx": 47,
+                  "spaceBelowNodesPx": 13
+                }
+              ],
               "minimumProjectedNodeTextPx": 7.3,
               "minimumProjectedNonEdgeTextPx": 7.3,
               "minimumProjectedEdgeTextPx": 8,
-              "minimumProjectedNodeText": "≤1 · read-only / workspace-write",
+              "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
               "minimumProjectedNodeTextDetail": "context",
               "minimumProjectedNodeTextOwner": {
                 "kind": "node",
-                "id": "codexWorker"
+                "id": "receipt"
               },
               "minimumRequiredNodeTextPx": 6,
               "readabilityOk": true,
@@ -877,27 +1284,78 @@
               "overflowDisposition": "contained",
               "readerLayout": "adaptive",
               "readerOverflow": null,
-              "readerFit": "intrinsic-height",
+              "readerFit": null,
               "ok": true,
-              "readerWidth": 1021,
-              "diagramWidth": 991,
+              "readerWidth": 1243,
+              "diagramWidth": 1213,
               "pageComposition": {
                 "bodyPaddingPx": 64,
                 "headerPx": 60,
                 "diagramChromePx": 84,
                 "svgPx": 780,
                 "cardsPx": 0,
-                "viewBoxHeight": 748
+                "viewBoxHeight": 652
               },
-              "viewBoxWidth": 950,
+              "viewBoxWidth": 1014,
+              "workflowLanes": [
+                {
+                  "frameId": "lane-0",
+                  "heightPx": 124,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "submit",
+                    "receipt"
+                  ],
+                  "nodeSpanPx": 62,
+                  "spaceAboveNodesPx": 49,
+                  "spaceBelowNodesPx": 13
+                },
+                {
+                  "frameId": "lane-1",
+                  "heightPx": 124,
+                  "nodeCount": 3,
+                  "nodeIds": [
+                    "intake",
+                    "decision",
+                    "worker"
+                  ],
+                  "nodeSpanPx": 62,
+                  "spaceAboveNodesPx": 49,
+                  "spaceBelowNodesPx": 13
+                },
+                {
+                  "frameId": "lane-2",
+                  "heightPx": 124,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "laya",
+                    "jev"
+                  ],
+                  "nodeSpanPx": 62,
+                  "spaceAboveNodesPx": 49,
+                  "spaceBelowNodesPx": 13
+                },
+                {
+                  "frameId": "lane-3",
+                  "heightPx": 124,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "rejected",
+                    "failclosed"
+                  ],
+                  "nodeSpanPx": 62,
+                  "spaceAboveNodesPx": 49,
+                  "spaceBelowNodesPx": 13
+                }
+              ],
               "minimumProjectedNodeTextPx": 7.3,
               "minimumProjectedNonEdgeTextPx": 7.3,
               "minimumProjectedEdgeTextPx": 8,
-              "minimumProjectedNodeText": "≤1 · read-only / workspace-write",
+              "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
               "minimumProjectedNodeTextDetail": "context",
               "minimumProjectedNodeTextOwner": {
                 "kind": "node",
-                "id": "codexWorker"
+                "id": "receipt"
               },
               "minimumRequiredNodeTextPx": 6,
               "readabilityOk": true,
@@ -927,27 +1385,78 @@
               "overflowDisposition": "contained",
               "readerLayout": "adaptive",
               "readerOverflow": null,
-              "readerFit": "intrinsic-height",
+              "readerFit": null,
               "ok": true,
-              "readerWidth": 1122,
-              "diagramWidth": 1092,
+              "readerWidth": 1367,
+              "diagramWidth": 1337,
               "pageComposition": {
                 "bodyPaddingPx": 64,
                 "headerPx": 60,
                 "diagramChromePx": 84,
                 "svgPx": 860,
                 "cardsPx": 0,
-                "viewBoxHeight": 748
+                "viewBoxHeight": 652
               },
-              "viewBoxWidth": 950,
+              "viewBoxWidth": 1014,
+              "workflowLanes": [
+                {
+                  "frameId": "lane-0",
+                  "heightPx": 137,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "submit",
+                    "receipt"
+                  ],
+                  "nodeSpanPx": 69,
+                  "spaceAboveNodesPx": 54,
+                  "spaceBelowNodesPx": 15
+                },
+                {
+                  "frameId": "lane-1",
+                  "heightPx": 137,
+                  "nodeCount": 3,
+                  "nodeIds": [
+                    "intake",
+                    "decision",
+                    "worker"
+                  ],
+                  "nodeSpanPx": 69,
+                  "spaceAboveNodesPx": 54,
+                  "spaceBelowNodesPx": 15
+                },
+                {
+                  "frameId": "lane-2",
+                  "heightPx": 137,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "laya",
+                    "jev"
+                  ],
+                  "nodeSpanPx": 69,
+                  "spaceAboveNodesPx": 54,
+                  "spaceBelowNodesPx": 15
+                },
+                {
+                  "frameId": "lane-3",
+                  "heightPx": 137,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "rejected",
+                    "failclosed"
+                  ],
+                  "nodeSpanPx": 69,
+                  "spaceAboveNodesPx": 54,
+                  "spaceBelowNodesPx": 15
+                }
+              ],
               "minimumProjectedNodeTextPx": 7.3,
               "minimumProjectedNonEdgeTextPx": 7.3,
               "minimumProjectedEdgeTextPx": 8,
-              "minimumProjectedNodeText": "≤1 · read-only / workspace-write",
+              "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
               "minimumProjectedNodeTextDetail": "context",
               "minimumProjectedNodeTextOwner": {
                 "kind": "node",
-                "id": "codexWorker"
+                "id": "receipt"
               },
               "minimumRequiredNodeTextPx": 6,
               "readabilityOk": true,
@@ -977,27 +1486,78 @@
               "overflowDisposition": "contained",
               "readerLayout": "adaptive",
               "readerOverflow": null,
-              "readerFit": "intrinsic-height",
+              "readerFit": null,
               "ok": true,
-              "readerWidth": 1424,
-              "diagramWidth": 1374,
+              "readerWidth": 1733,
+              "diagramWidth": 1683,
               "pageComposition": {
                 "bodyPaddingPx": 64,
                 "headerPx": 68,
                 "diagramChromePx": 94,
                 "svgPx": 1082,
                 "cardsPx": 0,
-                "viewBoxHeight": 748
+                "viewBoxHeight": 652
               },
-              "viewBoxWidth": 950,
+              "viewBoxWidth": 1014,
+              "workflowLanes": [
+                {
+                  "frameId": "lane-0",
+                  "heightPx": 173,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "submit",
+                    "receipt"
+                  ],
+                  "nodeSpanPx": 86,
+                  "spaceAboveNodesPx": 68,
+                  "spaceBelowNodesPx": 18
+                },
+                {
+                  "frameId": "lane-1",
+                  "heightPx": 173,
+                  "nodeCount": 3,
+                  "nodeIds": [
+                    "intake",
+                    "decision",
+                    "worker"
+                  ],
+                  "nodeSpanPx": 86,
+                  "spaceAboveNodesPx": 68,
+                  "spaceBelowNodesPx": 18
+                },
+                {
+                  "frameId": "lane-2",
+                  "heightPx": 173,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "laya",
+                    "jev"
+                  ],
+                  "nodeSpanPx": 86,
+                  "spaceAboveNodesPx": 68,
+                  "spaceBelowNodesPx": 18
+                },
+                {
+                  "frameId": "lane-3",
+                  "heightPx": 173,
+                  "nodeCount": 2,
+                  "nodeIds": [
+                    "rejected",
+                    "failclosed"
+                  ],
+                  "nodeSpanPx": 86,
+                  "spaceAboveNodesPx": 68,
+                  "spaceBelowNodesPx": 18
+                }
+              ],
               "minimumProjectedNodeTextPx": 7.3,
               "minimumProjectedNonEdgeTextPx": 7.3,
               "minimumProjectedEdgeTextPx": 8,
-              "minimumProjectedNodeText": "≤1 · read-only / workspace-write",
+              "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
               "minimumProjectedNodeTextDetail": "context",
               "minimumProjectedNodeTextOwner": {
                 "kind": "node",
-                "id": "codexWorker"
+                "id": "receipt"
               },
               "minimumRequiredNodeTextPx": 6,
               "readabilityOk": true,
@@ -1021,7 +1581,7 @@
           "contactSheet": null
         },
         "sidecars": {
-          "receipt": "turnhelm-architecture.browser-check.json",
+          "receipt": "turnhelm-run-workflow.browser-check.json",
           "files": []
         }
       }
@@ -1029,13 +1589,13 @@
   },
   "diagnostics": [],
   "evidence": {
-    "receipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.finalize.json",
-    "summaryReceipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.finalize-summary.json",
-    "browserCheckReceipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.browser-check.json"
+    "receipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.finalize.json",
+    "summaryReceipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.finalize-summary.json",
+    "browserCheckReceipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.browser-check.json"
   },
   "visualReview": "not-requested",
-  "finishedAt": "2026-10-13T08:53:47.025Z",
-  "durationMs": 6100,
+  "finishedAt": "2026-10-13T23:44:39.924Z",
+  "durationMs": 1754,
   "update": {
     "status": "current",
     "installedVersion": "3.0.1",

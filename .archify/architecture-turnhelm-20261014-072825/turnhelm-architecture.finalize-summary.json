@@ -6,14 +6,14 @@
   "type": "architecture",
   "quality": "showcase",
   "specification": {
-    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/candidate.json",
-    "sha256": "24a7479c8808242c1386336b9619ef2973071d6fc8feb2ee9d1545e3fb2a3cbb",
-    "bytes": 9331
+    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/candidate.json",
+    "sha256": "8bc0e2726d3c2f15aeb8ae8d0af445807eddb8dfcaddef7c3ddd7141687cfc4a",
+    "bytes": 10227
   },
   "artifact": {
-    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.html",
-    "sha256": "5865941087573c3278719d6e3c50d1c4d568b1c05d74f4bb65a254de63ad64d8",
-    "bytes": 767946
+    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/turnhelm-architecture.html",
+    "sha256": "3e6d3f9d132d74ae75d8cf4ea873698bd5896c9fd89454d009043183f4852072",
+    "bytes": 768087
   },
   "gates": {
     "validate": "pass",
@@ -28,9 +28,9 @@
     "truncated": false
   },
   "evidence": {
-    "receipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.finalize.json",
-    "summaryReceipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.finalize-summary.json",
-    "browserCheckReceipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261013-165202/turnhelm-architecture.browser-check.json"
+    "receipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/turnhelm-architecture.finalize.json",
+    "summaryReceipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/turnhelm-architecture.finalize-summary.json",
+    "browserCheckReceipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261014-072825/turnhelm-architecture.browser-check.json"
   },
   "update": {
     "status": "current",
@@ -43,7 +43,7 @@
     "noticeText": null
   },
   "visualReview": "not-requested",
-  "durationMs": 6100,
+  "durationMs": 1811,
   "visualReviewRecommendation": {
     "action": "inspect-route-readability",
     "signals": {
@@ -83,7 +83,7 @@
             "id": "conOutput",
             "from": "codexWorker",
             "to": "parentSession",
-            "label": "stdout · final agent message",
+            "label": "stdout · classified payload",
             "collectionIndex": 9,
             "artifactIndex": 10
           },

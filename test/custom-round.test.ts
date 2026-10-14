@@ -13,7 +13,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
-import { executeRound, nodeReadClosure, prepareRound, runSandboxedCheck } from "./custom-round.js";
+import { CASE_TIMEOUT_MS, executeRound, nodeReadClosure, prepareRound, projectWorkerReceipt, runSandboxedCheck } from "./custom-round.js";
 import { executableFixture } from "./executable-fixture.js";
 
 const FORGED_MARKER_LINE = "__TURNHELM_CHECK_OUTCOME__" + JSON.stringify({ pass: true });
@@ -470,9 +470,11 @@ test("a roster contract that cannot load is refused at prepare, not frozen", asy
 // work-tree probe.
 // The fake worker's exit path varies per scenario: the default prints the case
 // root's codex-output.txt lines and completes, a failureMessage emits one
-// turn.failed frame and exits 9 (the CLI classifies and receipts it), and a
-// stallMs holds the turn open so a signal test can land mid-case.
-const fakeCodexBody = (options: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string }> = {}): string => `
+// turn.failed frame and exits 9 (the CLI classifies and receipts it), a
+// stallMs holds the FIRST execution's turn open so a signal or timeout test
+// can land mid-case (a roster's later cases run the fake unstalled), and a
+// rebuildRoot swaps the case root for a byte-identical rebuild mid-run.
+const fakeCodexBody = (options: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string; rebuildRoot?: boolean }> = {}): string => `
 const argv = process.argv.slice(2);
 if (argv[0] === "--version") { process.stdout.write("codex-cli 0.160.2\\n"); process.exit(0); }
 if (argv[0] === "exec" && argv[1] === "--help") { process.stdout.write("--json\\n--ephemeral\\n--sandbox <MODE>\\n-\\n"); process.exit(0); }
@@ -493,17 +495,46 @@ let task = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", chunk => { task += chunk; });
 process.stdin.on("end", () => {
+  const firstRun = !fs.existsSync(path.join(__dirname, "invocations"));
   fs.appendFileSync(path.join(__dirname, "invocations"), "1");
   fs.writeFileSync(path.join(process.cwd(), "worker-task.txt"), task);
 ` + (options.extraWrite !== undefined
     ? `  fs.writeFileSync(path.join(process.cwd(), ${JSON.stringify(options.extraWrite)}), "unauthorized outside allowedChanges\\n");\n`
+    : "") + (options.rebuildRoot === true
+    ? `  // Swap the case root for a byte-identical rebuild: the staging directory
+  // is allocated while the original still exists, so the replacement inode
+  // can never be a recycle of the original — content survives, identity does
+  // not.
+  {
+    const root = process.cwd();
+    const files = [];
+    const walk = rel => {
+      for (const entry of fs.readdirSync(rel === "" ? root : path.join(root, rel), { withFileTypes: true })) {
+        const child = rel === "" ? entry.name : rel + "/" + entry.name;
+        if (entry.isDirectory()) walk(child);
+        else files.push([child, fs.readFileSync(path.join(root, child))]);
+      }
+    };
+    walk("");
+    const staging = path.join(path.dirname(root), "rebuild-staging");
+    fs.mkdirSync(staging, { recursive: true });
+    for (const [rel, bytes] of files) {
+      fs.mkdirSync(path.dirname(path.join(staging, rel)), { recursive: true });
+      fs.writeFileSync(path.join(staging, rel), bytes);
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.renameSync(staging, root);
+  }
+`
     : "") + `  const finish = () => {
 ` + (options.failureMessage !== undefined
     ? `    process.stdout.write(JSON.stringify({ type: "turn.failed", message: ${JSON.stringify(options.failureMessage)} }) + "\\n");\n    process.exit(9);`
     : `    const lines = fs.readFileSync(path.join(process.cwd(), "codex-output.txt"), "utf8").split("\\n").filter(Boolean);\n    process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: lines.join("\\n") } }) + "\\n");\n    process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1 } }) + "\\n");\n    process.exit(0);`)
   + `
   };
-` + (options.stallMs !== undefined ? `  setTimeout(finish, ${options.stallMs});` : "  finish();") + `
+` + (options.stallMs !== undefined
+    ? `  if (firstRun) setTimeout(finish, ${options.stallMs}); else finish();`
+    : "  finish();") + `
 });
 `;
 
@@ -538,7 +569,7 @@ const scratchExecuteRound = async (
   options?: Readonly<{
     caps?: { classifierRequests: number; workerExecutions: number };
     choice?: string;
-    codex?: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string }>;
+    codex?: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string; rebuildRoot?: boolean }>;
     poisonJournal?: boolean;
     baselineFiles?: readonly string[];
   }>
@@ -916,6 +947,143 @@ test("the CLI child env is scrubbed before it reaches the CLI and again the work
     assert.equal(worker.PATH, round.env.PATH);
   });
 
+// ---------- workerFailure projection (spec §3): the receipt worker, field by field ----------
+
+// The full-taxonomy fixture: every whitelisted field valid, plus the
+// unselected `payload` key the real receipt legitimately carries.
+const FULL_WORKER = {
+  status: "failed",
+  code: 9,
+  durationMs: 4321,
+  progressEvents: 7,
+  ownedShutdown: false,
+  usage: { input_tokens: 120, output_tokens: 34, cached_input_tokens: 0, reasoning_output_tokens: 56 },
+  failureClass: "stream-disconnected",
+  errorSha256: "a".repeat(64),
+  signal: "SIGTERM",
+  lastEventAgeMs: 42,
+  payload: { mode: "strict" }
+};
+
+const FULL_PROJECTION = {
+  status: "failed",
+  code: 9,
+  durationMs: 4321,
+  progressEvents: 7,
+  ownedShutdown: false,
+  usage: { input_tokens: 120, output_tokens: 34, cached_input_tokens: 0, reasoning_output_tokens: 56 },
+  failureClass: "stream-disconnected",
+  errorSha256: "a".repeat(64),
+  signal: "SIGTERM",
+  lastEventAgeMs: 42
+};
+
+test("a full worker object projects every whitelisted field and ignores unselected receipt keys", () => {
+  assert.deepEqual(projectWorkerReceipt(FULL_WORKER), FULL_PROJECTION,
+    "the projection is exactly the whitelist — the payload key never reaches it");
+});
+
+test("a not-started worker projects exactly what it legitimately carries", () => {
+  assert.deepEqual(projectWorkerReceipt({ status: "not-started", durationMs: 0, progressEvents: 0, usage: "unreported" }),
+    { status: "not-started", durationMs: 0, progressEvents: 0, usage: "unreported" },
+    "the zero duration and event count are real observations; no code or ownedShutdown is fabricated");
+  assert.deepEqual(
+    projectWorkerReceipt({ status: "completed", code: 0, durationMs: 0, progressEvents: 0, ownedShutdown: false, usage: "unreported" }),
+    { status: "completed", code: 0, durationMs: 0, progressEvents: 0, ownedShutdown: false, usage: "unreported" },
+    "a completed run that decoded zero frames keeps its zero — distinguishable from an absent count");
+});
+
+test("a malformed field drops alone; the rest of the projection survives", () => {
+  const without = (field: string): Record<string, unknown> => {
+    const rest: Record<string, unknown> = { ...FULL_PROJECTION };
+    delete rest[field];
+    return rest;
+  };
+  assert.deepEqual(projectWorkerReceipt({ ...FULL_WORKER, code: 2.5 }), without("code"),
+    "a non-safe-integer code drops alone");
+  assert.deepEqual(projectWorkerReceipt({ ...FULL_WORKER, ownedShutdown: "yes" }), without("ownedShutdown"),
+    "a non-boolean ownedShutdown drops alone");
+  assert.deepEqual(projectWorkerReceipt({ ...FULL_WORKER, failureClass: "kaboom" }), without("failureClass"),
+    "an out-of-taxonomy failureClass drops alone");
+  assert.deepEqual(projectWorkerReceipt({ ...FULL_WORKER, errorSha256: "not-a-hash" }), without("errorSha256"),
+    "a non-64-hex errorSha256 drops alone");
+  assert.deepEqual(projectWorkerReceipt({ ...FULL_WORKER, signal: "SIGHUP" }), without("signal"),
+    "an out-of-set signal drops alone");
+  assert.deepEqual(
+    projectWorkerReceipt({ ...FULL_WORKER, usage: { input_tokens: -3, output_tokens: 8 } }),
+    { ...FULL_PROJECTION, usage: { output_tokens: 8 } },
+    "a negative usage counter drops alone, inside its snapshot and out");
+});
+
+test("usage projects per VH-3: partial kept, malformed dropped, absent or empty reads unreported", () => {
+  assert.deepEqual(projectWorkerReceipt({ status: "completed", usage: { input_tokens: 5 } })?.usage,
+    { input_tokens: 5 }, "a partial snapshot is kept without zero-fill");
+  assert.deepEqual(
+    projectWorkerReceipt({ status: "completed", usage: { input_tokens: 3, output_tokens: "many", reasoning_output_tokens: -1 } })?.usage,
+    { input_tokens: 3 }, "malformed counters drop while valid ones survive");
+  assert.deepEqual(projectWorkerReceipt({ status: "completed", usage: { cached_input_tokens: 2.5 } })?.usage,
+    "unreported", "zero surviving counters read unreported");
+  assert.deepEqual(projectWorkerReceipt({ status: "completed", usage: "unreported" })?.usage,
+    "unreported", "the emitted unreported literal passes through");
+  assert.deepEqual(projectWorkerReceipt({ status: "completed" })?.usage,
+    "unreported", "absent usage is never fabricated as counters");
+});
+
+test("a non-record worker or an out-of-enum status yields no projection at all", () => {
+  assert.equal(projectWorkerReceipt(undefined), undefined);
+  assert.equal(projectWorkerReceipt(null), undefined);
+  assert.equal(projectWorkerReceipt("failed"), undefined);
+  assert.equal(projectWorkerReceipt([]), undefined);
+  assert.equal(projectWorkerReceipt({ status: "weird", code: 0 }), undefined);
+});
+
+test("a failed worker case carries the frozen failure projection, never the failure text",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } },
+        outputLines: ['{"count":3,"sum":6}']
+      }
+    ], {}, { codex: { failureMessage: "stream disconnected" } });
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 4, "a non-stopping failure class fails its case without stopping the roster");
+    const ledgerPath = join(round.evidenceRoot, "custom-round-evidence.jsonl");
+    const ledger = await readLedger(ledgerPath);
+    const caseRecord = ledger.find(r => r.phase === "case" && r.caseId === "case-a");
+    const workerFailure = caseRecord?.workerFailure as Record<string, unknown> | undefined;
+    assert.deepEqual(workerFailure?.failureClass, "stream-disconnected");
+    assert.deepEqual(workerFailure?.errorSha256, sha256hex("stream disconnected"),
+      "the hash correlates the exact failure bytes");
+    const raw = await readFile(ledgerPath, "utf8");
+    assert.equal(raw.includes("stream disconnected"), false,
+      "the failure message text reaches no ledger byte");
+    assert.equal(raw.includes("turnhelm.receipt"), false,
+      "no stderr receipt bytes reach the ledger");
+  });
+
+test("a passing case retains the worker projection for spot-checks",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ]);
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 0, "the passing round is unchanged by the projection");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    const caseRecord = ledger.find(r => r.phase === "case" && r.caseId === "case-a");
+    const workerFailure = caseRecord?.workerFailure as Record<string, unknown> | undefined;
+    assert.equal(workerFailure?.status, "completed", "retention on pass is what makes spot-checks possible");
+    assert.ok(typeof workerFailure?.progressEvents === "number" && workerFailure.progressEvents >= 1,
+      "the parent-observed event count projects");
+  });
+
 // ---------- command entry modes (spec §3.1): prepare and execute ----------
 
 const runEntry = (args: readonly string[]): { code: number; stdout: string; stderr: string } => {
@@ -979,7 +1147,12 @@ test("a worker writing outside its allowedChanges stops the round", { timeout: 9
   assert.equal(code, 1, "an undeclared tree change is an integrity stop, even when the case's output graded fine");
   assert.equal(await readFile(round.invocations, "utf8"), "1", "the second case never launches");
   const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
-  assert.deepEqual(ledger.at(-1), { phase: "stopped", caseId: "case-a", reason: "tree-drift" });
+  const stop = ledger.at(-1);
+  assert.equal(stop?.phase, "stopped");
+  assert.equal(stop?.caseId, "case-a");
+  assert.equal(stop?.reason, "tree-drift");
+  assert.equal((stop?.workerFailure as Record<string, unknown> | undefined)?.status, "completed",
+    "a post-CLI stop record carries the projection of its lone receipt");
 });
 
 test("a CLI run that receipts nothing is an integrity stop", { timeout: 90_000 }, async t => {
@@ -1166,8 +1339,268 @@ test("an auth-class worker failure stops the round",
     assert.equal(code, 1, "auth-class failures stop all remaining spend");
     assert.equal(await readFile(round.invocations, "utf8"), "1", "the second case never launches");
     const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
-    assert.deepEqual(ledger.at(-1), { phase: "stopped", caseId: "case-a", reason: "worker-auth" });
+    const stop = ledger.at(-1);
+    assert.equal(stop?.phase, "stopped");
+    assert.equal(stop?.caseId, "case-a");
+    assert.equal(stop?.reason, "worker-auth");
+    assert.equal((stop?.workerFailure as Record<string, unknown> | undefined)?.failureClass, "auth",
+      "the stop record carries the projection, never the failure text");
   });
+
+// ---------- FE-2 (spec §4): fixed decision order, cleanup gate, settled-tree identity ----------
+
+test("an abort mid-case settles 130 and reserves nothing later", { timeout: 90_000 }, async t => {
+  const round = await scratchExecuteRound(t, [
+    {
+      id: "case-a", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+    },
+    {
+      id: "case-b", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+    }
+  ], {}, { codex: { stallMs: 30_000 } });
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const pending = executeRound(round.manifestPath, round.approvalSha256,
+    { env: round.env, sandboxExecPath: fake });
+  await waitForFile(round.invocations);
+  process.kill(process.pid, "SIGINT");
+  assert.equal(await pending, 130, "the abort rung stays first: SIGINT settles the graceful code");
+  assert.equal(await readFile(round.invocations, "utf8"), "1", "an aborted round never reserves a later case");
+  const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+  assert.deepEqual(ledger.at(-1), { phase: "stopped", caseId: null, reason: "signal" });
+});
+
+test("an overflowing CLI run stops as output-cap even though the timeout flag is set too",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      },
+      {
+        id: "case-b", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ]);
+    // The require script floods the CLI's stdout past the supervisor's 64 KiB
+    // cap before the CLI's own logic starts: halt("timeout") sets both
+    // outputOverflow and timedOut, so the round must decide on the capped
+    // stream — never on the timeout flag the cap also set.
+    const flood = join(round.base, "stdout-flood.cjs");
+    await writeFile(flood, 'if (process.argv[1] && process.argv[1].includes("cli.js")) '
+      + 'process.stdout.write("x".repeat(70000));\n');
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: { ...round.env, NODE_OPTIONS: "--require " + flood }, sandboxExecPath: fake });
+    assert.equal(code, 1, "a capped stream is an integrity stop");
+    await assert.rejects(readFile(round.invocations), { code: "ENOENT" }, "no worker runs past the cap");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    const stop = ledger.at(-1);
+    assert.equal(stop?.phase, "stopped");
+    assert.equal(stop?.caseId, "case-a");
+    assert.equal(stop?.reason, "output-cap", "overflow outranks the timeout flag it also set");
+    assert.ok(!ledger.some(r => r.phase === "case"), "a capped stream never grades, as a case or a timeout");
+  });
+
+test("a CLI outliving the post-TERM grace stops the round as cleanup-unverified",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      },
+      {
+        id: "case-b", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ], {}, { codex: { stallMs: 30_000 } });
+    // The require script holds the CLI's event loop open with SIGINT and
+    // SIGTERM ignored, then floods stdout once the worker has started: the
+    // supervisor halts, its INT → TERM ladder cannot close the child, and it
+    // abandons the pipes with cliClosed false — a possibly-live CLI. The
+    // self-exit timer bounds the orphan the abandonment leaves behind.
+    const trap = join(round.base, "trap-signals.cjs");
+    await writeFile(trap,
+      'if (process.argv[1] && process.argv[1].includes("cli.js")) {\n'
+      + '  const fs = require("node:fs");\n'
+      + '  process.on("SIGINT", () => {});\n'
+      + '  process.on("SIGTERM", () => {});\n'
+      + '  setInterval(() => {}, 60000);\n'
+      + '  setTimeout(() => process.exit(0), 20000);\n'
+      + `  const flood = () => {\n`
+      + `    if (fs.existsSync(${JSON.stringify(round.invocations)})) process.stdout.write("x".repeat(70000));\n`
+      + '    else setTimeout(flood, 25);\n'
+      + '  };\n'
+      + '  flood();\n'
+      + '}\n');
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const startedAt = Date.now();
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: { ...round.env, NODE_OPTIONS: "--require " + trap }, sandboxExecPath: fake });
+    assert.equal(code, 1, "unverified cleanup is an integrity stop");
+    assert.ok(Date.now() - startedAt >= 10_000,
+      "the supervisor ran its INT → TERM → abandon ladder before settling");
+    assert.equal(await readFile(round.invocations, "utf8"), "1",
+      "the overflowing case's worker ran; the next case's never does");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    const stop = ledger.at(-1);
+    assert.equal(stop?.phase, "stopped");
+    assert.equal(stop?.caseId, "case-a");
+    assert.equal(stop?.reason, "cleanup-unverified",
+      "an abandoned, possibly-live CLI outranks the overflow that halted it");
+    const projection = stop?.workerFailure as Record<string, unknown> | undefined;
+    assert.equal(projection?.status, "cancelled", "the flushed receipt's projection rides the stop record");
+    assert.equal(projection?.ownedShutdown, true);
+  });
+
+test("a worker rebuilding its own case root byte-identically stops the settled-tree gate",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ], {}, { codex: { rebuildRoot: true } });
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 1, "a rebuilt root is a replacement even when every byte matches");
+    assert.equal(await readFile(round.invocations, "utf8"), "1",
+      "the worker ran and passed; the stop is at the settled-tree identity gate");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    const stop = ledger.at(-1);
+    assert.equal(stop?.phase, "stopped");
+    assert.equal(stop?.caseId, "case-a");
+    assert.equal(stop?.reason, "root-identity", "hash equality never proves identity");
+    assert.equal((stop?.workerFailure as Record<string, unknown> | undefined)?.status, "completed",
+      "the lone receipt's projection rides the stop record");
+    assert.ok(!ledger.some(r => r.phase === "case"), "a replaced root never grades");
+  });
+
+// ---------- FE-2 continuation: the timeout outcome and roster continuation ----------
+
+test("a timed-out case records an unjudged timeout outcome and the roster continues",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      },
+      {
+        id: "case-b", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ], {}, { codex: { stallMs: 8000 } });
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake, caseTimeoutMs: 1000 });
+    assert.equal(code, 4, "a complete round with a timed-out case exits four, not one");
+    assert.equal(await readFile(round.invocations, "utf8"), "11",
+      "a timeout is an outcome, not a stop: case-b still runs");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    const record = ledger.find(r => r.phase === "case" && r.caseId === "case-a");
+    assert.equal(record?.outcome, "timeout");
+    assert.equal(record?.exitCode, 130, "the CLI's own SIGINT shutdown settles the exit code");
+    assert.ok(typeof record?.durationMs === "number" && record.durationMs >= 1000,
+      "the supervisor's wall-clock budget is the duration floor");
+    assert.equal(record?.taskSha256, sha256hex("Sum the ledger rows and print the JSON result."));
+    assert.deepEqual([record?.backend, record?.profileId], ["laya", "balanced"],
+      "journal attribution is read exactly as the graded path reads it");
+    const workerFailure = record?.workerFailure as Record<string, unknown> | undefined;
+    assert.equal(workerFailure?.status, "cancelled", "the CLI's owned shutdown receipts the cancelled worker");
+    assert.equal(workerFailure?.ownedShutdown, true);
+    assert.ok(!Object.hasOwn(record ?? {}, "oracleInput"), "nothing was judged, so no oracle input is retained");
+    assert.ok(!Object.hasOwn(record ?? {}, "workerPayload"), "a cancelled worker carries no payload projection");
+    assert.deepEqual(ledger.filter(r => r.phase === "case").map(r => [r.caseId, r.outcome]).sort(),
+      [["case-a", "timeout"], ["case-b", "pass"]], "case-b still grades pass");
+    assert.ok(!ledger.some(r => r.phase === "stopped"), "no stop record on a timeout-outcome round");
+  });
+
+test("an all-pass round with the case timeout knob present still exits zero",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      },
+      {
+        id: "case-b", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ]);
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake, caseTimeoutMs: 30_000 });
+    assert.equal(code, 0, "a knob comfortably above the fast cases never fires");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    assert.deepEqual(ledger.filter(r => r.phase === "case").map(r => [r.caseId, r.outcome]).sort(),
+      [["case-a", "pass"], ["case-b", "pass"]]);
+  });
+
+test("a timed-out case that wrote outside its allowance stops as tree-drift",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      },
+      {
+        id: "case-b", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ], {}, { codex: { stallMs: 8000, extraWrite: "evil.txt" } });
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake, caseTimeoutMs: 1000 });
+    assert.equal(code, 1, "the settled-tree gate outranks the timeout outcome");
+    assert.equal(await readFile(round.invocations, "utf8"), "1", "a drift stop reserves no further case");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    const stop = ledger.at(-1);
+    assert.equal(stop?.phase, "stopped");
+    assert.equal(stop?.caseId, "case-a");
+    assert.equal(stop?.reason, "tree-drift");
+    assert.equal((stop?.workerFailure as Record<string, unknown> | undefined)?.status, "cancelled",
+      "the cancelled receipt's projection rides the stop record");
+    assert.ok(!ledger.some(r => r.phase === "case"), "a drifted timeout case never records an outcome");
+  });
+
+test("a timed-out case that rebuilt its root byte-identically stops as root-identity",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      },
+      {
+        id: "case-b", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ], {}, { codex: { stallMs: 8000, rebuildRoot: true } });
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake, caseTimeoutMs: 1000 });
+    assert.equal(code, 1, "identity is checked before any hash at the shared gate");
+    assert.equal(await readFile(round.invocations, "utf8"), "1", "an identity stop reserves no further case");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    const stop = ledger.at(-1);
+    assert.equal(stop?.phase, "stopped");
+    assert.equal(stop?.caseId, "case-a");
+    assert.equal(stop?.reason, "root-identity", "hash equality never proves identity, timeout or not");
+    assert.equal((stop?.workerFailure as Record<string, unknown> | undefined)?.status, "cancelled",
+      "the cancelled receipt's projection rides the stop record");
+    assert.ok(!ledger.some(r => r.phase === "case"), "a replaced root never records an outcome");
+  });
+
+test("the case timeout knob pins the frozen default and never reaches prepare", async t => {
+  assert.equal(CASE_TIMEOUT_MS, 240_000, "the production case budget is unchanged");
+  const scratch = await scratchRoster(t);
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const prepared = await prepareRound(scratch.rosterPath, { sandboxExecPath: fake });
+  const raw = await readFile(prepared.manifestPath, "utf8");
+  assert.equal(raw.includes("caseTimeoutMs"), false,
+    "prepare mode never reads or freezes the execute-time knob");
+});
 
 test("a roster exceeding its declared caps is refused before any spend",
   { timeout: 90_000 }, async t => {
@@ -1254,4 +1687,176 @@ test("SIGTERM during the contract check exits 143 without waiting out the contra
     process.kill(process.pid, "SIGTERM");
     assert.equal(await pending, 143, "the contract check honours the round's abort, not its own 20s timeout");
     assert.ok(Date.now() - signalledAt < 15_000, "settled by the signal, not the contract timeout");
+  });
+
+// ---------- FE-3 (spec §5): the completed record and terminal evidence appends ----------
+
+// Poll the ledger itself: the reserved record of a case proves its spend has
+// started while the worker is still inside the stall window.
+const waitForLedgerRecord = async (
+  path: string,
+  matches: (record: Record<string, unknown>) => boolean
+): Promise<void> => {
+  for (const deadline = Date.now() + 20_000; Date.now() < deadline;) {
+    const records = await readFile(path, "utf8")
+      .then(text => text.trim().split("\n").filter(Boolean))
+      .then(lines => lines.flatMap(line => {
+        try { return [JSON.parse(line) as Record<string, unknown>]; } catch { return []; }
+      }))
+      .catch(() => []);
+    if (records.some(matches)) return;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.fail("timed out waiting for a ledger record of " + path);
+};
+
+test("an all-pass round appends a reconciled completed record and exits zero",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      },
+      {
+        id: "case-b", kind: "worker-write", transport: "stdin-file",
+        grading: { mode: "envelope-equal", expected: { count: 1, sum: 2 } },
+        outputLines: ['{"count":1,"sum":2}', "trailer: inert footer"]
+      }
+    ]);
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 0, "a fully written all-pass round exits zero");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    assert.deepEqual(ledger.at(-1),
+      { phase: "completed", outcome: "pass", cases: 2, failed: 0, timedOut: 0 },
+      "the completed record is the terminal evidence, reconciling zero failures");
+  });
+
+test("a mixed round reconciles written outcomes into the completed record",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      },
+      {
+        id: "case-b", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 7 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ], {}, { codex: { stallMs: 8000 } });
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake, caseTimeoutMs: 1000 });
+    assert.equal(code, 4, "a complete round with failures exits four");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    assert.deepEqual(ledger.filter(r => r.phase === "case").map(r => [r.caseId, r.outcome]),
+      [["case-a", "timeout"], ["case-b", "failed"]],
+      "one case times out unjudged, one fails the oracle");
+    assert.deepEqual(ledger.at(-1),
+      { phase: "completed", outcome: "fail", cases: 2, failed: 1, timedOut: 1 },
+      "the completed counts reconcile the written case records exactly");
+  });
+
+test("a ledger that dies mid-case stops at one with no completed and no later spend",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      },
+      {
+        id: "case-b", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ], {}, { codex: { stallMs: 1500 } });
+    const ledgerPath = join(round.evidenceRoot, "custom-round-evidence.jsonl");
+    t.after(async () => { await chmod(ledgerPath, 0o600).catch(() => {}); });
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const pending = executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    // Case-a's reserved record proves its spend started inside the stall
+    // window; killing the ledger there makes case-a's own case record the
+    // append that cannot be written.
+    await waitForLedgerRecord(ledgerPath, r => r.phase === "reserved" && r.caseId === "case-a");
+    await chmod(ledgerPath, 0o000);
+    assert.equal(await pending, 1, "a case record that cannot be written stops the round");
+    assert.equal(await readFile(round.invocations, "utf8"), "1", "case-b's worker is never invoked");
+    await chmod(ledgerPath, 0o600);
+    const ledger = await readLedger(ledgerPath);
+    assert.ok(!ledger.some(r => r.phase === "completed"), "a stopped round appends no completed record");
+    assert.deepEqual(ledger.at(-1), { phase: "reserved", caseId: "case-a" },
+      "the best-effort evidence-io stop could not land on the dead ledger either");
+  });
+
+test("a dead ledger fails the terminal case append instead of failing open",
+  { timeout: 90_000 }, async t => {
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    // Graded variant: a swallowed append on a sole passing case must not
+    // surface as a clean all-pass exit.
+    const graded = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ], {}, { codex: { stallMs: 1500 } });
+    const gradedLedgerPath = join(graded.evidenceRoot, "custom-round-evidence.jsonl");
+    t.after(async () => { await chmod(gradedLedgerPath, 0o600).catch(() => {}); });
+    const gradedRun = executeRound(graded.manifestPath, graded.approvalSha256,
+      { env: graded.env, sandboxExecPath: fake });
+    await waitForLedgerRecord(gradedLedgerPath, r => r.phase === "reserved" && r.caseId === "case-a");
+    await chmod(gradedLedgerPath, 0o000);
+    assert.equal(await gradedRun, 1, "a graded case whose record cannot be written never exits zero");
+    await chmod(gradedLedgerPath, 0o600);
+    const gradedLedger = await readLedger(gradedLedgerPath);
+    assert.ok(!gradedLedger.some(r => r.phase === "completed"),
+      "no completed record without a written case record");
+
+    // Timeout variant: an unwritten timeout outcome must not be tallied into
+    // a complete-with-failures exit either.
+    const stalled = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ], {}, { codex: { stallMs: 8000 } });
+    const stalledLedgerPath = join(stalled.evidenceRoot, "custom-round-evidence.jsonl");
+    t.after(async () => { await chmod(stalledLedgerPath, 0o600).catch(() => {}); });
+    const stalledRun = executeRound(stalled.manifestPath, stalled.approvalSha256,
+      { env: stalled.env, sandboxExecPath: fake, caseTimeoutMs: 1000 });
+    await waitForLedgerRecord(stalledLedgerPath, r => r.phase === "reserved" && r.caseId === "case-a");
+    await chmod(stalledLedgerPath, 0o000);
+    assert.equal(await stalledRun, 1, "a timed-out case whose record cannot be written never exits four");
+    await chmod(stalledLedgerPath, 0o600);
+    assert.ok(!(await readLedger(stalledLedgerPath)).some(r => r.phase === "completed"),
+      "no completed record without a written timeout record");
+  });
+
+test("an abort mid-contract of the last case never completes and never exits 0/4",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-write", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}'],
+        // Settles instantly on the pristine root (the prepare preflight must
+        // approve it) but stalls once the worker has run, so the signal lands
+        // mid-contract at execute time.
+        contractSource: "import { existsSync, writeFileSync } from \"node:fs\";\n"
+          + "if (existsSync(\"worker-task.txt\")) {\n"
+          + "  writeFileSync(\"contract-started\", \"1\");\n"
+          + "  setInterval(() => {}, 60_000);\n"
+          + "  await new Promise(() => {});\n"
+          + "}\n",
+        allowedChanges: ["ledger.json", "worker-task.txt", "contract-started"]
+      }
+    ]);
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const pending = executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    await waitForFile(join(round.roots[0], "contract-started"));
+    process.kill(process.pid, "SIGTERM");
+    assert.equal(await pending, 143, "an aborted round never exits 0/4");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    assert.ok(!ledger.some(r => r.phase === "completed"), "a signalled round appends no completed record");
+    assert.deepEqual(ledger.at(-1), { phase: "stopped", caseId: null, reason: "signal" });
   });

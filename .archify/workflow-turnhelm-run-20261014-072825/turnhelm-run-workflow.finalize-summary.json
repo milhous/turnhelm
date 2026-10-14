@@ -6,14 +6,14 @@
   "type": "workflow",
   "quality": "showcase",
   "specification": {
-    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261013-165202/candidate.json",
-    "sha256": "6ea8b502bd6f1afb8b2a8789b0f6c08cbde92961092223414ed0ff6e49e7a155",
-    "bytes": 8693
+    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/candidate.json",
+    "sha256": "d80d04ac3277932f0c8c406b6a9eda6b1fcbdab0fcb3c45c994beec65fc02375",
+    "bytes": 9046
   },
   "artifact": {
-    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261013-165202/turnhelm-run-workflow.html",
-    "sha256": "b8c23da80eed008879c8a50f380cd21c55b01c72e3d59666c85dc2dd87eec67c",
-    "bytes": 764917
+    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html",
+    "sha256": "9ab879d2e1027b14ba379c15fadfb5d82466106943d4d1dde6136a8c90987f24",
+    "bytes": 765201
   },
   "gates": {
     "validate": "pass",
@@ -28,9 +28,9 @@
     "truncated": false
   },
   "evidence": {
-    "receipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261013-165202/turnhelm-run-workflow.finalize.json",
-    "summaryReceipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261013-165202/turnhelm-run-workflow.finalize-summary.json",
-    "browserCheckReceipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261013-165202/turnhelm-run-workflow.browser-check.json"
+    "receipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.finalize.json",
+    "summaryReceipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.finalize-summary.json",
+    "browserCheckReceipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.browser-check.json"
   },
   "update": {
     "status": "current",
@@ -43,7 +43,7 @@
     "noticeText": null
   },
   "visualReview": "not-requested",
-  "durationMs": 2450,
+  "durationMs": 1754,
   "visualReviewRecommendation": {
     "action": "inspect-route-readability",
     "signals": {

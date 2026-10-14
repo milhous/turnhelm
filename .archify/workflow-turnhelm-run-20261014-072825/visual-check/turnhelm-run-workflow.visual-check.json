@@ -1,16 +1,16 @@
 {
   "schemaVersion": 1,
   "ok": true,
-  "command": "browser-check",
+  "command": "visual-check",
   "evidenceKind": "automated-browser",
   "status": "pass",
-  "visualReview": "not-requested",
+  "visualReview": "pending",
   "provenance": "current",
-  "deliveryReceiptId": "5dfbad10-4443-46ae-bb9f-1518d63e1b22",
+  "deliveryReceiptId": "54ed312a-da36-45d3-be48-c8e07c964fb1",
   "artifact": {
-    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261013-165202/turnhelm-run-workflow.html",
-    "sha256": "b8c23da80eed008879c8a50f380cd21c55b01c72e3d59666c85dc2dd87eec67c",
-    "bytes": 764917
+    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html",
+    "sha256": "9ab879d2e1027b14ba379c15fadfb5d82466106943d4d1dde6136a8c90987f24",
+    "bytes": 765201
   },
   "state": {
     "detail": "read",
@@ -1298,12 +1298,449 @@
     ]
   },
   "captures": {
-    "status": "not-requested",
-    "screenshots": [],
-    "contactSheet": null
+    "status": "pass",
+    "screenshots": [
+      {
+        "width": 1440,
+        "height": 900,
+        "theme": "light",
+        "innerWidth": 1440,
+        "innerHeight": 900,
+        "scrollWidth": 1440,
+        "scrollHeight": 900,
+        "overflowX": false,
+        "overflowY": false,
+        "verticalScrollAccepted": false,
+        "overflowDisposition": "contained",
+        "readerLayout": "adaptive",
+        "readerOverflow": null,
+        "readerFit": null,
+        "ok": true,
+        "readerWidth": 1190,
+        "diagramWidth": 1160,
+        "pageComposition": {
+          "bodyPaddingPx": 12,
+          "headerPx": 52,
+          "diagramChromePx": 78,
+          "svgPx": 746,
+          "cardsPx": 0,
+          "viewBoxHeight": 652
+        },
+        "viewBoxWidth": 1014,
+        "workflowLanes": [
+          {
+            "frameId": "lane-0",
+            "heightPx": 119,
+            "nodeCount": 2,
+            "nodeIds": [
+              "submit",
+              "receipt"
+            ],
+            "nodeSpanPx": 59,
+            "spaceAboveNodesPx": 47,
+            "spaceBelowNodesPx": 13
+          },
+          {
+            "frameId": "lane-1",
+            "heightPx": 119,
+            "nodeCount": 3,
+            "nodeIds": [
+              "intake",
+              "decision",
+              "worker"
+            ],
+            "nodeSpanPx": 59,
+            "spaceAboveNodesPx": 47,
+            "spaceBelowNodesPx": 13
+          },
+          {
+            "frameId": "lane-2",
+            "heightPx": 119,
+            "nodeCount": 2,
+            "nodeIds": [
+              "laya",
+              "jev"
+            ],
+            "nodeSpanPx": 59,
+            "spaceAboveNodesPx": 47,
+            "spaceBelowNodesPx": 13
+          },
+          {
+            "frameId": "lane-3",
+            "heightPx": 119,
+            "nodeCount": 2,
+            "nodeIds": [
+              "rejected",
+              "failclosed"
+            ],
+            "nodeSpanPx": 59,
+            "spaceAboveNodesPx": 47,
+            "spaceBelowNodesPx": 13
+          }
+        ],
+        "minimumProjectedNodeTextPx": 7.3,
+        "minimumProjectedNonEdgeTextPx": 7.3,
+        "minimumProjectedEdgeTextPx": 8,
+        "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
+        "minimumProjectedNodeTextDetail": "context",
+        "minimumProjectedNodeTextOwner": {
+          "kind": "node",
+          "id": "receipt"
+        },
+        "minimumRequiredNodeTextPx": 6,
+        "readabilityOk": true,
+        "hasLegend": true,
+        "hasNavigationDock": true,
+        "legendDockIntersectionArea": 0,
+        "dockStageIntersectionArea": 0,
+        "dockStageGap": 10,
+        "requiredDockStageGap": 10,
+        "viewerChromeStageOk": true,
+        "viewerChromeReserve": 54,
+        "viewerChromeActive": true,
+        "viewerChromeOk": true,
+        "resolvedTheme": "light",
+        "file": "turnhelm-run-workflow.visual-check.1440x900.light.png"
+      },
+      {
+        "width": 1440,
+        "height": 900,
+        "theme": "dark",
+        "innerWidth": 1440,
+        "innerHeight": 900,
+        "scrollWidth": 1440,
+        "scrollHeight": 900,
+        "overflowX": false,
+        "overflowY": false,
+        "verticalScrollAccepted": false,
+        "overflowDisposition": "contained",
+        "readerLayout": "adaptive",
+        "readerOverflow": null,
+        "readerFit": null,
+        "ok": true,
+        "readerWidth": 1190,
+        "diagramWidth": 1160,
+        "pageComposition": {
+          "bodyPaddingPx": 12,
+          "headerPx": 52,
+          "diagramChromePx": 78,
+          "svgPx": 746,
+          "cardsPx": 0,
+          "viewBoxHeight": 652
+        },
+        "viewBoxWidth": 1014,
+        "workflowLanes": [
+          {
+            "frameId": "lane-0",
+            "heightPx": 119,
+            "nodeCount": 2,
+            "nodeIds": [
+              "submit",
+              "receipt"
+            ],
+            "nodeSpanPx": 59,
+            "spaceAboveNodesPx": 47,
+            "spaceBelowNodesPx": 13
+          },
+          {
+            "frameId": "lane-1",
+            "heightPx": 119,
+            "nodeCount": 3,
+            "nodeIds": [
+              "intake",
+              "decision",
+              "worker"
+            ],
+            "nodeSpanPx": 59,
+            "spaceAboveNodesPx": 47,
+            "spaceBelowNodesPx": 13
+          },
+          {
+            "frameId": "lane-2",
+            "heightPx": 119,
+            "nodeCount": 2,
+            "nodeIds": [
+              "laya",
+              "jev"
+            ],
+            "nodeSpanPx": 59,
+            "spaceAboveNodesPx": 47,
+            "spaceBelowNodesPx": 13
+          },
+          {
+            "frameId": "lane-3",
+            "heightPx": 119,
+            "nodeCount": 2,
+            "nodeIds": [
+              "rejected",
+              "failclosed"
+            ],
+            "nodeSpanPx": 59,
+            "spaceAboveNodesPx": 47,
+            "spaceBelowNodesPx": 13
+          }
+        ],
+        "minimumProjectedNodeTextPx": 7.3,
+        "minimumProjectedNonEdgeTextPx": 7.3,
+        "minimumProjectedEdgeTextPx": 8,
+        "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
+        "minimumProjectedNodeTextDetail": "context",
+        "minimumProjectedNodeTextOwner": {
+          "kind": "node",
+          "id": "receipt"
+        },
+        "minimumRequiredNodeTextPx": 6,
+        "readabilityOk": true,
+        "hasLegend": true,
+        "hasNavigationDock": true,
+        "legendDockIntersectionArea": 0,
+        "dockStageIntersectionArea": 0,
+        "dockStageGap": 10,
+        "requiredDockStageGap": 10,
+        "viewerChromeStageOk": true,
+        "viewerChromeReserve": 54,
+        "viewerChromeActive": true,
+        "viewerChromeOk": true,
+        "resolvedTheme": "dark",
+        "file": "turnhelm-run-workflow.visual-check.1440x900.dark.png"
+      },
+      {
+        "width": 2048,
+        "height": 1320,
+        "theme": "light",
+        "innerWidth": 2048,
+        "innerHeight": 1320,
+        "scrollWidth": 2048,
+        "scrollHeight": 1320,
+        "overflowX": false,
+        "overflowY": false,
+        "verticalScrollAccepted": false,
+        "overflowDisposition": "contained",
+        "readerLayout": "adaptive",
+        "readerOverflow": null,
+        "readerFit": null,
+        "ok": true,
+        "readerWidth": 1733,
+        "diagramWidth": 1683,
+        "pageComposition": {
+          "bodyPaddingPx": 64,
+          "headerPx": 68,
+          "diagramChromePx": 94,
+          "svgPx": 1082,
+          "cardsPx": 0,
+          "viewBoxHeight": 652
+        },
+        "viewBoxWidth": 1014,
+        "workflowLanes": [
+          {
+            "frameId": "lane-0",
+            "heightPx": 173,
+            "nodeCount": 2,
+            "nodeIds": [
+              "submit",
+              "receipt"
+            ],
+            "nodeSpanPx": 86,
+            "spaceAboveNodesPx": 68,
+            "spaceBelowNodesPx": 18
+          },
+          {
+            "frameId": "lane-1",
+            "heightPx": 173,
+            "nodeCount": 3,
+            "nodeIds": [
+              "intake",
+              "decision",
+              "worker"
+            ],
+            "nodeSpanPx": 86,
+            "spaceAboveNodesPx": 68,
+            "spaceBelowNodesPx": 18
+          },
+          {
+            "frameId": "lane-2",
+            "heightPx": 173,
+            "nodeCount": 2,
+            "nodeIds": [
+              "laya",
+              "jev"
+            ],
+            "nodeSpanPx": 86,
+            "spaceAboveNodesPx": 68,
+            "spaceBelowNodesPx": 18
+          },
+          {
+            "frameId": "lane-3",
+            "heightPx": 173,
+            "nodeCount": 2,
+            "nodeIds": [
+              "rejected",
+              "failclosed"
+            ],
+            "nodeSpanPx": 86,
+            "spaceAboveNodesPx": 68,
+            "spaceBelowNodesPx": 18
+          }
+        ],
+        "minimumProjectedNodeTextPx": 7.3,
+        "minimumProjectedNonEdgeTextPx": 7.3,
+        "minimumProjectedEdgeTextPx": 8,
+        "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
+        "minimumProjectedNodeTextDetail": "context",
+        "minimumProjectedNodeTextOwner": {
+          "kind": "node",
+          "id": "receipt"
+        },
+        "minimumRequiredNodeTextPx": 6,
+        "readabilityOk": true,
+        "hasLegend": true,
+        "hasNavigationDock": true,
+        "legendDockIntersectionArea": 0,
+        "dockStageIntersectionArea": 0,
+        "dockStageGap": 10,
+        "requiredDockStageGap": 10,
+        "viewerChromeStageOk": true,
+        "viewerChromeReserve": 44,
+        "viewerChromeActive": true,
+        "viewerChromeOk": true,
+        "resolvedTheme": "light",
+        "file": "turnhelm-run-workflow.visual-check.2048x1320.light.png"
+      },
+      {
+        "width": 2048,
+        "height": 1320,
+        "theme": "dark",
+        "innerWidth": 2048,
+        "innerHeight": 1320,
+        "scrollWidth": 2048,
+        "scrollHeight": 1320,
+        "overflowX": false,
+        "overflowY": false,
+        "verticalScrollAccepted": false,
+        "overflowDisposition": "contained",
+        "readerLayout": "adaptive",
+        "readerOverflow": null,
+        "readerFit": null,
+        "ok": true,
+        "readerWidth": 1733,
+        "diagramWidth": 1683,
+        "pageComposition": {
+          "bodyPaddingPx": 64,
+          "headerPx": 68,
+          "diagramChromePx": 94,
+          "svgPx": 1082,
+          "cardsPx": 0,
+          "viewBoxHeight": 652
+        },
+        "viewBoxWidth": 1014,
+        "workflowLanes": [
+          {
+            "frameId": "lane-0",
+            "heightPx": 173,
+            "nodeCount": 2,
+            "nodeIds": [
+              "submit",
+              "receipt"
+            ],
+            "nodeSpanPx": 86,
+            "spaceAboveNodesPx": 68,
+            "spaceBelowNodesPx": 18
+          },
+          {
+            "frameId": "lane-1",
+            "heightPx": 173,
+            "nodeCount": 3,
+            "nodeIds": [
+              "intake",
+              "decision",
+              "worker"
+            ],
+            "nodeSpanPx": 86,
+            "spaceAboveNodesPx": 68,
+            "spaceBelowNodesPx": 18
+          },
+          {
+            "frameId": "lane-2",
+            "heightPx": 173,
+            "nodeCount": 2,
+            "nodeIds": [
+              "laya",
+              "jev"
+            ],
+            "nodeSpanPx": 86,
+            "spaceAboveNodesPx": 68,
+            "spaceBelowNodesPx": 18
+          },
+          {
+            "frameId": "lane-3",
+            "heightPx": 173,
+            "nodeCount": 2,
+            "nodeIds": [
+              "rejected",
+              "failclosed"
+            ],
+            "nodeSpanPx": 86,
+            "spaceAboveNodesPx": 68,
+            "spaceBelowNodesPx": 18
+          }
+        ],
+        "minimumProjectedNodeTextPx": 7.3,
+        "minimumProjectedNonEdgeTextPx": 7.3,
+        "minimumProjectedEdgeTextPx": 8,
+        "minimumProjectedNodeText": "one receipt · 0/1/130/143/worker",
+        "minimumProjectedNodeTextDetail": "context",
+        "minimumProjectedNodeTextOwner": {
+          "kind": "node",
+          "id": "receipt"
+        },
+        "minimumRequiredNodeTextPx": 6,
+        "readabilityOk": true,
+        "hasLegend": true,
+        "hasNavigationDock": true,
+        "legendDockIntersectionArea": 0,
+        "dockStageIntersectionArea": 0,
+        "dockStageGap": 10,
+        "requiredDockStageGap": 10,
+        "viewerChromeStageOk": true,
+        "viewerChromeReserve": 44,
+        "viewerChromeActive": true,
+        "viewerChromeOk": true,
+        "resolvedTheme": "dark",
+        "file": "turnhelm-run-workflow.visual-check.2048x1320.dark.png"
+      }
+    ],
+    "contactSheet": "turnhelm-run-workflow.visual-check.html"
   },
   "sidecars": {
-    "receipt": "turnhelm-run-workflow.browser-check.json",
-    "files": []
+    "directory": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/workflow-turnhelm-run-20261014-072825/visual-check",
+    "receipt": "turnhelm-run-workflow.visual-check.json",
+    "contactSheet": "turnhelm-run-workflow.visual-check.html",
+    "files": [
+      {
+        "sha256": "b64cc5b9eba65f246747da861abe9e3a5223507eed9a140fdc8932749a6bc595",
+        "bytes": 1970,
+        "file": "turnhelm-run-workflow.visual-check.html"
+      },
+      {
+        "sha256": "cf24dc2d56daa6e7079b4a0fef4d788f7adebce987f63fdf091d311c4d93cd39",
+        "bytes": 140119,
+        "file": "turnhelm-run-workflow.visual-check.1440x900.light.png"
+      },
+      {
+        "sha256": "a530fbf4c19eeae73e28c797fdc60fca63a26b7a36c1023087db42597b9bc2e6",
+        "bytes": 149751,
+        "file": "turnhelm-run-workflow.visual-check.1440x900.dark.png"
+      },
+      {
+        "sha256": "f0e66228870bbc4a09ae6b289673aee46f03062289439a3b4ee3e49ea9a67221",
+        "bytes": 211182,
+        "file": "turnhelm-run-workflow.visual-check.2048x1320.light.png"
+      },
+      {
+        "sha256": "e6ae231593a3226ebf3e2a35946e0408d0a96869b64316b328c78cb9c5bffe2a",
+        "bytes": 228940,
+        "file": "turnhelm-run-workflow.visual-check.2048x1320.dark.png"
+      }
+    ]
   }
 }

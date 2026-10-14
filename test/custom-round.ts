@@ -641,7 +641,7 @@ type RoundManifest = {
 };
 
 const CLI_PATH = join(REPO_ROOT, "dist", "src", "cli.js");
-const CASE_TIMEOUT_MS = 240_000;
+export const CASE_TIMEOUT_MS = 240_000;
 const CONTRACT_TIMEOUT_MS = 20_000;
 const JOURNAL_CAP_BYTES = 1 << 20;
 const SCRUBBED_ENV_KEYS = ["TURNHELM_ALLOW_HOSTED_JEV", "TYPESAFE_API_KEY", "LAYA_API_KEY", "OPENAI_API_KEY",
@@ -784,6 +784,113 @@ const receiptCount = (stderr: Buffer): number => {
   return count;
 };
 
+// FE-1 (§3): the per-field worker projection off the CLI receipt. The receipt
+// legitimately carries keys outside this table (today `payload`); a projection
+// that passed them through would not be a projection. Each retained field is
+// individually type-checked and dropped alone on failure — never coerced,
+// never thrown — and the whole projection is omitted only when the worker
+// object is absent/not a record or `status` is outside the frozen enum.
+// Bounded scalars only: no error text or stderr bytes reach the ledger
+// (errorSha256 is correlation-only), and usage follows VH-3 — partial
+// snapshots kept without zero-fill, malformed counters dropped, absent usage,
+// the emitted "unreported" literal, and zero surviving counters all project
+// to "unreported".
+export type WorkerReceiptEvidence = Readonly<{
+  status: "not-started" | "completed" | "failed" | "cancelled";
+  code?: number;
+  durationMs?: number;
+  progressEvents?: number;
+  ownedShutdown?: boolean;
+  usage?: Partial<Record<"input_tokens" | "output_tokens" | "cached_input_tokens" | "reasoning_output_tokens", number>> | "unreported";
+  failureClass?: "stream-disconnected" | "rate-limit" | "usage-limit" | "timeout" | "auth" | "overloaded" | "unknown";
+  errorSha256?: string;
+  signal?: "SIGINT" | "SIGTERM" | "SIGKILL";
+  lastEventAgeMs?: number;
+}>;
+
+const WORKER_STATUSES = new Set(["not-started", "completed", "failed", "cancelled"]);
+const WORKER_FAILURE_CLASSES = new Set([
+  "stream-disconnected", "rate-limit", "usage-limit", "timeout", "auth", "overloaded", "unknown"
+]);
+const WORKER_SIGNALS = new Set(["SIGINT", "SIGTERM", "SIGKILL"]);
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+const USAGE_COUNTERS = ["input_tokens", "output_tokens", "cached_input_tokens", "reasoning_output_tokens"] as const;
+
+const workerUsageEvidence = (usage: unknown): Exclude<WorkerReceiptEvidence["usage"], undefined> => {
+  if (usage === "unreported" || typeof usage !== "object" || usage === null || Array.isArray(usage)) {
+    return "unreported";
+  }
+  const counters: Partial<Record<(typeof USAGE_COUNTERS)[number], number>> = {};
+  for (const field of USAGE_COUNTERS) {
+    const value = (usage as Record<string, unknown>)[field];
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) counters[field] = value;
+  }
+  return Object.keys(counters).length === 0 ? "unreported" : counters;
+};
+
+export function projectWorkerReceipt(worker: unknown): WorkerReceiptEvidence | undefined {
+  if (typeof worker !== "object" || worker === null || Array.isArray(worker)) return undefined;
+  const record = worker as Record<string, unknown>;
+  if (typeof record.status !== "string" || !WORKER_STATUSES.has(record.status)) return undefined;
+  const projection: {
+    status: WorkerReceiptEvidence["status"];
+    code?: number;
+    durationMs?: number;
+    progressEvents?: number;
+    ownedShutdown?: boolean;
+    usage: Exclude<WorkerReceiptEvidence["usage"], undefined>;
+    failureClass?: NonNullable<WorkerReceiptEvidence["failureClass"]>;
+    errorSha256?: string;
+    signal?: NonNullable<WorkerReceiptEvidence["signal"]>;
+    lastEventAgeMs?: number;
+  } = { status: record.status as WorkerReceiptEvidence["status"], usage: workerUsageEvidence(record.usage) };
+  const { code, durationMs, progressEvents, ownedShutdown, failureClass, errorSha256, signal, lastEventAgeMs } = record;
+  // Zeros are observations, not placeholders: a run that decoded no frames
+  // keeps its progressEvents: 0 — distinguishable from an absent count, the
+  // distinction spec §4's adjudication leans on.
+  if (typeof code === "number" && Number.isSafeInteger(code) && code >= 0) projection.code = code;
+  if (typeof durationMs === "number" && Number.isSafeInteger(durationMs) && durationMs >= 0) {
+    projection.durationMs = durationMs;
+  }
+  if (typeof progressEvents === "number" && Number.isSafeInteger(progressEvents) && progressEvents >= 0) {
+    projection.progressEvents = progressEvents;
+  }
+  if (typeof ownedShutdown === "boolean") projection.ownedShutdown = ownedShutdown;
+  if (typeof failureClass === "string" && WORKER_FAILURE_CLASSES.has(failureClass)) {
+    projection.failureClass = failureClass as WorkerReceiptEvidence["failureClass"];
+  }
+  if (typeof errorSha256 === "string" && SHA256_HEX.test(errorSha256)) projection.errorSha256 = errorSha256;
+  if (typeof signal === "string" && WORKER_SIGNALS.has(signal)) {
+    projection.signal = signal as WorkerReceiptEvidence["signal"];
+  }
+  if (typeof lastEventAgeMs === "number" && Number.isSafeInteger(lastEventAgeMs) && lastEventAgeMs >= 0) {
+    projection.lastEventAgeMs = lastEventAgeMs;
+  }
+  return projection;
+}
+
+// The single receipt's `worker` value, through the same line-scan discipline
+// as receiptFailureClass: the first parseable receipt line wins, anything
+// else degrades to undefined.
+const receiptWorkerObject = (stderr: Buffer): unknown => {
+  for (const line of stderr.toString("utf8").split("\n")) {
+    if (!line.includes("turnhelm.receipt")) continue;
+    try {
+      const parsed = JSON.parse(line) as { type?: unknown; worker?: unknown };
+      if (parsed.type !== "turnhelm.receipt") continue;
+      return parsed.worker;
+    } catch { /* not a receipt line */ }
+  }
+  return undefined;
+};
+
+// The one extraction point for the case append and Task 2's stop records: the
+// projection exists only when exactly one receipt was emitted (spec §3.5) —
+// otherwise attribution is untrustworthy and the field is omitted, never
+// fabricated.
+const workerFailureOf = (stderr: Buffer): WorkerReceiptEvidence | undefined =>
+  receiptCount(stderr) === 1 ? projectWorkerReceipt(receiptWorkerObject(stderr)) : undefined;
+
 // The ledger carries journal values only through a fixed whitelist: a forged
 // or malformed journal line degrades to null instead of reaching the evidence
 // record. Backend ids mirror config v1's two backends.
@@ -804,7 +911,7 @@ const ORACLE_INPUT_CAP_BYTES = 1 << 16;
 export async function executeRound(
   manifestPath: string,
   approvedSha256: string,
-  options?: Readonly<{ env?: NodeJS.ProcessEnv; signal?: AbortSignal; sandboxExecPath?: string }>
+  options?: Readonly<{ env?: NodeJS.ProcessEnv; signal?: AbortSignal; sandboxExecPath?: string; caseTimeoutMs?: number }>
 ): Promise<number> {
   // Signal ladder (spec §3.3): the first SIGINT stops gracefully — the owned
   // CLI child is signalled through its supervision abort path and the round
@@ -839,10 +946,23 @@ const baselineDrifted = async (manifest: RoundManifest): Promise<boolean> => {
   return false;
 };
 
+// Identity before spend (spec §3.2(1)): canonical path plus dev/ino — the
+// check that catches same-path replacement. One shared gate serves both the
+// pre-launch check and the settled-tree verification (spec §4): hashTree
+// proves content only, so a root rebuilt with byte-identical content is
+// still a replacement.
+const rootIdentityMatches = async (
+  root: Readonly<{ canonical: string; dev: number; ino: number }>
+): Promise<boolean> => {
+  const info = await stat(root.canonical).catch(() => null);
+  return info !== null && info.dev === root.dev && info.ino === root.ino
+    && await realpath(root.canonical).catch(() => "") === root.canonical;
+};
+
 async function runGatedRound(
   manifestPath: string,
   approvedSha256: string,
-  options: Readonly<{ env?: NodeJS.ProcessEnv; sandboxExecPath?: string }> | undefined,
+  options: Readonly<{ env?: NodeJS.ProcessEnv; sandboxExecPath?: string; caseTimeoutMs?: number }> | undefined,
   signal: AbortSignal,
   terminated: () => boolean
 ): Promise<number> {
@@ -885,7 +1005,10 @@ async function runGatedRound(
 
   const env = scrubbedCliEnv(options?.env ?? process.env);
   const sandboxExecPath = options?.sandboxExecPath ?? "/usr/bin/sandbox-exec";
-  let failedCases = 0;
+  // Written outcomes (spec §5): an outcome counts only once its case record
+  // is on the ledger, so the completed record and the exit code reconcile
+  // what was actually written, never what was planned.
+  const writtenOutcomes: ("pass" | "failed" | "timeout")[] = [];
   for (const item of manifest.cases) {
     if (signal.aborted) {
       await appendEvidence({ phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
@@ -905,10 +1028,7 @@ async function runGatedRound(
     // this gate).
     const frozenTree = new Map(Object.entries(item.tree));
     let stopReason: string | null = null;
-    const rootInfo = await stat(item.root.canonical).catch(() => null);
-    if (rootInfo === null || rootInfo.dev !== item.root.dev || rootInfo.ino !== item.root.ino) {
-      stopReason = "root-identity";
-    } else if (await realpath(item.root.canonical).catch(() => "") !== item.root.canonical) {
+    if (!(await rootIdentityMatches(item.root))) {
       stopReason = "root-identity";
     } else {
       for (const file of item.files) {
@@ -955,22 +1075,39 @@ async function runGatedRound(
             "--project", shQuote(item.root.canonical), ...writeArgs.map(shQuote),
             "<", shQuote(taskFileEntry === undefined ? "" : taskFileEntry.path)].join(" ")]
         };
+    // caseTimeoutMs is a test knob; the production budget stays CASE_TIMEOUT_MS.
     const observation = await superviseCli(supervision.file, supervision.args,
-      { env, timeoutMs: CASE_TIMEOUT_MS, signal });
+      { env, timeoutMs: options?.caseTimeoutMs ?? CASE_TIMEOUT_MS, signal });
     if (observation.aborted || signal.aborted) {
       await appendEvidence({ phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
       return terminated() ? 143 : 130;
     }
-    // Budget breaches are integrity stops (spec §3.3): grading never reads a
-    // capped or truncated stream.
-    if (observation.timedOut || observation.outputOverflow) {
+    // The projection for every stop this case can record, computed once:
+    // workerFailureOf omits it unless exactly one parseable receipt exists.
+    const workerFailure = workerFailureOf(observation.stderr);
+    // Unverified cleanup (spec §4): the supervisor may release the pipes
+    // without a kill while the CLI still lives; a possibly-live CLI means no
+    // further reservation may ever happen.
+    if (!observation.cliClosed) {
       await appendEvidence({
-        phase: "stopped", caseId: item.id, reason: observation.timedOut ? "timeout" : "output-cap"
+        phase: "stopped", caseId: item.id, reason: "cleanup-unverified",
+        ...(workerFailure !== undefined ? { workerFailure } : {})
+      }).catch(() => {});
+      return 1;
+    }
+    // Budget breaches are integrity stops (spec §3.3): grading never reads a
+    // capped or truncated stream. Overflow also raises the timeout flag, so
+    // it is decided first — a capped stream must never pose as a timeout.
+    if (observation.outputOverflow) {
+      await appendEvidence({
+        phase: "stopped", caseId: item.id, reason: "output-cap",
+        ...(workerFailure !== undefined ? { workerFailure } : {})
       }).catch(() => {});
       return 1;
     }
     // Exactly one receipt (spec §3.5): a run that receipted zero or several
-    // times has no trustworthy attribution, so its stdout is never graded.
+    // times has no trustworthy attribution, so its stdout is never graded and
+    // the stop record carries no projection by definition.
     if (receiptCount(observation.stderr) !== 1) {
       await appendEvidence({ phase: "stopped", caseId: item.id, reason: "receipt" }).catch(() => {});
       return 1;
@@ -980,15 +1117,24 @@ async function runGatedRound(
     // case would spend against the same broken boundary.
     const failureClass = receiptFailureClass(observation.stderr);
     if (failureClass !== null && STOP_FAILURE_CLASSES.has(failureClass)) {
-      await appendEvidence({ phase: "stopped", caseId: item.id, reason: "worker-" + failureClass }).catch(() => {});
+      await appendEvidence({
+        phase: "stopped", caseId: item.id, reason: "worker-" + failureClass,
+        ...(workerFailure !== undefined ? { workerFailure } : {})
+      }).catch(() => {});
       return 1;
     }
-
     const taskHash = sha256hex(item.task);
     const journal = await readCaseJournal(item.root.canonical, taskHash);
     const backend = journalString(journal?.backend, BACKEND_IDS);
     const profileId = journalString(journal?.profileId, PROFILE_SET);
-    let passed = observation.exitCode === 0 && gradeOutput(item.grading.mode, observation.stdout.toString("utf8"), item.grading.expected);
+    // A wall-clock timeout is an unjudged case outcome, not a stop (spec
+    // §3.3): it sits below the receipt and stop-class gates so their evidence
+    // is still collected, and nothing may be graded off a half-written state,
+    // so a timed-out case never reaches grading or the contract check — the
+    // timeout record below replaces the graded one after the settled-tree gate.
+    let passed = !observation.timedOut
+      && observation.exitCode === 0
+      && gradeOutput(item.grading.mode, observation.stdout.toString("utf8"), item.grading.expected);
     // A legal profile outside the case's declared allowance is an engineering
     // failure of the case (spec §3.6): the selection ran, so it is recorded,
     // but the case fails without stopping the roster.
@@ -1038,27 +1184,87 @@ async function runGatedRound(
     // Integrity over semantics (spec §3.3): every completed case re-verifies
     // its consumer tree before the outcome counts — pass or fail — so a worker
     // that wrote outside its allowance stops the round even when its output
-    // graded fine. An unfreezable tree (new symlink, oversize) is drift.
+    // graded fine. Identity re-checks at the same gate (spec §4): hashTree
+    // proves content only, so a root rebuilt with byte-identical content is
+    // still a replacement. An unfreezable tree (new symlink, oversize) is
+    // drift.
+    if (!(await rootIdentityMatches(item.root))) {
+      await appendEvidence({
+        phase: "stopped", caseId: item.id, reason: "root-identity",
+        ...(workerFailure !== undefined ? { workerFailure } : {})
+      }).catch(() => {});
+      return 1;
+    }
     const settledTree = await hashTree(item.root.canonical);
     if (settledTree === null || treeChangedOutside(frozenTree, settledTree, item.allowedChanges) !== null) {
-      await appendEvidence({ phase: "stopped", caseId: item.id, reason: "tree-drift" }).catch(() => {});
+      await appendEvidence({
+        phase: "stopped", caseId: item.id, reason: "tree-drift",
+        ...(workerFailure !== undefined ? { workerFailure } : {})
+      }).catch(() => {});
       return 1;
     }
 
-    if (!passed) failedCases += 1;
+    // The timeout outcome: the case spent its reservation and its tree settled
+    // within the gate, so it is recorded unjudged — the supervisor's exit code
+    // and duration, the journal attribution, the cancelled worker's projection,
+    // and no oracle input (nothing was judged) — and the roster continues. The
+    // case counts as non-pass in the exit tally.
+    if (observation.timedOut) {
+      try {
+        await appendEvidence({
+          phase: "case", caseId: item.id, outcome: "timeout",
+          exitCode: observation.exitCode, durationMs: observation.durationMs, taskSha256: taskHash,
+          backend, profileId,
+          ...(workerFailure !== undefined ? { workerFailure } : {})
+        });
+      } catch {
+        await appendEvidence({ phase: "stopped", caseId: item.id, reason: "evidence-io" }).catch(() => {});
+        return 1;
+      }
+      writtenOutcomes.push("timeout");
+      continue;
+    }
     const workerPayload = receiptWorkerPayload(observation.stderr);
-    // The case record fails open: the case already ran and its stop conditions
-    // were all checked; a dead ledger here surfaces at the next case's
-    // reserved append, which is a hard stop.
-    await appendEvidence({
-      phase: "case", caseId: item.id, outcome: passed ? "pass" : "failed",
-      exitCode: observation.exitCode, durationMs: observation.durationMs, taskSha256: taskHash,
-      backend, profileId,
-      ...(workerPayload !== null ? { workerPayload } : {}),
-      oracleInput: observation.stdout.subarray(0, ORACLE_INPUT_CAP_BYTES).toString("utf8")
-    }).catch(() => {});
+    // The case record is terminal (spec §5): a ledger that cannot take it has
+    // lost the run's evidence, so the round stops instead of recording the
+    // outcome on faith.
+    try {
+      await appendEvidence({
+        phase: "case", caseId: item.id, outcome: passed ? "pass" : "failed",
+        exitCode: observation.exitCode, durationMs: observation.durationMs, taskSha256: taskHash,
+        backend, profileId,
+        ...(workerPayload !== null ? { workerPayload } : {}),
+        ...(workerFailure !== undefined ? { workerFailure } : {}),
+        oracleInput: observation.stdout.subarray(0, ORACLE_INPUT_CAP_BYTES).toString("utf8")
+      });
+    } catch {
+      await appendEvidence({ phase: "stopped", caseId: item.id, reason: "evidence-io" }).catch(() => {});
+      return 1;
+    }
+    writtenOutcomes.push(passed ? "pass" : "failed");
   }
-  return failedCases === 0 ? 0 : 4;
+  // A signal discovered after the last append still settles through the
+  // signal ladder (spec §5), never as a would-be 0/4.
+  if (signal.aborted) {
+    await appendEvidence({ phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
+    return terminated() ? 143 : 130;
+  }
+  // The completed record reconciles what was actually written: its counts
+  // come from writtenOutcomes, so a stopped run (which returns above) never
+  // appends one, and failed + timedOut never exceed the written cases.
+  const failed = writtenOutcomes.filter(outcome => outcome === "failed").length;
+  const timedOut = writtenOutcomes.filter(outcome => outcome === "timeout").length;
+  try {
+    await appendEvidence({
+      phase: "completed", outcome: failed + timedOut > 0 ? "fail" : "pass",
+      cases: manifest.cases.length, failed, timedOut
+    });
+  } catch {
+    return 1;
+  }
+  return writtenOutcomes.length === manifest.cases.length && writtenOutcomes.every(outcome => outcome === "pass")
+    ? 0
+    : 4;
 }
 
 // ---------- command entry (spec §3.1): prepare and execute modes ----------
