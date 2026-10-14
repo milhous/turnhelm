@@ -578,7 +578,9 @@ const withBackends = (
   routingTimeoutMs: config.routingTimeoutMs,
   backends: {
     laya: { enabled: laya.enabled, url: laya.url ?? config.backends.laya.url },
-    jev: { enabled: jev.enabled }
+    // The Jev transport is frozen policy: rebinding backends never rebuilds
+    // it as direct behind the caller's selected policy.
+    jev: { enabled: jev.enabled, transport: config.backends.jev.transport }
   },
   profiles: Object.fromEntries(PROFILE_IDS.map(id => [id, {
     model: config.profiles[rebindFrom ?? id].model, effort: config.profiles[rebindFrom ?? id].effort

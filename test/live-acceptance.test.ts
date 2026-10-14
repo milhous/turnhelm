@@ -985,11 +985,11 @@ const buildRun = async (
     entry.reservation ?? (suite === "jev" ? ["jev"] : suite === "dual" ? ["laya", "jev"] : ["laya"]);
   for (const entry of cases) {
     const config = parseProjectConfig({
-      version: 1,
+      version: 2,
       routingTimeoutMs: 1000,
       backends: {
         laya: { enabled: suite !== "jev", url: entry.fixtureUrl ?? layaUrl },
-        jev: { enabled: entry.jevEnabled ?? suite !== "laya" }
+        jev: { enabled: entry.jevEnabled ?? suite !== "laya", transport: { mode: "direct" } }
       },
       profiles: template.profiles
     });

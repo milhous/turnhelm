@@ -25,9 +25,12 @@ const PROJECT_PROFILES = {
 };
 
 const projectConfig = (port: number, layaEnabled = true): Record<string, unknown> => ({
-  version: 1,
+  version: 2,
   routingTimeoutMs: 4000,
-  backends: { laya: { enabled: layaEnabled, url: `http://127.0.0.1:${port}` }, jev: { enabled: false } },
+  backends: {
+    laya: { enabled: layaEnabled, url: `http://127.0.0.1:${port}` },
+    jev: { enabled: false, transport: { mode: "direct" } }
+  },
   profiles: PROJECT_PROFILES
 });
 

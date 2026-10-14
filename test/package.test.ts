@@ -128,7 +128,7 @@ test("the packed distribution installs offline and serves the project entry end 
       "examples/config.json", "2000 UTF-16"]) {
       assert.ok(!readme.includes(retired), "packed README must not advertise retired path: " + retired);
     }
-    for (const fragment of ["Node.js `>=24.0.0`", "Node 22.8 support has been dropped", "`24.x >=24.5.0`"]) {
+    for (const fragment of ["Node.js `>=24.5.0`", "Node 24.0 support has been dropped", "`24.x >=24.5.0`"]) {
       assert.ok(readme.includes(fragment), "packed README must state the current Node requirement: " + fragment);
     }
 
@@ -145,14 +145,16 @@ test("the packed distribution installs offline and serves the project entry end 
 
     // 4. Assets and the bin resolve from the INSTALLED module only.
     const configAsset = JSON.parse(await readFile(join(installed, "assets", "config.json"), "utf8"));
-    assert.equal(configAsset.version, 1);
+    assert.equal(configAsset.version, 2);
+    assert.deepEqual(configAsset.backends.jev, { enabled: false, transport: { mode: "direct" } },
+      "the shipped Jev policy is explicitly disabled with a direct transport");
     assert.deepEqual(Object.keys(configAsset.profiles).sort(),
       ["balanced", "deep", "fast", "frontier", "frontier_max", "frontier_xhigh"]);
     const installedPackage = JSON.parse(await readFile(join(installed, "package.json"), "utf8")) as { engines: { node: string } };
-    assert.equal(installedPackage.engines.node, ">=24.0.0",
-      "the installed package must declare the Node 24 floor");
+    assert.equal(installedPackage.engines.node, ">=24.5.0",
+      "the installed package must declare the Node 24.5 floor");
     const installedSkill = await readFile(join(installed, ".agents", "skills", "turnhelm-routing", "SKILL.md"), "utf8");
-    for (const fragment of ["Node >=24.0.0", "22.8 support dropped", "24.x >=24.5.0"]) {
+    for (const fragment of ["Node >=24.5.0", "24.0 support dropped", "24.x >=24.5.0"]) {
       assert.ok(installedSkill.includes(fragment), "packed skill must state the current Node requirement: " + fragment);
     }
     assert.equal((await readdir(join(installed, "dist", "src"))).includes("cli.js"), true);

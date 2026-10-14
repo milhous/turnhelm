@@ -1,6 +1,7 @@
 import { Agent, request as httpRequest, type ClientRequest, type IncomingMessage } from "node:http";
 import { Agent as SecureAgent, request as httpsRequest } from "node:https";
 import { PROFILE_IDS, type ProfileId, type ProjectConfig } from "./config.js";
+import { isSupportedNode } from "./runtime.js";
 
 export type TaskBackend = "laya" | "jev";
 
@@ -66,6 +67,13 @@ const failureCode = (error: unknown): ClassifierFailure["code"] => {
 };
 
 export function directChoiceRequest(spec: RequestSpec): Promise<unknown> {
+  // Runtime floor first: an unsupported Node never creates an Agent, request,
+  // or socket, whatever the caller asks for.
+  if (!isSupportedNode()) {
+    return Promise.reject(new ClassifierRequestError(
+      { kind: "request", httpStatus: null, code: null },
+      "classifier request refused on an unsupported runtime"));
+  }
   const secure = spec.url.protocol === "https:";
   // proxyEnv:{} keeps the built-in environment proxy off where the runtime supports
   // it; runtimes without the option ignore it, so the request stays direct either way.
@@ -232,6 +240,14 @@ export async function requestTaskChoice(
   signal: AbortSignal,
   request: ChoiceRequest = directChoiceRequest
 ): Promise<TaskChoice> {
+  // Temporary until the shared proxy transport lands: an enabled
+  // http-connect Jev policy is refused here, before any request (seam or
+  // default), so a proxy policy can never silently run the direct path.
+  if (backend === "jev" && config.backends.jev.transport.mode === "http-connect") {
+    throw new ClassifierRequestError(
+      { kind: "request", httpStatus: null, code: null },
+      "jev http-connect transport is not available in this build; no request was made");
+  }
   const url = backend === "jev"
     ? new URL("/v1/systemone", "https://api.typesafe.ai")
     : new URL("/v1/systemone", config.backends.laya.url);

@@ -539,9 +539,9 @@ process.stdin.on("end", () => {
 `;
 
 const caseConfig = (port: number): string => JSON.stringify({
-  version: 1,
+  version: 2,
   routingTimeoutMs: 4000,
-  backends: { laya: { enabled: true, url: `http://127.0.0.1:${port}` }, jev: { enabled: false } },
+  backends: { laya: { enabled: true, url: `http://127.0.0.1:${port}` }, jev: { enabled: false, transport: { mode: "direct" } } },
   profiles: {
     fast: { model: "gpt-6-luna", effort: "low" },
     balanced: { model: "gpt-6.1-sol", effort: "medium" },

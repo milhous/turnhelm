@@ -27,11 +27,11 @@ test("the module surface is exactly the project task contract", () => {
 
 test("hosted Jev eligibility requires configuration, authorization, and a key together", () => {
   const config = {
-    version: 1 as const,
+    version: 2 as const,
     routingTimeoutMs: 4000,
     backends: {
       laya: { enabled: false, url: "http://127.0.0.1:8765" },
-      jev: { enabled: true }
+      jev: { enabled: true, transport: { mode: "direct" } as const }
     },
     profiles: {
       fast: { model: "gpt-6-luna", effort: "low" as const },

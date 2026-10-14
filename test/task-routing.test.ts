@@ -10,17 +10,17 @@ import { decisionReply, fakeEnv, fixtureConfig } from "./fixtures.js";
 
 const jevEnabled = () => {
   const base = fixtureConfig();
-  return parseProjectConfig({ ...base, backends: { ...base.backends, jev: { enabled: true } } });
+  return parseProjectConfig({ ...base, backends: { ...base.backends, jev: { enabled: true, transport: { mode: "direct" } } } });
 };
 
 const layaDisabled = () => {
   const base = fixtureConfig();
-  return parseProjectConfig({ ...base, backends: { laya: { enabled: false, url: base.backends.laya.url }, jev: { enabled: true } } });
+  return parseProjectConfig({ ...base, backends: { laya: { enabled: false, url: base.backends.laya.url }, jev: { enabled: true, transport: { mode: "direct" } } } });
 };
 
 const noBackends = () => {
   const base = fixtureConfig();
-  return parseProjectConfig({ ...base, backends: { laya: { enabled: false, url: base.backends.laya.url }, jev: { enabled: false } } });
+  return parseProjectConfig({ ...base, backends: { laya: { enabled: false, url: base.backends.laya.url }, jev: { enabled: false, transport: { mode: "direct" } } } });
 };
 
 const countingRequest = (log: string[], reply: (backend: TaskBackend) => unknown) => async (spec: RequestSpec) => {
@@ -44,7 +44,7 @@ test("normal max is selected by one Laya request", async () => {
 
 test("one authorized Jev attempt follows one Laya failure", async () => {
   const base = fixtureConfig();
-  const c = parseProjectConfig({ ...base, backends: { ...base.backends, jev: { enabled: true } } });
+  const c = parseProjectConfig({ ...base, backends: { ...base.backends, jev: { enabled: true, transport: { mode: "direct" } } } });
   const calls: string[] = [];
   const r = await routeTask("Investigate cross-module invariants", c, {
     env: fakeEnv, request: async s => {
@@ -72,7 +72,7 @@ test("invalid route fails with evidence, not fallback", async () => {
 test("user cancellation records the initiated request and never tries Jev", async () => {
   const ac = new AbortController();
   const base = fixtureConfig();
-  const c = parseProjectConfig({ ...base, backends: { ...base.backends, jev: { enabled: true } } });
+  const c = parseProjectConfig({ ...base, backends: { ...base.backends, jev: { enabled: true, transport: { mode: "direct" } } } });
   const calls: string[] = [];
   const r = await routeTask("Fix cache invalidation", c, {
     env: fakeEnv, signal: ac.signal, request: async s => {
@@ -296,7 +296,7 @@ const stalledRequest = (spec: RequestSpec, guardMs: number = STALLED_GUARD_MS): 
 
 test("a Laya timeout leaves Jev only the remaining total budget", async t => {
   const base = fixtureConfig();
-  const c = parseProjectConfig({ ...base, routingTimeoutMs: 400, backends: { ...base.backends, jev: { enabled: true } } });
+  const c = parseProjectConfig({ ...base, routingTimeoutMs: 400, backends: { ...base.backends, jev: { enabled: true, transport: { mode: "direct" } } } });
   const delays: number[] = [];
   const budgets: number[] = [];
   const timeout = AbortSignal.timeout.bind(AbortSignal);
@@ -324,7 +324,7 @@ test("a Laya timeout leaves Jev only the remaining total budget", async t => {
 
 test("a final failure retains both attempts with their outcomes", async () => {
   const base = fixtureConfig();
-  const c = parseProjectConfig({ ...base, routingTimeoutMs: 400, backends: { ...base.backends, jev: { enabled: true } } });
+  const c = parseProjectConfig({ ...base, routingTimeoutMs: 400, backends: { ...base.backends, jev: { enabled: true, transport: { mode: "direct" } } } });
   const stalled = async (spec: RequestSpec) => {
     await stalledRequest(spec);
     throw new Error("unreachable after abort");
@@ -440,7 +440,7 @@ test("a late invalid choice past its budget is timeout evidence", async () => {
 
 test("an elapsed-budget Laya failure keeps its share and still fails over", async () => {
   const base = fixtureConfig();
-  const c = parseProjectConfig({ ...base, routingTimeoutMs: 400, backends: { ...base.backends, jev: { enabled: true } } });
+  const c = parseProjectConfig({ ...base, routingTimeoutMs: 400, backends: { ...base.backends, jev: { enabled: true, transport: { mode: "direct" } } } });
   const calls: string[] = [];
   const r = await routeTask("Prove the invariants", c, {
     env: fakeEnv,
