@@ -814,6 +814,101 @@ finish(() => {
   assert.equal(recorded.ownedShutdown, true, "the decision precedes close; the ladder still discharges");
 });
 
+test("terminal frame before stdin ack still decides", { timeout: 30_000 }, async t => {
+  // A task larger than the pipe buffer pins the ordering deterministically:
+  // the parent's stdin end-callback cannot fire until the fake drains, and the
+  // fake emits the terminal frame before draining — no sleep race.
+  const { recorded } = await runWorker(t, {
+    taskRepeat: 200_000,
+    script: `
+emit({ type: "turn.completed" });
+process.stdin.resume();
+setTimeout(() => process.exit(0), 8000);
+`
+  });
+  assert.equal(recorded.status, "completed", "the stdin-ack trigger decides the run the frame alone could not");
+  assert.equal(recorded.ownedShutdown, true);
+  assert.ok((recorded.durationMs ?? 0) < 5000, "ladder-bounded, saw " + String(recorded.durationMs));
+});
+
+test("TERM-ignoring group escalates and still completes", { timeout: 30_000 }, async t => {
+  const { recorded, directory } = await runWorker(t, {
+    bootstrap: stubbornChild,
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "worker result" } });
+  emit({ type: "turn.completed" });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(recorded.ownedShutdown, true);
+  assert.equal(recorded.signal, "SIGKILL", "a TERM-trapping group forces the second rung");
+  assert.ok((recorded.durationMs ?? 0) >= 1000, "the KILL lands at the TERM grace, saw " + String(recorded.durationMs));
+  assert.ok((recorded.durationMs ?? 0) < 5000);
+  await waitForExit(Number(await readFile(join(directory, "owned.pid"), "utf8")));
+});
+
+test("post-terminal frames are dropped and the terminal snapshot is final", { timeout: 30_000 }, async t => {
+  // The SIGTERM trap keeps the fake alive past the ladder's first rung so the
+  // post-terminal frames really reach the parent's dropped-frame path.
+  const { recorded, stdout } = await runWorker(t, {
+    bootstrap: stubbornChild,
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "message A" } });
+  emit({ type: "turn.completed", usage: { input_tokens: 11, output_tokens: 7 } });
+  setTimeout(() => {
+    emit({ type: "item.completed", item: { type: "agent_message", text: "message B" } });
+    emit({ type: "turn.completed", usage: { input_tokens: 99, output_tokens: 98 } });
+    process.stdout.write("{malformed\\n");
+  }, 100);
+});
+`
+  });
+  assert.equal(recorded.status, "completed", "post-terminal noise cannot rewrite the verdict");
+  assert.equal(stdout, "message A\n", "the payload derives from message A only");
+  assert.deepEqual(recorded.usage, { input_tokens: 11, output_tokens: 7 }, "usage freezes at the terminal frame");
+  assert.equal(recorded.failureClass, undefined);
+  assert.equal(recorded.progressEvents, 2, "only pre-terminal frames count");
+});
+
+test("zero-message terminal event completes without emission", { timeout: 30_000 }, async t => {
+  const { recorded, stdout, directory } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "turn.completed" });
+  setTimeout(() => process.exit(0), 6000);
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(stdout, "");
+  assert.equal(recorded.ownedShutdown, true);
+  assert.ok((recorded.durationMs ?? 0) < 5000, "ladder-bounded, saw " + String(recorded.durationMs));
+  await waitForExit(Number(await readFile(join(directory, "owned.pid"), "utf8")));
+});
+
+test("blocked sink at emission still flushes exactly once", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    output: "accepted-delay",
+    tailDelayMs: 500,
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "worker result" } });
+  emit({ type: "turn.completed" });
+  setTimeout(() => process.exit(0), 8000);
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(recorded.outputAcked, true, "settlement waits for the drain");
+  assert.equal(recorded.received, 1, "exactly one emission");
+  assert.equal(recorded.emitted, "worker result\n");
+  assert.ok((recorded.durationMs ?? 0) >= 400, "the run settled only after the drain, saw " + String(recorded.durationMs));
+  assert.ok((recorded.durationMs ?? 0) < 5000);
+});
+
 test("exit zero without a completion is a worker failure", { timeout: 30_000 }, async t => {
   const { recorded, stdout } = await runWorker(t, { script: "finish(() => {});\n" });
   assert.equal(recorded.status, "failed");
