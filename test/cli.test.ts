@@ -417,7 +417,9 @@ test("run routes once, executes one read-only worker, and emits one accurate rec
   const worker = receipt.worker as { status: string; code: number; durationMs: number; usage?: Record<string, number>;
     payload?: { mode: string; trailerBytes?: number } };
   assert.equal(worker.status, "completed");
-  assert.equal(worker.code, 0);
+  // The terminal event starts the owned ladder; the fake's voluntary exit
+  // races the TERM, and the observed code is never a status input (TS-8).
+  assert.ok(worker.code === 0 || worker.code === 143, "saw " + String(worker.code));
   assert.equal(typeof worker.durationMs, "number");
   assert.deepEqual(worker.usage, { input_tokens: 11, output_tokens: 7 });
   assert.deepEqual(worker.payload, { mode: "unstructured" });
@@ -587,11 +589,13 @@ test("a worker terminal failure fails the run despite exit zero", async t => {
   });
 });
 
-test("a nonzero worker exit code is preserved", async t => {
+test("a nonzero worker exit after the terminal event stays an observation", async t => {
   const f = await fixture(t);
   const result = await f.run(["run", TASK], { input: "", env: { TEST_CODEX_EXIT: "7" } });
-  assert.equal(result.code, 7);
-  assert.equal((parseReceipt(result.stderr).worker as { status: string }).status, "failed");
+  assert.equal(result.code, 0, "a decided run exits zero regardless of the observed child code");
+  const worker = parseReceipt(result.stderr).worker as { status: string; code?: number };
+  assert.equal(worker.status, "completed");
+  assert.ok(worker.code === 7 || worker.code === 143, "the fake's exit races the ladder's TERM, saw " + String(worker.code));
 });
 
 test("raw worker stderr and raw error events never reach the parent", async t => {
@@ -664,16 +668,20 @@ test("a completed run without usage reports it explicitly unreported", async t =
   const result = await f.run(["run", TASK], { input: "", env: { TEST_CODEX_OMIT_USAGE: "1" } });
   assert.equal(result.code, 0);
   const receipt = parseReceipt(result.stderr);
-  assert.deepEqual(receipt.worker, {
+  // The ladder ends the decided run; code/signal are open observations, so
+  // they are normalized out of the deep-equal and pinned separately (TS-8).
+  const { code, signal, ...workerRest } = receipt.worker as Record<string, unknown>;
+  assert.deepEqual(workerRest, {
     status: "completed",
-    code: 0,
     durationMs: (receipt.worker as { durationMs: number }).durationMs,
     progressEvents: 2,
     lastEventAgeMs: (receipt.worker as { lastEventAgeMs?: number }).lastEventAgeMs,
     usage: "unreported",
     payload: { mode: "unstructured" },
-    ownedShutdown: false
+    ownedShutdown: true
   });
+  assert.ok(code === 0 || (code === 143 && signal === "SIGTERM"),
+    "voluntary exit zero or the ladder's TERM, saw " + code + "/" + String(signal));
   assert.equal(receipt.classifierUsage, "unreported");
   assert.equal(receipt.wholeRunUsageScope, "unverified");
 });

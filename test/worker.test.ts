@@ -577,8 +577,10 @@ finish(() => {
 `
   });
   assert.equal(typeof recorded.durationMs, "number");
-  assert.deepEqual({ ...recorded, durationMs: 0, lastEventAgeMs: 0 }, {
-    code: 0,
+  // The decision starts the owned ladder, so the code is the ladder's TERM or
+  // a raced voluntary exit-zero — both are honest observations of the group end.
+  const { code, signal, ...normalized } = { ...recorded, durationMs: 0, lastEventAgeMs: 0 };
+  assert.deepEqual(normalized, {
     status: "completed",
     durationMs: 0,
     progressEvents: 2,
@@ -594,9 +596,11 @@ finish(() => {
     diagMaxLength: 0,
     diagFinalLength: 0,
     tailWrites: 0,
-    ownedShutdown: false,
+    ownedShutdown: true,
     payload: { mode: "unstructured" }
   });
+  assert.ok(code === 0 || (code === 143 && signal === "SIGTERM"),
+    "voluntary exit zero or the ladder's TERM, saw " + code + "/" + String(signal));
   assert.equal(await fakeFile(directory, "argv.json"), JSON.stringify(buildWorkerArgs(decision("balanced"), true)));
   assert.equal(await fakeFile(directory, "cwd.txt"), await realpath(join(directory, "root")));
   assert.equal(await fakeFile(directory, "task.txt"), task);
@@ -714,7 +718,7 @@ finish(() => {
   assert.deepEqual(recorded.payload, { mode: "strict" });
 });
 
-test("a message decoded after completion becomes the final message", { timeout: 30_000 }, async t => {
+test("a message decoded after the terminal event is dropped; the pre-terminal message is final", { timeout: 30_000 }, async t => {
   const { recorded, stdout } = await runWorker(t, {
     script: `
 finish(() => {
@@ -725,7 +729,7 @@ finish(() => {
 `
   });
   assert.equal(recorded.status, "completed");
-  assert.equal(stdout, "after\n");
+  assert.equal(stdout, "before\n");
 });
 
 test("a repeated completion changes nothing", { timeout: 30_000 }, async t => {
@@ -742,7 +746,7 @@ finish(() => {
   assert.equal(stdout, "settled answer\n");
 });
 
-test("a failed frame after a completion fails the run with no emission", { timeout: 30_000 }, async t => {
+test("a failed frame after the terminal event is dropped and the run completes", { timeout: 30_000 }, async t => {
   const { recorded, stdout } = await runWorker(t, {
     script: `
 finish(() => {
@@ -752,9 +756,9 @@ finish(() => {
 });
 `
   });
-  assert.equal(recorded.status, "failed");
-  assert.equal(recorded.error, "worker");
-  assert.equal(stdout, "");
+  assert.equal(recorded.status, "completed", "post-terminal native noise cannot rewrite a decided verdict");
+  assert.equal(recorded.error, undefined);
+  assert.equal(stdout, "answer\n");
 });
 
 test("a maximal agent-message frame passes through unclipped", { timeout: 30_000 }, async t => {
@@ -945,6 +949,32 @@ finish(() => {
   assert.equal(recorded.status, "failed", "an accepted-then-errored write must not upgrade to completed");
   assert.equal(recorded.error, "output");
   assert.equal(recorded.ownedShutdown, true, "the ladder already started when the ack error landed");
+});
+
+test("operator abort in the post-decision window cancels", { timeout: 30_000 }, async t => {
+  // The abort lands ~300 ms after the terminal frame: the run has decided and
+  // emitted, the ladder is polling toward its 1000 ms KILL — the SIGTERM trap
+  // keeps that window open — and the operator still outranks it all.
+  const { recorded, stdout, directory } = await runWorker(t, {
+    gate: "abort-ready",
+    bootstrap: stubbornChild,
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "verdict" } });
+  emit({ type: "turn.completed" });
+  setTimeout(() => ready(), 300);
+});
+`
+  });
+  assert.equal(recorded.status, "cancelled", "operator intent outranks the delivered verdict");
+  assert.equal(stdout, "verdict\n", "the flushed verdict stays honest on stdout");
+  assert.equal(recorded.ownedShutdown, true);
+  // The abort joins the already-running ladder; a TERM-trapping group ends at
+  // the KILL rung — the exit code stays an observation (spec TS-8), never a
+  // status input.
+  assert.equal(recorded.signal, "SIGKILL");
+  assert.equal(recorded.code, 137);
+  await waitForExit(Number(await readFile(join(directory, "owned.pid"), "utf8")));
 });
 
 test("exit zero without a completion is a worker failure", { timeout: 30_000 }, async t => {
@@ -1141,7 +1171,7 @@ finish(() => {
 `
   });
   assert.equal(recorded.status, "completed");
-  assert.equal(recorded.progressEvents, 4, "message, completed, unknown, and diagnostic kinds all count");
+  assert.equal(recorded.progressEvents, 2, "only the message and terminal frames count; post-terminal kinds are dropped");
   assert.equal(typeof recorded.lastEventAgeMs, "number");
 });
 
@@ -1168,8 +1198,8 @@ finish(() => {
     "the blocked final write holds settlement past the last decode: saw " + recorded.lastEventAgeMs);
 });
 
-test("a malformed frame stops counting but the decoded count ships on the failed result", { timeout: 30_000 }, async t => {
-  const { recorded } = await runWorker(t, {
+test("a malformed frame after the terminal event is dropped and the run completes", { timeout: 30_000 }, async t => {
+  const { recorded, stdout } = await runWorker(t, {
     script: `
 finish(() => {
   emit({ type: "item.completed", item: { type: "agent_message", text: "counted" } });
@@ -1180,10 +1210,10 @@ finish(() => {
 });
 `
   });
-  assert.equal(recorded.status, "failed");
-  assert.equal(recorded.error, "protocol");
-  assert.equal(recorded.progressEvents, 2, "malformed frames do not count");
-  assert.equal(typeof recorded.lastEventAgeMs, "number");
+  assert.equal(recorded.status, "completed", "post-terminal garbage is native noise, not a protocol failure");
+  assert.equal(recorded.error, undefined);
+  assert.equal(recorded.progressEvents, 2, "only the pre-terminal frames count");
+  assert.equal(stdout, "counted\n");
 });
 
 test("a pre-start abort carries zero decoded events and no age", { timeout: 30_000 }, async t => {
@@ -1193,7 +1223,7 @@ test("a pre-start abort carries zero decoded events and no age", { timeout: 30_0
   assert.equal(recorded.lastEventAgeMs, undefined);
 });
 
-test("a cancelled mid-stream run keeps its decoded events and age", { timeout: 30_000 }, async t => {
+test("a cancelled post-decision run keeps its flushed answer and cancelled status", { timeout: 30_000 }, async t => {
   const { recorded, stdout } = await runWorker(t, {
     gate: "abort-ready",
     script: `
@@ -1205,10 +1235,10 @@ finish(() => {
 });
 `
   });
-  assert.equal(recorded.status, "cancelled");
+  assert.equal(recorded.status, "cancelled", "operator intent outranks the delivered verdict");
   assert.ok((recorded.progressEvents ?? 0) >= 1, "the decoded message before cancellation still counts, saw " + recorded.progressEvents);
   assert.equal(typeof recorded.lastEventAgeMs, "number");
-  assert.equal(stdout, "", "a run cancelled before settlement initiates no emission");
+  assert.equal(stdout, "held\n", "the already-flushed verdict stays on stdout; the exit code carries the stop");
 });
 
 test("the failed dispatch writes exactly one class-only diagnostic line", { timeout: 30_000 }, async t => {
@@ -1375,7 +1405,8 @@ finish(() => {
   const { recorded, stderr } = outcome.value;
   assert.equal(recorded.status, "failed");
   assert.equal(recorded.error, "output");
-  assert.equal(recorded.code, 0);
+  // The ladder TERMs the lingering fake; its own exit zero may race the signal.
+  assert.ok(recorded.code === 0 || recorded.code === 143, "attribution is the pin, not the race, saw " + recorded.code);
   // Emission may have initiated, but a failed run attaches no payload projection.
   assert.equal(recorded.payload, undefined);
   forbid(JSON.stringify(recorded) + stderr, "PRIVATE_LATE_EPIPE");
@@ -1420,13 +1451,14 @@ finish(() => {
   const { recorded, stderr } = outcome.value;
   assert.equal(recorded.status, "failed");
   assert.equal(recorded.error, "output");
-  assert.equal(recorded.code, 0);
+  // The ladder TERMs the lingering fake; its own exit zero may race the signal.
+  assert.ok(recorded.code === 0 || recorded.code === 143, "attribution is the pin, not the race, saw " + recorded.code);
   // Emission may have initiated, but a failed run attaches no payload projection.
   assert.equal(recorded.payload, undefined);
   forbid(JSON.stringify(recorded) + stderr, "PRIVATE_LATE_EPIPE");
 });
 
-test("repeated completions keep the latest usage snapshot, never a sum", { timeout: 30_000 }, async t => {
+test("usage freezes at the terminal frame, never a sum or a replacement", { timeout: 30_000 }, async t => {
   const { recorded } = await runWorker(t, {
     script: `
 finish(() => {
@@ -1436,10 +1468,10 @@ finish(() => {
 `
   });
   assert.equal(recorded.status, "completed");
-  assert.deepEqual(recorded.usage, { input_tokens: 20, output_tokens: 8 });
+  assert.deepEqual(recorded.usage, { input_tokens: 10, output_tokens: 5 });
 });
 
-test("input-only and output-only snapshots are retained without mixing fields", { timeout: 30_000 }, async t => {
+test("the first usage snapshot is final; later completions cannot mix fields", { timeout: 30_000 }, async t => {
   const { recorded } = await runWorker(t, {
     script: `
 finish(() => {
@@ -1449,7 +1481,7 @@ finish(() => {
 `
   });
   assert.equal(recorded.status, "completed");
-  assert.deepEqual(recorded.usage, { output_tokens: 9 });
+  assert.deepEqual(recorded.usage, { input_tokens: 7 });
 });
 
 test("valid usage is retained when a later completion has only invalid counters", { timeout: 30_000 }, async t => {
@@ -1573,7 +1605,7 @@ finish(() => {
   assert.equal(await fakeFile(directory, "runs"), "1");
 });
 
-test("nonzero exit is a worker failure even with a completion", { timeout: 30_000 }, async t => {
+test("nonzero exit after the terminal event is an observation, not a failure", { timeout: 30_000 }, async t => {
   const { recorded, stdout } = await runWorker(t, {
     script: `
 finish(() => {
@@ -1582,14 +1614,15 @@ finish(() => {
 });
 `
   });
-  assert.equal(recorded.status, "failed");
-  assert.equal(recorded.error, "worker");
-  assert.equal(recorded.code, 3);
+  assert.equal(recorded.status, "completed", "a decided run stays completed regardless of the observed exit code");
+  assert.deepEqual(recorded.usage, { input_tokens: 1 });
+  // The voluntary nonzero exit races the ladder's TERM; both end a decided run.
+  assert.ok(recorded.code === 3 || recorded.code === 143, "saw " + recorded.code);
   assert.equal(stdout, "");
 });
 
-test("the result settles at close, not when stdio ends", { timeout: 30_000 }, async t => {
-  const { recorded } = await runWorker(t, {
+test("the result settles at the terminal event, not at close", { timeout: 30_000 }, async t => {
+  const { recorded, stdout } = await runWorker(t, {
     script: `
 finish(() => {
   emit({ type: "item.completed", item: { type: "agent_message", text: "early output" } });
@@ -1600,7 +1633,8 @@ finish(() => {
 `
   });
   assert.equal(recorded.status, "completed");
-  assert.ok((recorded.durationMs ?? 0) >= 300);
+  assert.equal(stdout, "early output\n");
+  assert.ok((recorded.durationMs ?? 0) < 600, "the ladder bounds the wait; the 400 ms voluntary exit never gates it, saw " + String(recorded.durationMs));
 });
 
 for (const exitCode of [7, 0]) {
