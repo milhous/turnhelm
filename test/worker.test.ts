@@ -909,6 +909,44 @@ finish(() => {
   assert.ok((recorded.durationMs ?? 0) < 5000);
 });
 
+test("sink throws at emission after decision", { timeout: 30_000 }, async t => {
+  // The destroy lands the moment the emission reaches the sink — after the
+  // decision, before any signal could matter — and must still own the failure.
+  const { recorded } = await runWorker(t, {
+    gate: "epipe-received",
+    output: "blocker",
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "worker result" } });
+  emit({ type: "turn.completed" });
+  setTimeout(() => process.exit(0), 10000);
+});
+`
+  });
+  assert.equal(recorded.status, "failed", "a sink failure at emission is never a completed run");
+  assert.equal(recorded.error, "output");
+  assert.equal(recorded.ownedShutdown, true);
+});
+
+test("late payload ack error fails the decided run", { timeout: 30_000 }, async t => {
+  // The write is accepted at the decision, the ladder starts, and the ack
+  // errors 500 ms later — still pre-settlement, still first-cause "output".
+  const { recorded } = await runWorker(t, {
+    output: "accepted-error",
+    tailDelayMs: 500,
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "worker result" } });
+  emit({ type: "turn.completed" });
+  setTimeout(() => process.exit(0), 10000);
+});
+`
+  });
+  assert.equal(recorded.status, "failed", "an accepted-then-errored write must not upgrade to completed");
+  assert.equal(recorded.error, "output");
+  assert.equal(recorded.ownedShutdown, true, "the ladder already started when the ack error landed");
+});
+
 test("exit zero without a completion is a worker failure", { timeout: 30_000 }, async t => {
   const { recorded, stdout } = await runWorker(t, { script: "finish(() => {});\n" });
   assert.equal(recorded.status, "failed");
