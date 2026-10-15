@@ -162,6 +162,36 @@ test("a selected routing appends one JSON line of route evidence", async () => {
   }
 });
 
+test("a usage-bearing selection carries classifierUsage into the decision and journal", async () => {
+  const root = await journalRoot();
+  try {
+    const task = "Prove the coupled transaction invariants.";
+    const routing = await routeTask(task, fixtureConfig(), {
+      env: fakeEnv,
+      request: withReply({ answers: { route: { type: "choice", choice: "balanced" } },
+        usage: { truncated: false, state_tokens_dropped: 0, input_tokens: 1204, output_tokens: 0, state_tokens: 1523 } })
+    });
+    assert.ok(routing.status === "selected");
+    assert.deepEqual(routing.decision.classifierUsage, { input_tokens: 1204, state_tokens: 1523 });
+    await appendRouteJournal(root, task, routing);
+    const [entry] = await readEntries(root);
+    assert.equal(entry.status, "selected");
+    assert.deepEqual(entry.classifierUsage, { input_tokens: 1204, state_tokens: 1523 });
+    const bare = await routeTask(task, fixtureConfig(), {
+      env: fakeEnv,
+      request: withReply({ answers: { route: { type: "choice", choice: "fast" } },
+        usage: { truncated: false, state_tokens_dropped: 0 } })
+    });
+    assert.ok(bare.status === "selected");
+    assert.equal(bare.decision.classifierUsage, undefined);
+    await appendRouteJournal(root, task + " bare", bare);
+    const [, second] = await readEntries(root);
+    assert.ok(!("classifierUsage" in second), "a no-fact selection journals no classifierUsage");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a failed routing journals attempts without selection fields", async () => {
   const root = await journalRoot();
   try {
@@ -176,7 +206,7 @@ test("a failed routing journals attempts without selection fields", async () => 
     assert.equal(entry.type, "turnhelm.route");
     assert.equal(entry.status, "failed");
     assert.ok(Array.isArray(entry.attempts) && entry.attempts.length > 0);
-    for (const key of ["backend", "profileId", "model", "effort", "confidence"]) {
+    for (const key of ["backend", "profileId", "model", "effort", "confidence", "classifierUsage"]) {
       assert.ok(!(key in entry), key + " must not appear on a failed routing");
     }
   } finally {
@@ -195,7 +225,7 @@ test("a cancelled routing journals hash-only evidence without selection fields",
     assert.equal(entry.taskBytes, Buffer.byteLength(task));
     assert.deepEqual(entry.attempts, []);
     assert.equal(entry.routingMs, 1);
-    for (const key of ["backend", "profileId", "model", "effort", "confidence", "task"]) {
+    for (const key of ["backend", "profileId", "model", "effort", "confidence", "classifierUsage", "task"]) {
       assert.ok(!(key in entry));
     }
     assert.ok(!(await readFile(join(root, ".turnhelm", "routes.jsonl"), "utf8")).includes(task));

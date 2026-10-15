@@ -118,6 +118,7 @@ import(entry);
 type Classifier = {
   choice?: string;
   mode?: "choice" | "http-error" | "invalid" | "hang";
+  usage?: Record<string, unknown>;
   onRequest?: () => void | Promise<void>;
 };
 
@@ -185,7 +186,8 @@ async function fixture(t: TestContext, classifier: Classifier = {}, options: Fix
         response.end(JSON.stringify({ answers: { route: { type: "choice", choice: "not-a-profile" } } }));
         return;
       }
-      response.end(JSON.stringify({ answers: { route: { type: "choice", choice: classifier.choice ?? "balanced" } } }));
+      response.end(JSON.stringify({ answers: { route: { type: "choice", choice: classifier.choice ?? "balanced" } },
+        ...(classifier.usage !== undefined ? { usage: classifier.usage } : {}) }));
     });
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -423,6 +425,15 @@ test("run routes once, executes one read-only worker, and emits one accurate rec
   assert.equal(receipt.wholeRunUsageScope, "unverified");
   assert.equal(JSON.stringify(receipt).includes(TASK), false, "the receipt never carries task text");
   assert.equal(records.runs, 1);
+});
+
+test("a guard-passing Laya usage reaches the receipt as classifierUsage", async t => {
+  const f = await fixture(t, { choice: "balanced",
+    usage: { truncated: false, state_tokens_dropped: 0, input_tokens: 412, output_tokens: 0, state_tokens: 620 } });
+  const result = await f.run(["run", TASK], { input: "" });
+  assert.equal(result.code, 0);
+  const receipt = parseReceipt(result.stderr);
+  assert.deepEqual(receipt.classifierUsage, { input_tokens: 412, state_tokens: 620 });
 });
 
 test("run --write selects workspace-write", async t => {

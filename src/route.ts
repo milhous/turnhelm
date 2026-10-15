@@ -1,6 +1,6 @@
 import type { ProfileId, ProjectConfig, TaskProfile } from "./config.js";
 import { classifierFailure, eligibleBackends, requestTaskChoice,
-  type AttemptTransportMode, type ChoiceRequest, type ClassifierFailure, type TaskAttempt, type TaskBackend } from "./systemone.js";
+  type AttemptTransportMode, type ChoiceRequest, type ClassifierFailure, type ClassifierUsage, type TaskAttempt, type TaskBackend } from "./systemone.js";
 import { validateTask } from "./task.js";
 
 export type TaskDecision = Readonly<{
@@ -10,6 +10,8 @@ export type TaskDecision = Readonly<{
   attempts: readonly TaskAttempt[];
   routingMs: number;
   confidence?: number;
+  // CU-1: the bounded Laya token-fact projection — evidence, never a gate.
+  classifierUsage?: ClassifierUsage;
 }>;
 
 export type RoutingResult =
@@ -61,7 +63,7 @@ export async function routeTask(
       attempts[attempts.length - 1] = { backend, transportMode, outcome, durationMs: Math.round(at - attemptStarted), failure };
     };
     try {
-      const { profileId, confidence } = await requestTaskChoice(config, task, backend, options.env, signal, options.request);
+      const { profileId, confidence, usage } = await requestTaskChoice(config, task, backend, options.env, signal, options.request);
       const finished = performance.now();
       attempts[attempts.length - 1] = { backend, transportMode, outcome: "success", durationMs: Math.round(finished - attemptStarted) };
       if (caller?.aborted) {
@@ -74,7 +76,8 @@ export async function routeTask(
       }
       const decision = deepFreeze({
         backend, profileId, profile: config.profiles[profileId], attempts, routingMs: elapsed(),
-        ...(confidence !== undefined ? { confidence } : {})
+        ...(confidence !== undefined ? { confidence } : {}),
+        ...(usage !== undefined ? { classifierUsage: usage } : {})
       });
       return { status: "selected", decision };
     } catch (error) {
