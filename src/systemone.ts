@@ -282,7 +282,28 @@ const ownObject = (value: unknown): Record<string, unknown> | undefined =>
     ? value as Record<string, unknown>
     : undefined;
 
-export type TaskChoice = Readonly<{ profileId: ProfileId; confidence?: number }>;
+// CU-1: the bounded classifier-usage projection — Laya's token facts, kept in
+// Laya's field names. Per-field in the worker's usageSnapshot idiom: evidence
+// only, so an invalid field omits itself and an empty result is absent, never
+// a gate on the choice.
+export type ClassifierUsage = Readonly<{ input_tokens?: number; state_tokens?: number }>;
+
+export type TaskChoice = Readonly<{ profileId: ProfileId; confidence?: number; usage?: ClassifierUsage }>;
+
+const USAGE_TOKEN_FIELDS: readonly (keyof ClassifierUsage)[] = ["input_tokens", "state_tokens"];
+
+const usageToken = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+
+const usageProjection = (usage: Record<string, unknown>): ClassifierUsage | undefined => {
+  const projection: Record<string, number> = {};
+  for (const field of USAGE_TOKEN_FIELDS) {
+    if (!Object.hasOwn(usage, field)) continue;
+    const count = usageToken(usage[field]);
+    if (count !== undefined) projection[field] = count;
+  }
+  return Object.keys(projection).length === 0 ? undefined : Object.freeze(projection);
+};
 
 function validateChoice(reply: unknown, backend: TaskBackend): TaskChoice {
   const envelope = ownObject(reply);
@@ -296,19 +317,25 @@ function validateChoice(reply: unknown, backend: TaskBackend): TaskChoice {
     || !(PROFILE_IDS as readonly string[]).includes(route.choice)) {
     throw new Error("classifier returned an invalid choice");
   }
+  let usage: ClassifierUsage | undefined;
   if (backend === "laya" && Object.hasOwn(envelope, "usage")) {
-    const usage = ownObject(envelope.usage);
-    if (!usage || !Object.hasOwn(usage, "truncated") || usage.truncated !== false
-      || !Object.hasOwn(usage, "state_tokens_dropped") || usage.state_tokens_dropped !== 0) {
+    const raw = ownObject(envelope.usage);
+    if (!raw || !Object.hasOwn(raw, "truncated") || raw.truncated !== false
+      || !Object.hasOwn(raw, "state_tokens_dropped") || raw.state_tokens_dropped !== 0) {
       throw new Error("classifier returned truncated or invalid Laya usage");
     }
+    usage = usageProjection(raw);
   }
   // Confidence is required by the hosted protocol and optional on a local backend;
   // anything outside [0, 1] is treated as absent rather than trusted.
   const confidence = route.confidence;
-  return typeof confidence === "number" && Number.isFinite(confidence) && confidence >= 0 && confidence <= 1
-    ? { profileId: route.choice as ProfileId, confidence }
-    : { profileId: route.choice as ProfileId };
+  return {
+    profileId: route.choice as ProfileId,
+    ...(typeof confidence === "number" && Number.isFinite(confidence) && confidence >= 0 && confidence <= 1
+      ? { confidence }
+      : {}),
+    ...(usage !== undefined ? { usage } : {})
+  };
 }
 
 // Laya is always direct; only Jev carries an explicit frozen transport policy.

@@ -212,7 +212,11 @@ const runCommand = async (root: string, write: boolean, positionalTask: string |
         requestCounts: counts
       },
       worker: { status: "not-started", durationMs: 0, progressEvents: 0, usage: "unreported" },
-      classifierUsage: "unreported",
+      // CU-1: the bounded Laya token-fact projection when one validated;
+      // the literal otherwise. Evidence, never a gate.
+      classifierUsage: routing.status === "selected" && routing.decision.classifierUsage !== undefined
+        ? routing.decision.classifierUsage
+        : "unreported",
       wholeRunUsageScope: "unverified"
     };
     let exitCode: number;

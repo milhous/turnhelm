@@ -32,6 +32,9 @@ export async function appendRouteJournal(
     entry.model = routing.decision.profile.model;
     entry.effort = routing.decision.profile.effort;
     if (routing.decision.confidence !== undefined) entry.confidence = routing.decision.confidence;
+    // CU-1: the bounded classifier-usage projection rides selection evidence
+    // exactly like confidence — never on failed or cancelled routing.
+    if (routing.decision.classifierUsage !== undefined) entry.classifierUsage = routing.decision.classifierUsage;
   }
   const journalPath = join(root, ".turnhelm", "routes.jsonl");
   try {

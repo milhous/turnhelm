@@ -235,7 +235,9 @@ not guarantee a real task meets the deadline. Receipt request counts record
 client attempts, not proof of server receipt, completed inference, or billing.
 
 Missing worker usage is `"unreported"`; `classifierUsage` is `"unreported"`
-and `wholeRunUsageScope` is `"unverified"`. Snapshots are not whole-task costs
+unless a Laya selection carries its bounded `input_tokens`/`state_tokens`
+projection — evidence that never gates an outcome; hosted Jev never projects.
+`wholeRunUsageScope` is `"unverified"`. Snapshots are not whole-task costs
 or savings. Offline doctor/help evidence does not prove runtime config-key
 semantics, model entitlement, or paid benefit. A real worker using ChatGPT login
 is not API-key billing or invoice evidence.
