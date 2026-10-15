@@ -347,7 +347,10 @@ behind that hash never crosses the diagnostic boundary.
 
 - When the Codex child reports no usage snapshot, the receipt says
   `usage: "unreported"` — never zero and never omitted.
-- `classifierUsage` is `"unreported"` and `wholeRunUsageScope` is
+- `classifierUsage` is `"unreported"` unless a Laya selection carries its
+  bounded projection of exactly `input_tokens`/`state_tokens` (Laya's field
+  names, non-negative safe integers) — evidence that never gates an outcome;
+  hosted Jev never projects. `wholeRunUsageScope` is
   `"unverified"`: receipts report worker snapshots, not a whole-run token
   total, bill or saving percentage. The recorded real runs used ChatGPT
   login; that is not evidence of API-key metered charges.
