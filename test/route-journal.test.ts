@@ -6,6 +6,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { parseProjectConfig } from "../src/config.js";
 import { requestTaskChoice } from "../src/systemone.js";
 import { routeTask } from "../src/route.js";
 import { appendRouteJournal } from "../src/journal.js";
@@ -73,6 +74,53 @@ test("a missing or out-of-range confidence is tolerated as absent", async () => 
     assert.equal(choice.confidence, undefined);
   }
 });
+
+test("a guard-passing Laya usage projects exactly its token facts", async () => {
+  const choice = await requestTaskChoice(fixtureConfig(), "Summarize the routing module.", "laya", fakeEnv,
+    new AbortController().signal,
+    withReply({ answers: { route: { type: "choice", choice: "fast" } },
+      usage: { truncated: false, state_tokens_dropped: 0, input_tokens: 1204, output_tokens: 0, state_tokens: 1523 } }));
+  assert.deepEqual(choice, { profileId: "fast", usage: { input_tokens: 1204, state_tokens: 1523 } });
+  assert.ok(Object.isFrozen(choice.usage));
+});
+
+test("invalid Laya usage token fields omit individually and never gate the choice", async () => {
+  const replies = [
+    { answers: { route: { type: "choice", choice: "fast" } },
+      usage: { truncated: false, state_tokens_dropped: 0, input_tokens: "17", state_tokens: 1523 } },
+    { answers: { route: { type: "choice", choice: "fast" } },
+      usage: { truncated: false, state_tokens_dropped: 0, input_tokens: -1, state_tokens: 1523 } },
+    { answers: { route: { type: "choice", choice: "fast" } },
+      usage: { truncated: false, state_tokens_dropped: 0, input_tokens: 2.5, state_tokens: 1523 } },
+    { answers: { route: { type: "choice", choice: "fast" } },
+      usage: { truncated: false, state_tokens_dropped: 0, input_tokens: 2 ** 53, state_tokens: 1523 } },
+    { answers: { route: { type: "choice", choice: "fast" } },
+      usage: { truncated: false, state_tokens_dropped: 0, state_tokens: 1523 } },
+    { answers: { route: { type: "choice", choice: "fast" } },
+      usage: { truncated: false, state_tokens_dropped: 0, input_tokens: "17", state_tokens: null } }
+  ];
+  const expected = [
+    { state_tokens: 1523 }, { state_tokens: 1523 }, { state_tokens: 1523 }, { state_tokens: 1523 },
+    { state_tokens: 1523 }, undefined
+  ];
+  for (let index = 0; index < replies.length; index++) {
+    const choice = await requestTaskChoice(fixtureConfig(), "Summarize the routing module.", "laya", fakeEnv,
+      new AbortController().signal, withReply(replies[index]));
+    assert.equal(choice.profileId, "fast");
+    assert.deepEqual(choice.usage, expected[index]);
+  }
+});
+
+test("a hosted Jev reply never projects usage", async () => {
+  const base = fixtureConfig();
+  const jevEnabled = parseProjectConfig({ ...base, backends: { ...base.backends, jev: { enabled: true, transport: { mode: "direct" } } } });
+  const choice = await requestTaskChoice(jevEnabled, "Summarize the routing module.", "jev", fakeEnv,
+    new AbortController().signal,
+    withReply({ answers: { route: { type: "choice", choice: "deep", confidence: 0.9 } },
+      usage: { truncated: false, state_tokens_dropped: 0, input_tokens: 1204, state_tokens: 1523 } }));
+  assert.deepEqual(choice, { profileId: "deep", confidence: 0.9 });
+});
+
 
 test("routeTask carries the classifier confidence into the decision", async () => {
   const routing = await routeTask("Prove the coupled transaction invariants", fixtureConfig(), {
