@@ -97,11 +97,19 @@ test("invalid Laya usage token fields omit individually and never gate the choic
     { answers: { route: { type: "choice", choice: "fast" } },
       usage: { truncated: false, state_tokens_dropped: 0, state_tokens: 1523 } },
     { answers: { route: { type: "choice", choice: "fast" } },
-      usage: { truncated: false, state_tokens_dropped: 0, input_tokens: "17", state_tokens: null } }
+      usage: { truncated: false, state_tokens_dropped: 0, input_tokens: "17", state_tokens: null } },
+    { answers: { route: { type: "choice", choice: "fast" } },
+      usage: { truncated: false, state_tokens_dropped: 0, input_tokens: 0, state_tokens: 0 } },
+    { answers: { route: { type: "choice", choice: "fast" } },
+      usage: { truncated: false, state_tokens_dropped: 0, input_tokens: Number.MAX_SAFE_INTEGER, state_tokens: 1523 } },
+    { answers: { route: { type: "choice", choice: "fast" } },
+      usage: Object.assign(Object.create({ input_tokens: 99, output_tokens: 5 }),
+        { truncated: false, state_tokens_dropped: 0, state_tokens: 1523 }) }
   ];
   const expected = [
     { state_tokens: 1523 }, { state_tokens: 1523 }, { state_tokens: 1523 }, { state_tokens: 1523 },
-    { state_tokens: 1523 }, undefined
+    { state_tokens: 1523 }, undefined, { input_tokens: 0, state_tokens: 0 },
+    { input_tokens: Number.MAX_SAFE_INTEGER, state_tokens: 1523 }, { state_tokens: 1523 }
   ];
   for (let index = 0; index < replies.length; index++) {
     const choice = await requestTaskChoice(fixtureConfig(), "Summarize the routing module.", "laya", fakeEnv,

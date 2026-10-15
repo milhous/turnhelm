@@ -756,6 +756,7 @@ test("SIGINT during routing keeps one cancelled attempt and launches no worker",
   const receipt = parseReceipt(result.stderr);
   assert.equal((receipt.routing as { status: string }).status, "cancelled");
   assert.equal((receipt.routing as { attempts: { outcome: string }[] }).attempts[0].outcome, "cancelled");
+  assert.equal(receipt.classifierUsage, "unreported");
   assert.equal("selection" in receipt, false);
   assert.deepEqual(receipt.worker, { status: "not-started", durationMs: 0, progressEvents: 0, usage: "unreported" });
   assert.equal(await workerRecords(f).then(records => records.runs), 0);
