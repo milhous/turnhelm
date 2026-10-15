@@ -777,6 +777,43 @@ finish(() => {
   assert.deepEqual(recorded.payload, { mode: "unstructured" });
 });
 
+// TS-1..TS-3: a clean run settles at the decoded terminal event; the owned
+// TERM→KILL ladder then bounds teardown instead of waiting for voluntary exit
+// (the sealed 2026-10-15 diagnostic observed a 28 s completion-to-exit gap).
+test("terminal-event settlement bounds the completed run's wait", { timeout: 30_000 }, async t => {
+  const { recorded, stdout, directory } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "worker result" } });
+  emit({ type: "turn.completed" });
+  setTimeout(() => process.exit(0), 10000);
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(stdout, "worker result\n");
+  assert.equal(recorded.ownedShutdown, true, "the terminal event starts the owned ladder");
+  assert.equal(recorded.signal, "SIGTERM", "the ladder TERMs the lingering leader");
+  assert.ok(recorded.code === 143 || recorded.code === 0, "the recorded code is the ladder's TERM or a raced voluntary exit");
+  assert.ok((recorded.durationMs ?? 0) < 5000, "ladder-bounded, not linger-bounded, saw " + String(recorded.durationMs));
+  await waitForExit(Number(await readFile(join(directory, "owned.pid"), "utf8")));
+});
+
+test("terminal-event settlement is race-free against voluntary exit", { timeout: 30_000 }, async t => {
+  const { recorded, stdout } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "worker result" } });
+  emit({ type: "turn.completed" });
+  setTimeout(() => process.exit(0), 50);
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(stdout, "worker result\n");
+  assert.equal(recorded.ownedShutdown, true, "the decision precedes close; the ladder still discharges");
+});
+
 test("exit zero without a completion is a worker failure", { timeout: 30_000 }, async t => {
   const { recorded, stdout } = await runWorker(t, { script: "finish(() => {});\n" });
   assert.equal(recorded.status, "failed");
