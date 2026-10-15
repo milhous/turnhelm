@@ -83,7 +83,12 @@ if (process.env.TEST_CODEX_MODE === "hang") {
     } else {
       emit({ type: "turn.completed", usage: { input_tokens: 11, output_tokens: 7 } });
     }
-    process.exit(Number(process.env.TEST_CODEX_EXIT ?? 0));
+    if (process.env.TEST_CODEX_LINGER === "1") {
+      // Terminal frames delivered; the process idles until the ladder TERMs it.
+      setInterval(() => {}, 500);
+    } else {
+      process.exit(Number(process.env.TEST_CODEX_EXIT ?? 0));
+    }
   });
 }
 `;
@@ -684,6 +689,23 @@ test("a completed run without usage reports it explicitly unreported", async t =
     "voluntary exit zero or the ladder's TERM, saw " + code + "/" + String(signal));
   assert.equal(receipt.classifierUsage, "unreported");
   assert.equal(receipt.wholeRunUsageScope, "unverified");
+});
+
+test("a completed run settles at the terminal event with an unchanged receipt shape", async t => {
+  const f = await fixture(t);
+  const result = await f.run(["run", TASK], { input: "", env: { TEST_CODEX_LINGER: "1" } });
+  assert.equal(result.code, 0);
+  assert.equal(result.stdout, AGENT_MESSAGE + "\n");
+  const receipt = parseReceipt(result.stderr);
+  const worker = receipt.worker as Record<string, unknown>;
+  // The key set is pinned exactly: terminal-event settlement adds no field (TS-7).
+  assert.deepEqual(Object.keys(worker).sort(),
+    ["code", "durationMs", "lastEventAgeMs", "ownedShutdown", "payload", "progressEvents", "signal", "status", "usage"]);
+  assert.equal(worker.status, "completed");
+  assert.equal(worker.ownedShutdown, true, "the terminal event starts the owned ladder");
+  assert.equal(worker.signal, "SIGTERM");
+  assert.ok(typeof worker.durationMs === "number" && worker.durationMs < 5000,
+    "ladder-bounded, saw " + String(worker.durationMs));
 });
 
 test("an envelope-shaped final message yields the payload line and a bounded receipt projection", async t => {
