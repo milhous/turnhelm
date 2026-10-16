@@ -31,6 +31,9 @@ if (process.argv[2] === "exec" && process.argv[3] === "--help") {
   console.log("  --ephemeral  discard session state");
   console.log("  --sandbox <MODE>");
   console.log("  -            read the task from stdin");
+  console.log("  --ignore-user-config");
+  console.log("  --ignore-rules");
+  console.log("  --output-schema <FILE>");
   process.exit(0);
 }
 console.error("fixture codex never runs tasks");

@@ -725,7 +725,7 @@ const path = require("node:path");
 const args = process.argv.slice(2);
 if (args[0] === "--version") { process.stdout.write("codex-cli 0.160.0\\n"); process.exit(0); }
 if (args[0] === "exec" && args[1] === "--help") {
-  process.stdout.write("usage: codex exec --json --ephemeral --sandbox read-only -\\n");
+  process.stdout.write("usage: codex exec --json --ephemeral --sandbox read-only - --ignore-user-config --ignore-rules --output-schema <FILE>\\n");
   process.exit(0);
 }
 let task = "";

@@ -479,7 +479,7 @@ test("a roster contract that cannot load is refused at prepare, not frozen", asy
 const fakeCodexBody = (options: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string; rebuildRoot?: boolean }> = {}): string => `
 const argv = process.argv.slice(2);
 if (argv[0] === "--version") { process.stdout.write("codex-cli 0.160.2\\n"); process.exit(0); }
-if (argv[0] === "exec" && argv[1] === "--help") { process.stdout.write("--json\\n--ephemeral\\n--sandbox <MODE>\\n-\\n"); process.exit(0); }
+if (argv[0] === "exec" && argv[1] === "--help") { process.stdout.write("--json\\n--ephemeral\\n--sandbox <MODE>\\n-\\n--ignore-user-config\\n--ignore-rules\\n--output-schema <FILE>\\n"); process.exit(0); }
 const fs = require("node:fs");
 const path = require("node:path");
 fs.writeFileSync(path.join(__dirname, "worker-env.json"), JSON.stringify({

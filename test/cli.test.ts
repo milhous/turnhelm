@@ -53,6 +53,9 @@ if (argv[0] === "exec" && argv[1] === "--help") {
   console.log("  --ephemeral  discard session state");
   console.log("  --sandbox <MODE>");
   console.log("  -            read the task from stdin");
+  console.log("  --ignore-user-config");
+  console.log("  --ignore-rules");
+  console.log("  --output-schema <FILE>");
   process.exit(0);
 }
 const record = (name, value) => fs.writeFileSync(path.join(__dirname, name), value);
@@ -398,7 +401,7 @@ test("run routes once, executes one read-only worker, and emits one accurate rec
   assert.equal(f.requests[0].method, "POST");
   assert.equal((JSON.parse(f.requests[0].body) as { state: string }).state, TASK);
   const records = await workerRecords(f);
-  assert.deepEqual(records.argv, ["exec", "--ephemeral", "--json", "--sandbox", "read-only",
+  assert.deepEqual(records.argv, ["exec", "--ephemeral", "--json", "--ignore-user-config", "--ignore-rules", "--sandbox", "read-only",
     "--config", "agents.enabled=false", "--model", "gpt-6.1-sol", "--config", 'model_reasoning_effort="medium"', "-"]);
   assert.equal(records.cwd, realpathSync(f.root));
   assert.equal(records.task, TASK);
@@ -406,7 +409,10 @@ test("run routes once, executes one read-only worker, and emits one accurate rec
     assert.equal(key in records.env, false, key + " must be stripped from the worker");
   }
   assert.equal(records.env.TURNHELM_MANAGED_CHILD, "1");
-  assert.equal(records.env.CODEX_HOME, f.codexHome);
+  assert.match(records.env.CODEX_HOME, /turnhelm-worker-[^/]+$/,
+    "the worker runs under a fresh managed home");
+  assert.notEqual(records.env.CODEX_HOME, f.codexHome,
+    "the CLI process's own CODEX_HOME never reaches the worker");
   const receipt = parseReceipt(result.stderr);
   assert.equal(receipt.type, "turnhelm.receipt");
   assert.equal(receipt.root, realpathSync(f.root));
@@ -448,7 +454,7 @@ test("run --write selects workspace-write", async t => {
   const result = await f.run(["run", "--write", TASK], { input: "" });
   assert.equal(result.code, 0);
   const records = await workerRecords(f);
-  assert.equal(records.argv[4], "workspace-write");
+  assert.ok(records.argv.includes("workspace-write"), "the write sandbox mode is selected");
 });
 
 test("max effort is selected by difficulty alone with no max flag", async t => {
@@ -456,7 +462,7 @@ test("max effort is selected by difficulty alone with no max flag", async t => {
   const result = await f.run(["run", TASK], { input: "" });
   assert.equal(result.code, 0);
   const records = await workerRecords(f);
-  assert.deepEqual(records.argv, ["exec", "--ephemeral", "--json", "--sandbox", "read-only",
+  assert.deepEqual(records.argv, ["exec", "--ephemeral", "--json", "--ignore-user-config", "--ignore-rules", "--sandbox", "read-only",
     "--config", "agents.enabled=false", "--model", "gpt-6-astra", "--config", 'model_reasoning_effort="max"', "-"]);
   const receipt = parseReceipt(result.stderr);
   assert.deepEqual(receipt.selection, { backend: "laya", profileId: "frontier_max", model: "gpt-6-astra", effort: "max" });
