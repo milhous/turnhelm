@@ -122,7 +122,11 @@ export async function runSandboxedCheck(options: {
         ZDOTDIR: join(options.cwd, ".turnhelm"),
         TMPDIR: options.cwd,
         LANG: "C",
-        TZ: "UTC"
+        TZ: "UTC",
+        // A fresh allowlist means fresh here too: without this own property
+        // Node reinserts the parent's coverage instrumentation into the
+        // sandboxed check, whose kill paths can leave a truncated file.
+        NODE_V8_COVERAGE: undefined
       };
       const child = spawn(options.sandboxExecPath,
         ["-f", profilePath, process.execPath, wrapperPath, options.entryScript],
