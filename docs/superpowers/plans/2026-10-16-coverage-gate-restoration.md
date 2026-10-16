@@ -110,8 +110,12 @@ Confirm each site against the spec's criterion (disposable = cannot contribute `
 | `test/live-acceptance.test.ts:106`, `:2785`, `:2840`, `:3684`, `:2384` | harness/entry children importing dist code | measured | Keep |
 | `test/worker.test.ts` harness spawns | harness imports `src/codex.js` | measured | Keep |
 | `test/cli.test.ts:218-227` baseEnv | CLI child (`dist/src/cli.js`) | measured | Keep |
-| `test/proxy-transport.test.ts` `runNode`, `test/direct-transport.test.ts:558` | fixture scripts, awaited completion, no kill path | disposable, ordered | Keep (valid noise files only) |
+| `test/proxy-transport.test.ts` `runNode`, `test/direct-transport.test.ts:558` | fixture scripts; 30 s execFile timeout kill paths (`killSignal: "SIGKILL"` / default SIGTERM) that fire only once the run is already failing | disposable, ordered (kill on failure only; a killed running child leaves no coverage file — spec §1 controlled check) | Keep (valid noise files only) |
 | `test/package.test.ts` | entry children, awaited | measured | Keep |
+| `test/runtime.test.ts:105` `runCli` | CLI child (`-e` importing the dist CLI), constructed env, awaited, no kill path | measured | Keep |
+| `test/executable-fixture.test.ts:51/54` native-env probe, `:76` fixture spawn | fixture/probe scripts, awaited completion | disposable, ordered | Keep (valid noise files only) |
+| `test/live-acceptance.ts:1262` `superviseCli` | entry child (harness), INT→TERM ladder | measured | Keep (accepted residual sweep race, spec §1) |
+| `test/worker.test.ts:399` harness spawn, `:2204` measured CLI child | harness imports `src/codex.js` / runs `dist/src/cli.js`; 20 s timeout guard | measured | Keep |
 
 Amend the table in the plan commit if verification changes a row; do not silently diverge.
 
