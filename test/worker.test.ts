@@ -60,7 +60,7 @@ const finish = body => {
 
 const stubbornChild = `process.on('SIGTERM', function () {}); setInterval(function () {}, 500);`;
 
-type Gate = "abort-ready" | "abort-received" | "epipe-received" | "abort-diag-late" | "abort-after-shutdown";
+type Gate = "abort-ready" | "abort-received" | "epipe-received" | "abort-then-epipe" | "abort-diag-late" | "abort-after-shutdown";
 
 type OutputMode = "stdout" | "blocker" | "abort-in-write" | "abort-late-error" | "throw" | "accepted-delay" | "accepted-error" | "accepted-stall";
 
@@ -356,6 +356,12 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
       await gateSleep(400);
       if (!gateController.signal.aborted) controller.abort();` : ""}
       ${scenario.gate === "epipe-received" ? "while (received < 1 && !gateController.signal.aborted) await gateSleep(10); if (!gateController.signal.aborted) output.destroy(new Error(\"EPIPE\"));" : ""}
+      ${scenario.gate === "abort-then-epipe" ? `
+      while (received < 1 && !gateController.signal.aborted) await gateSleep(10);
+      if (!gateController.signal.aborted) controller.abort();
+      // The sink breaks after the abort but before the trapped group closes.
+      await gateSleep(50);
+      if (!gateController.signal.aborted) output.destroy(new Error("EPIPE"));` : ""}
       ${scenario.gate && scenario.gate !== "abort-after-shutdown" ? "})()]);" : ""}
       const result = await running;
       ${scenario.trackKills ? "settledFlag = true;" : ""}
@@ -1241,6 +1247,31 @@ test("a pre-start abort carries zero decoded events and no age", { timeout: 30_0
   assert.equal(recorded.status, "cancelled");
   assert.equal(recorded.progressEvents, 0);
   assert.equal(recorded.lastEventAgeMs, undefined);
+});
+
+test("a sink error after the abort cannot relabel the cancelled run", { timeout: 30_000 }, async t => {
+  // The group traps SIGTERM, so the run is still unsettled when the output
+  // sink breaks 50 ms after the abort — inside the post-abort window, before
+  // the KILL closes the child. The operator's cancellation (spec TS-6)
+  // outranks that late output failure; the receipt keeps status cancelled.
+  const { recorded, directory } = await runWorker(t, {
+    gate: "abort-then-epipe",
+    output: "blocker",
+    bootstrap: stubbornChild,
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "held" } });
+  emit({ type: "turn.completed" });
+  setInterval(() => {}, 1000);
+});
+`
+  });
+  assert.equal(recorded.status, "cancelled", "the abort outranks a sink failure inside the post-abort window");
+  assert.equal(recorded.error, undefined);
+  assert.equal(recorded.failureClass, undefined);
+  assert.equal(recorded.ownedShutdown, true);
+  assert.equal(recorded.signal, "SIGKILL");
+  await waitForExit(Number(await readFile(join(directory, "owned.pid"), "utf8")));
 });
 
 test("a cancelled post-decision run keeps its delivered answer and cancelled status", { timeout: 30_000 }, async t => {

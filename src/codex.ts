@@ -333,9 +333,10 @@ export function executeWorker(
     // A parent sink failure keeps first-cause rights until settlement: an
     // accepted write holds settlement open, so its failure is a pre-settlement
     // transport fact — not teardown noise — even after the decision's ladder
-    // made recordFailure a no-op.
+    // made recordFailure a no-op. An already-delivered operator abort outranks
+    // a failure registered after it (spec TS-6).
     const recordOutputFailure = (): void => {
-      if (failure !== undefined || finished) return;
+      if (failure !== undefined || finished || cancelled) return;
       failure = "output";
       beginShutdown();
     };
@@ -366,8 +367,9 @@ export function executeWorker(
         return;
       }
       recordOutputFailure();
-      // A prior first failure or an in-progress shutdown makes the recorder a
-      // no-op, but the discharge above still has to re-drive settlement.
+      // A prior first failure, a settled run, or a delivered abort makes the
+      // recorder a no-op, but the discharge above still has to re-drive
+      // settlement.
       settle();
     };
 
