@@ -118,6 +118,7 @@ export function executeWorker(
     let finalEmitted = false;
     let payloadProjection: WorkerResult["payload"];
     let completionSeen = false;
+    let decided = false;
     let progressEvents = 0;
     let lastEventAt: number | undefined;
     let usage: WorkerUsage | undefined;
@@ -171,9 +172,12 @@ export function executeWorker(
     };
 
     // The shared completed-run predicate: settlement emission and the final
-    // status decision compute eligibility once, from the same signals.
+    // status decision compute eligibility once, from the same signals. The
+    // process exit code is an observation, never a completion signal: after a
+    // decoded terminal event the code only records how the group ended
+    // (voluntarily, or under the owned ladder).
     const completedEligible = (): boolean =>
-      failure === undefined && !cancelled && inputDelivered && childCode === 0 && completionSeen && !stickyFailed;
+      failure === undefined && !cancelled && inputDelivered && completionSeen && !stickyFailed;
 
     const finish = (): void => {
       if (finished) return;
@@ -217,6 +221,37 @@ export function executeWorker(
       resolve(result);
     };
 
+    // The once-only emission phase, shared by the terminal-event decision and
+    // settlement: only a completed-eligible run with a retained final agent
+    // message writes to stdout. PE-1: classification precedes the sink call so
+    // the projection is captured before delivery; the sink receives the
+    // classifier's text and keeps its single unconditional "\n" append.
+    const emitFinalMessage = (): boolean => {
+      if (finalEmitted || finalMessage === undefined || !completedEligible()) return false;
+      finalEmitted = true; // Set before the sink call: ack re-entry must never re-emit.
+      const classification = classifyPayload(finalMessage);
+      payloadProjection = classification.trailerBytes === undefined
+        ? { mode: classification.mode }
+        : { mode: classification.mode, trailerBytes: classification.trailerBytes };
+      emitMessage(classification.emittedText);
+      return true;
+    };
+
+    // TS-1..TS-3: a decoded terminal event decides a clean run. The verdict is
+    // emitted before any signal — while the ladder has not started, a sink
+    // failure keeps its first-cause attribution — and the owned ladder then
+    // bounds the exit wait that would otherwise be voluntary and unbounded.
+    // The stdin end-callback is the second trigger: a terminal frame can be
+    // decoded before inputDelivered lands, and without the re-check such a run
+    // would never decide and the unbounded exit-wait would return.
+    const tryDecide = (): void => {
+      if (decided || shutdownStarted || finished) return;
+      if (!completedEligible()) return;
+      decided = true;
+      emitFinalMessage();
+      beginShutdown();
+    };
+
     // Settling requires the child close, the bounded group-shutdown obligation,
     // and an empty message pipeline. An accepted write that has neither
     // completed nor errored holds settlement open — an accepted write is not a
@@ -224,20 +259,8 @@ export function executeWorker(
     const settle = (): void => {
       if (!closed || finished || !shutdownDischarged || cancelDrainWait !== undefined) return;
       if ((pendingWrites.message !== 0 || pendingWrites.diag !== 0) && !cancelled) return;
-      // Once-only emission phase: only a completed-eligible run with a retained
-      // final agent message writes to stdout, before finishing.
-      if (!finalEmitted && finalMessage !== undefined && completedEligible()) {
-        finalEmitted = true; // Set before the sink call: ack re-entry must never re-emit.
-        // PE-1: classification precedes the sink call so the projection is
-        // captured before delivery; the sink receives the classifier's text and
-        // keeps its single unconditional "\n" append.
-        const classification = classifyPayload(finalMessage);
-        payloadProjection = classification.trailerBytes === undefined
-          ? { mode: classification.mode }
-          : { mode: classification.mode, trailerBytes: classification.trailerBytes };
-        emitMessage(classification.emittedText);
-        return; // The accepted write must flush (or fail) before the run finishes.
-      }
+      // The never-decided catch-all emission; a decided run already emitted.
+      if (emitFinalMessage()) return; // The accepted write must flush (or fail) before the run finishes.
       finish();
     };
 
@@ -298,10 +321,23 @@ export function executeWorker(
     };
 
     // The first transport cause wins; consequences of our own shutdown are not
-    // causes, and nothing after settlement changes the reported outcome.
+    // causes, and nothing after settlement changes the reported outcome. A
+    // decided run excludes native post-terminal noise as well: a frame after
+    // the terminal event cannot rewrite a delivered verdict.
     const recordFailure = (cause: "spawn" | "stdin" | "protocol" | "output"): void => {
-      if (failure !== undefined || shutdownStarted || finished) return;
+      if (failure !== undefined || decided || shutdownStarted || finished) return;
       failure = cause;
+      beginShutdown();
+    };
+
+    // A parent sink failure keeps first-cause rights until settlement: an
+    // accepted write holds settlement open, so its failure is a pre-settlement
+    // transport fact — not teardown noise — even after the decision's ladder
+    // made recordFailure a no-op. An already-delivered operator abort outranks
+    // a failure registered after it (spec TS-6).
+    const recordOutputFailure = (): void => {
+      if (failure !== undefined || finished || cancelled) return;
+      failure = "output";
       beginShutdown();
     };
 
@@ -330,9 +366,10 @@ export function executeWorker(
         if (pendingWrites.message === 0 && pendingWrites.diag === 0) detachSinkListeners();
         return;
       }
-      recordFailure("output");
-      // A prior first failure or an in-progress shutdown makes recordFailure a
-      // no-op, but the discharge above still has to re-drive settlement.
+      recordOutputFailure();
+      // A prior first failure, a settled run, or a delivered abort makes the
+      // recorder a no-op, but the discharge above still has to re-drive
+      // settlement.
       settle();
     };
 
@@ -340,7 +377,7 @@ export function executeWorker(
     const ackWrite = (kind: "message" | "diag", error?: Error | null): void => {
       pendingWrites[kind] = Math.max(0, pendingWrites[kind] - 1);
       if (error !== null && error !== undefined) {
-        recordFailure("output");
+        recordOutputFailure();
         // The failing sink emits its 'error' right after this callback
         // (nextTick); defer the detach past that emission so it stays owned,
         // then release the sinks — no late ack may leave a permanent listener.
@@ -372,7 +409,7 @@ export function executeWorker(
         output.removeListener("error", onFailed);
         output.removeListener("close", onFailed);
         cancelDrainWait = undefined;
-        if (failed) { recordFailure("output"); return; }
+        if (failed) { recordOutputFailure(); return; }
         stdout.resume();
         if (!shutdownStarted && !finished) processFrames();
       };
@@ -389,7 +426,7 @@ export function executeWorker(
         accepted = output.write(text + "\n", onMessageAck);
       } catch {
         pendingWrites.message = Math.max(0, pendingWrites.message - 1);
-        recordFailure("output");
+        recordOutputFailure();
         return;
       }
       if (accepted) return;
@@ -412,7 +449,7 @@ export function executeWorker(
         diagnostics.removeListener("error", onFailed);
         diagnostics.removeListener("close", onFailed);
         cancelDiagWait = undefined;
-        if (failed) { recordFailure("output"); return; }
+        if (failed) { recordOutputFailure(); return; }
         const line = diagLine;
         diagLine = undefined;
         if (line !== undefined && !shutdownStarted && !finished) writeDiagLine(line);
@@ -430,7 +467,7 @@ export function executeWorker(
         accepted = diagnostics.write(line, onDiagAck);
       } catch {
         pendingWrites.diag = Math.max(0, pendingWrites.diag - 1);
-        recordFailure("output");
+        recordOutputFailure();
         return;
       }
       if (accepted) return;
@@ -475,8 +512,11 @@ export function executeWorker(
           completionSeen = true;
           // Latest valid snapshot replaces; absent or empty usage keeps the earlier one.
           if (event.usage) usage = event.usage;
+          tryDecide();
           return;
         case "failed":
+          // Post-terminal noise cannot rewrite a decided verdict.
+          if (decided) return;
           // Irreversible: a later completion cannot restore success. The first
           // failure event owns the attribution and the single diagnostic line;
           // the deadline, not an immediate shutdown, now bounds the
@@ -537,7 +577,7 @@ export function executeWorker(
       recordFailure("spawn");
     } else {
       stdin.on("error", () => { recordFailure("stdin"); });
-      stdin.end(task, (error?: Error | null) => { if (!error) inputDelivered = true; });
+      stdin.end(task, (error?: Error | null) => { if (!error) { inputDelivered = true; tryDecide(); } });
       stderr.on("error", () => { /* Drained and discarded; never stalls stdout. */ });
       stderr.resume();
       stdout.on("data", (chunk: Buffer) => {

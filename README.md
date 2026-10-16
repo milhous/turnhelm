@@ -329,7 +329,12 @@ than opened.
 The receipt's `worker` object always carries the status, duration, usage,
 and, once a worker actually executed, the exit code and `ownedShutdown` —
 a required boolean action record meaning a parent-initiated stop ladder
-ran, never a causation claim; it is false on every natural path. A run
+ran, never a causation claim. A clean run settles at the decoded
+`turn.completed` event: the payload write is accepted first, then the
+owned ladder bounds teardown (SIGTERM at once, SIGKILL after one second),
+so `ownedShutdown` is true on completed runs too, and the exit code after
+a completed turn is an observation of how the group ended — never a
+completion signal. A run
 that never started a worker reports exactly
 `{ status: "not-started", durationMs: 0, progressEvents: 0, usage: "unreported" }`
 with no exit-code or action fields. A failed worker also carries the frozen

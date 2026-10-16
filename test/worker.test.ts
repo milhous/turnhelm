@@ -60,9 +60,9 @@ const finish = body => {
 
 const stubbornChild = `process.on('SIGTERM', function () {}); setInterval(function () {}, 500);`;
 
-type Gate = "abort-ready" | "abort-received" | "epipe-received" | "abort-diag-late" | "abort-after-shutdown";
+type Gate = "abort-ready" | "abort-received" | "epipe-received" | "abort-then-epipe" | "abort-diag-late" | "abort-after-shutdown";
 
-type OutputMode = "stdout" | "blocker" | "abort-in-write" | "abort-late-error" | "accepted-delay" | "accepted-error" | "accepted-stall";
+type OutputMode = "stdout" | "blocker" | "abort-in-write" | "abort-late-error" | "throw" | "accepted-delay" | "accepted-error" | "accepted-stall";
 
 type DiagMode = "stall" | "error" | "delay" | "delay-error" | "slow";
 
@@ -235,7 +235,9 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
           ? "controller.abort(); // Deliberately never calls callback and never drains."
           : scenario.output === "abort-late-error"
             ? "storedCb = callback; controller.abort(); // Deliberately never acks this write."
-            : scenario.output === "accepted-delay"
+            : scenario.output === "throw"
+              ? 'throw new Error("PRIVATE_SYNC_EPIPE");'
+              : scenario.output === "accepted-delay"
             ? `setTimeout(() => { pending -= 1; outputAcked = true; callback(); }, ${scenario.tailDelayMs ?? 500});`
             : scenario.output === "accepted-error"
               ? `setTimeout(() => { pending -= 1; callback(new Error("PRIVATE_LATE_EPIPE")); }, ${scenario.tailDelayMs ?? 500});`
@@ -354,6 +356,12 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
       await gateSleep(400);
       if (!gateController.signal.aborted) controller.abort();` : ""}
       ${scenario.gate === "epipe-received" ? "while (received < 1 && !gateController.signal.aborted) await gateSleep(10); if (!gateController.signal.aborted) output.destroy(new Error(\"EPIPE\"));" : ""}
+      ${scenario.gate === "abort-then-epipe" ? `
+      while (received < 1 && !gateController.signal.aborted) await gateSleep(10);
+      if (!gateController.signal.aborted) controller.abort();
+      // The sink breaks after the abort but before the trapped group closes.
+      await gateSleep(50);
+      if (!gateController.signal.aborted) output.destroy(new Error("EPIPE"));` : ""}
       ${scenario.gate && scenario.gate !== "abort-after-shutdown" ? "})()]);" : ""}
       const result = await running;
       ${scenario.trackKills ? "settledFlag = true;" : ""}
@@ -577,8 +585,10 @@ finish(() => {
 `
   });
   assert.equal(typeof recorded.durationMs, "number");
-  assert.deepEqual({ ...recorded, durationMs: 0, lastEventAgeMs: 0 }, {
-    code: 0,
+  // The decision starts the owned ladder, so the code is the ladder's TERM or
+  // a raced voluntary exit-zero — both are honest observations of the group end.
+  const { code, signal, ...normalized } = { ...recorded, durationMs: 0, lastEventAgeMs: 0 };
+  assert.deepEqual(normalized, {
     status: "completed",
     durationMs: 0,
     progressEvents: 2,
@@ -594,9 +604,11 @@ finish(() => {
     diagMaxLength: 0,
     diagFinalLength: 0,
     tailWrites: 0,
-    ownedShutdown: false,
+    ownedShutdown: true,
     payload: { mode: "unstructured" }
   });
+  assert.ok(code === 0 || (code === 143 && signal === "SIGTERM"),
+    "voluntary exit zero or the ladder's TERM, saw " + code + "/" + String(signal));
   assert.equal(await fakeFile(directory, "argv.json"), JSON.stringify(buildWorkerArgs(decision("balanced"), true)));
   assert.equal(await fakeFile(directory, "cwd.txt"), await realpath(join(directory, "root")));
   assert.equal(await fakeFile(directory, "task.txt"), task);
@@ -714,7 +726,7 @@ finish(() => {
   assert.deepEqual(recorded.payload, { mode: "strict" });
 });
 
-test("a message decoded after completion becomes the final message", { timeout: 30_000 }, async t => {
+test("a message decoded after the terminal event is dropped; the pre-terminal message is final", { timeout: 30_000 }, async t => {
   const { recorded, stdout } = await runWorker(t, {
     script: `
 finish(() => {
@@ -725,7 +737,7 @@ finish(() => {
 `
   });
   assert.equal(recorded.status, "completed");
-  assert.equal(stdout, "after\n");
+  assert.equal(stdout, "before\n");
 });
 
 test("a repeated completion changes nothing", { timeout: 30_000 }, async t => {
@@ -742,7 +754,7 @@ finish(() => {
   assert.equal(stdout, "settled answer\n");
 });
 
-test("a failed frame after a completion fails the run with no emission", { timeout: 30_000 }, async t => {
+test("a failed frame after the terminal event is dropped and the run completes", { timeout: 30_000 }, async t => {
   const { recorded, stdout } = await runWorker(t, {
     script: `
 finish(() => {
@@ -752,9 +764,9 @@ finish(() => {
 });
 `
   });
-  assert.equal(recorded.status, "failed");
-  assert.equal(recorded.error, "worker");
-  assert.equal(stdout, "");
+  assert.equal(recorded.status, "completed", "post-terminal native noise cannot rewrite a decided verdict");
+  assert.equal(recorded.error, undefined);
+  assert.equal(stdout, "answer\n");
 });
 
 test("a maximal agent-message frame passes through unclipped", { timeout: 30_000 }, async t => {
@@ -775,6 +787,220 @@ finish(() => {
   // Classification is bounded native parsing: the maximal frame classifies
   // without a second write or clipping.
   assert.deepEqual(recorded.payload, { mode: "unstructured" });
+});
+
+// TS-1..TS-3: a clean run settles at the decoded terminal event; the owned
+// TERM→KILL ladder then bounds teardown instead of waiting for voluntary exit
+// (the sealed 2026-10-15 diagnostic observed a 28 s completion-to-exit gap).
+test("terminal-event settlement bounds the completed run's wait", { timeout: 30_000 }, async t => {
+  const { recorded, stdout, directory } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "worker result" } });
+  emit({ type: "turn.completed" });
+  setTimeout(() => process.exit(0), 10000);
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(stdout, "worker result\n");
+  assert.equal(recorded.ownedShutdown, true, "the terminal event starts the owned ladder");
+  assert.equal(recorded.signal, "SIGTERM", "the ladder TERMs the lingering leader");
+  assert.ok(recorded.code === 143 || recorded.code === 0, "the recorded code is the ladder's TERM or a raced voluntary exit");
+  assert.ok((recorded.durationMs ?? 0) < 5000, "ladder-bounded, not linger-bounded, saw " + String(recorded.durationMs));
+  await waitForExit(Number(await readFile(join(directory, "owned.pid"), "utf8")));
+});
+
+test("terminal-event settlement is race-free against voluntary exit", { timeout: 30_000 }, async t => {
+  const { recorded, stdout } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "worker result" } });
+  emit({ type: "turn.completed" });
+  setTimeout(() => process.exit(0), 50);
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(stdout, "worker result\n");
+  assert.equal(recorded.ownedShutdown, true, "the decision precedes close; the ladder still discharges");
+});
+
+test("terminal frame before stdin ack still decides", { timeout: 30_000 }, async t => {
+  // A task larger than the pipe buffer pins the ordering deterministically:
+  // the parent's stdin end-callback cannot fire until the fake drains, and the
+  // fake emits the terminal frame before draining — no sleep race.
+  const { recorded } = await runWorker(t, {
+    taskRepeat: 200_000,
+    script: `
+emit({ type: "turn.completed" });
+process.stdin.resume();
+setTimeout(() => process.exit(0), 8000);
+`
+  });
+  assert.equal(recorded.status, "completed", "the stdin-ack trigger decides the run the frame alone could not");
+  assert.equal(recorded.ownedShutdown, true);
+  assert.ok((recorded.durationMs ?? 0) < 5000, "ladder-bounded, saw " + String(recorded.durationMs));
+});
+
+test("TERM-ignoring group escalates and still completes", { timeout: 30_000 }, async t => {
+  const { recorded, directory } = await runWorker(t, {
+    bootstrap: stubbornChild,
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "worker result" } });
+  emit({ type: "turn.completed" });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(recorded.ownedShutdown, true);
+  assert.equal(recorded.signal, "SIGKILL", "a TERM-trapping group forces the second rung");
+  assert.ok((recorded.durationMs ?? 0) >= 1000, "the KILL lands at the TERM grace, saw " + String(recorded.durationMs));
+  assert.ok((recorded.durationMs ?? 0) < 5000);
+  await waitForExit(Number(await readFile(join(directory, "owned.pid"), "utf8")));
+});
+
+test("post-terminal frames are dropped and the terminal snapshot is final", { timeout: 30_000 }, async t => {
+  // The SIGTERM trap keeps the fake alive past the ladder's first rung so the
+  // post-terminal frames really reach the parent's dropped-frame path.
+  const { recorded, stdout } = await runWorker(t, {
+    bootstrap: stubbornChild,
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "message A" } });
+  emit({ type: "turn.completed", usage: { input_tokens: 11, output_tokens: 7 } });
+  setTimeout(() => {
+    emit({ type: "item.completed", item: { type: "agent_message", text: "message B" } });
+    emit({ type: "turn.completed", usage: { input_tokens: 99, output_tokens: 98 } });
+    process.stdout.write("{malformed\\n");
+  }, 100);
+});
+`
+  });
+  assert.equal(recorded.status, "completed", "post-terminal noise cannot rewrite the verdict");
+  assert.equal(stdout, "message A\n", "the payload derives from message A only");
+  assert.deepEqual(recorded.usage, { input_tokens: 11, output_tokens: 7 }, "usage freezes at the terminal frame");
+  assert.equal(recorded.failureClass, undefined);
+  assert.equal(recorded.progressEvents, 2, "only pre-terminal frames count");
+});
+
+test("zero-message terminal event completes without emission", { timeout: 30_000 }, async t => {
+  const { recorded, stdout, directory } = await runWorker(t, {
+    script: `
+finish(() => {
+  emit({ type: "turn.completed" });
+  setTimeout(() => process.exit(0), 6000);
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(stdout, "");
+  assert.equal(recorded.ownedShutdown, true);
+  assert.ok((recorded.durationMs ?? 0) < 5000, "ladder-bounded, saw " + String(recorded.durationMs));
+  await waitForExit(Number(await readFile(join(directory, "owned.pid"), "utf8")));
+});
+
+test("blocked sink at emission still flushes exactly once", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    output: "accepted-delay",
+    tailDelayMs: 500,
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "worker result" } });
+  emit({ type: "turn.completed" });
+  setTimeout(() => process.exit(0), 8000);
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(recorded.outputAcked, true, "settlement waits for the drain");
+  assert.equal(recorded.received, 1, "exactly one emission");
+  assert.equal(recorded.emitted, "worker result\n");
+  assert.ok((recorded.durationMs ?? 0) >= 400, "the run settled only after the drain, saw " + String(recorded.durationMs));
+  assert.ok((recorded.durationMs ?? 0) < 5000);
+});
+
+test("sink write throws synchronously at emission after decision", { timeout: 30_000 }, async t => {
+  // The sink's write() throws before any callback could exist: the emitMessage
+  // catch must own it as an output failure — after the decision, before any
+  // signal — and never let native error text reach a receipt or stderr.
+  const { recorded, stderr } = await runWorker(t, {
+    output: "throw",
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "worker result" } });
+  emit({ type: "turn.completed" });
+  setTimeout(() => process.exit(0), 10000);
+});
+`
+  });
+  assert.equal(recorded.status, "failed", "a sink failure at emission is never a completed run");
+  assert.equal(recorded.error, "output");
+  assert.equal(recorded.ownedShutdown, true);
+  forbid(JSON.stringify(recorded) + stderr, "PRIVATE_SYNC_EPIPE");
+});
+
+test("sink destroyed at emission after decision fails as output", { timeout: 30_000 }, async t => {
+  // The destroy lands the moment the emission reaches the sink — after the
+  // decision, before any signal could matter — and must still own the failure.
+  const { recorded } = await runWorker(t, {
+    gate: "epipe-received",
+    output: "blocker",
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "worker result" } });
+  emit({ type: "turn.completed" });
+  setTimeout(() => process.exit(0), 10000);
+});
+`
+  });
+  assert.equal(recorded.status, "failed", "a sink failure at emission is never a completed run");
+  assert.equal(recorded.error, "output");
+  assert.equal(recorded.ownedShutdown, true);
+});
+
+test("late payload ack error fails the decided run", { timeout: 30_000 }, async t => {
+  // The write is accepted at the decision, the ladder starts, and the ack
+  // errors 500 ms later — still pre-settlement, still first-cause "output".
+  const { recorded } = await runWorker(t, {
+    output: "accepted-error",
+    tailDelayMs: 500,
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "worker result" } });
+  emit({ type: "turn.completed" });
+  setTimeout(() => process.exit(0), 10000);
+});
+`
+  });
+  assert.equal(recorded.status, "failed", "an accepted-then-errored write must not upgrade to completed");
+  assert.equal(recorded.error, "output");
+  assert.equal(recorded.ownedShutdown, true, "the ladder already started when the ack error landed");
+});
+
+test("operator abort in the post-decision window cancels", { timeout: 30_000 }, async t => {
+  // The abort is raised inside the sink's write of the emission — strictly
+  // after the decision and before settlement, with no timer or file poll to
+  // race — and the operator still outranks the delivered verdict. The child
+  // never exits voluntarily, so the ladder's SIGTERM is the only end.
+  const { recorded, directory } = await runWorker(t, {
+    output: "abort-in-write",
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "verdict" } });
+  emit({ type: "turn.completed" });
+  setInterval(() => {}, 1000);
+});
+`
+  });
+  assert.equal(recorded.status, "cancelled", "operator intent outranks the delivered verdict");
+  assert.equal(recorded.emitted, "verdict\n", "the flushed verdict stays honest in the sink");
+  assert.equal(recorded.ownedShutdown, true);
+  // The abort joins the decision's own ladder; SIGTERM ends the non-trapping
+  // group — the exit code stays an observation (spec TS-8), never a status input.
+  assert.equal(recorded.signal, "SIGTERM");
+  await waitForExit(Number(await readFile(join(directory, "owned.pid"), "utf8")));
 });
 
 test("exit zero without a completion is a worker failure", { timeout: 30_000 }, async t => {
@@ -971,7 +1197,7 @@ finish(() => {
 `
   });
   assert.equal(recorded.status, "completed");
-  assert.equal(recorded.progressEvents, 4, "message, completed, unknown, and diagnostic kinds all count");
+  assert.equal(recorded.progressEvents, 2, "only the message and terminal frames count; post-terminal kinds are dropped");
   assert.equal(typeof recorded.lastEventAgeMs, "number");
 });
 
@@ -998,8 +1224,8 @@ finish(() => {
     "the blocked final write holds settlement past the last decode: saw " + recorded.lastEventAgeMs);
 });
 
-test("a malformed frame stops counting but the decoded count ships on the failed result", { timeout: 30_000 }, async t => {
-  const { recorded } = await runWorker(t, {
+test("a malformed frame after the terminal event is dropped and the run completes", { timeout: 30_000 }, async t => {
+  const { recorded, stdout } = await runWorker(t, {
     script: `
 finish(() => {
   emit({ type: "item.completed", item: { type: "agent_message", text: "counted" } });
@@ -1010,10 +1236,10 @@ finish(() => {
 });
 `
   });
-  assert.equal(recorded.status, "failed");
-  assert.equal(recorded.error, "protocol");
-  assert.equal(recorded.progressEvents, 2, "malformed frames do not count");
-  assert.equal(typeof recorded.lastEventAgeMs, "number");
+  assert.equal(recorded.status, "completed", "post-terminal garbage is native noise, not a protocol failure");
+  assert.equal(recorded.error, undefined);
+  assert.equal(recorded.progressEvents, 2, "only the pre-terminal frames count");
+  assert.equal(stdout, "counted\n");
 });
 
 test("a pre-start abort carries zero decoded events and no age", { timeout: 30_000 }, async t => {
@@ -1023,22 +1249,53 @@ test("a pre-start abort carries zero decoded events and no age", { timeout: 30_0
   assert.equal(recorded.lastEventAgeMs, undefined);
 });
 
-test("a cancelled mid-stream run keeps its decoded events and age", { timeout: 30_000 }, async t => {
-  const { recorded, stdout } = await runWorker(t, {
-    gate: "abort-ready",
+test("a sink error after the abort cannot relabel the cancelled run", { timeout: 30_000 }, async t => {
+  // The group traps SIGTERM, so the run is still unsettled when the output
+  // sink breaks 50 ms after the abort — inside the post-abort window, before
+  // the KILL closes the child. The operator's cancellation (spec TS-6)
+  // outranks that late output failure; the receipt keeps status cancelled.
+  const { recorded, directory } = await runWorker(t, {
+    gate: "abort-then-epipe",
+    output: "blocker",
+    bootstrap: stubbornChild,
     script: `
 finish(() => {
   emit({ type: "item.completed", item: { type: "agent_message", text: "held" } });
   emit({ type: "turn.completed" });
-  ready();
   setInterval(() => {}, 1000);
 });
 `
   });
-  assert.equal(recorded.status, "cancelled");
+  assert.equal(recorded.status, "cancelled", "the abort outranks a sink failure inside the post-abort window");
+  assert.equal(recorded.error, undefined);
+  assert.equal(recorded.failureClass, undefined);
+  assert.equal(recorded.ownedShutdown, true);
+  assert.equal(recorded.signal, "SIGKILL");
+  await waitForExit(Number(await readFile(join(directory, "owned.pid"), "utf8")));
+});
+
+test("a cancelled post-decision run keeps its delivered answer and cancelled status", { timeout: 30_000 }, async t => {
+  // The abort fires only once the sink has received the emission — a
+  // parent-observed event, so the decision strictly precedes the cancellation
+  // with no boot-time race. The write lands in the sink; the cancellation then
+  // supersedes its pending drain, exactly as it interrupts any other stall.
+  const { recorded } = await runWorker(t, {
+    gate: "abort-received",
+    output: "accepted-delay",
+    tailDelayMs: 300,
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "held" } });
+  emit({ type: "turn.completed" });
+  setInterval(() => {}, 1000);
+});
+`
+  });
+  assert.equal(recorded.status, "cancelled", "operator intent outranks the delivered verdict");
   assert.ok((recorded.progressEvents ?? 0) >= 1, "the decoded message before cancellation still counts, saw " + recorded.progressEvents);
   assert.equal(typeof recorded.lastEventAgeMs, "number");
-  assert.equal(stdout, "", "a run cancelled before settlement initiates no emission");
+  assert.equal(recorded.emitted, "held\n", "the delivered verdict stays in the sink; the exit code carries the stop");
+  assert.equal(recorded.outputAcked, false, "the cancellation interrupted the pending drain instead of waiting for it");
 });
 
 test("the failed dispatch writes exactly one class-only diagnostic line", { timeout: 30_000 }, async t => {
@@ -1205,7 +1462,8 @@ finish(() => {
   const { recorded, stderr } = outcome.value;
   assert.equal(recorded.status, "failed");
   assert.equal(recorded.error, "output");
-  assert.equal(recorded.code, 0);
+  // The ladder TERMs the lingering fake; its own exit zero may race the signal.
+  assert.ok(recorded.code === 0 || recorded.code === 143, "attribution is the pin, not the race, saw " + recorded.code);
   // Emission may have initiated, but a failed run attaches no payload projection.
   assert.equal(recorded.payload, undefined);
   forbid(JSON.stringify(recorded) + stderr, "PRIVATE_LATE_EPIPE");
@@ -1250,13 +1508,14 @@ finish(() => {
   const { recorded, stderr } = outcome.value;
   assert.equal(recorded.status, "failed");
   assert.equal(recorded.error, "output");
-  assert.equal(recorded.code, 0);
+  // The ladder TERMs the lingering fake; its own exit zero may race the signal.
+  assert.ok(recorded.code === 0 || recorded.code === 143, "attribution is the pin, not the race, saw " + recorded.code);
   // Emission may have initiated, but a failed run attaches no payload projection.
   assert.equal(recorded.payload, undefined);
   forbid(JSON.stringify(recorded) + stderr, "PRIVATE_LATE_EPIPE");
 });
 
-test("repeated completions keep the latest usage snapshot, never a sum", { timeout: 30_000 }, async t => {
+test("usage freezes at the terminal frame, never a sum or a replacement", { timeout: 30_000 }, async t => {
   const { recorded } = await runWorker(t, {
     script: `
 finish(() => {
@@ -1266,10 +1525,10 @@ finish(() => {
 `
   });
   assert.equal(recorded.status, "completed");
-  assert.deepEqual(recorded.usage, { input_tokens: 20, output_tokens: 8 });
+  assert.deepEqual(recorded.usage, { input_tokens: 10, output_tokens: 5 });
 });
 
-test("input-only and output-only snapshots are retained without mixing fields", { timeout: 30_000 }, async t => {
+test("the first usage snapshot is final; later completions cannot mix fields", { timeout: 30_000 }, async t => {
   const { recorded } = await runWorker(t, {
     script: `
 finish(() => {
@@ -1279,7 +1538,7 @@ finish(() => {
 `
   });
   assert.equal(recorded.status, "completed");
-  assert.deepEqual(recorded.usage, { output_tokens: 9 });
+  assert.deepEqual(recorded.usage, { input_tokens: 7 });
 });
 
 test("valid usage is retained when a later completion has only invalid counters", { timeout: 30_000 }, async t => {
@@ -1403,7 +1662,7 @@ finish(() => {
   assert.equal(await fakeFile(directory, "runs"), "1");
 });
 
-test("nonzero exit is a worker failure even with a completion", { timeout: 30_000 }, async t => {
+test("nonzero exit after the terminal event is an observation, not a failure", { timeout: 30_000 }, async t => {
   const { recorded, stdout } = await runWorker(t, {
     script: `
 finish(() => {
@@ -1412,14 +1671,15 @@ finish(() => {
 });
 `
   });
-  assert.equal(recorded.status, "failed");
-  assert.equal(recorded.error, "worker");
-  assert.equal(recorded.code, 3);
+  assert.equal(recorded.status, "completed", "a decided run stays completed regardless of the observed exit code");
+  assert.deepEqual(recorded.usage, { input_tokens: 1 });
+  // The voluntary nonzero exit races the ladder's TERM; both end a decided run.
+  assert.ok(recorded.code === 3 || recorded.code === 143, "saw " + recorded.code);
   assert.equal(stdout, "");
 });
 
-test("the result settles at close, not when stdio ends", { timeout: 30_000 }, async t => {
-  const { recorded } = await runWorker(t, {
+test("the result settles at the terminal event, not at close", { timeout: 30_000 }, async t => {
+  const { recorded, stdout } = await runWorker(t, {
     script: `
 finish(() => {
   emit({ type: "item.completed", item: { type: "agent_message", text: "early output" } });
@@ -1430,7 +1690,11 @@ finish(() => {
 `
   });
   assert.equal(recorded.status, "completed");
-  assert.ok((recorded.durationMs ?? 0) >= 300);
+  assert.equal(stdout, "early output\n");
+  // The ladder is the discriminator: close-settled semantics never started one
+  // on a clean voluntary exit, so ownedShutdown would stay false there.
+  assert.equal(recorded.ownedShutdown, true);
+  assert.ok((recorded.durationMs ?? 0) < 600, "the ladder bounds the wait; the 400 ms voluntary exit never gates it, saw " + String(recorded.durationMs));
 });
 
 for (const exitCode of [7, 0]) {
