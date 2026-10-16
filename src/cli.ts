@@ -2,6 +2,7 @@
 import { executeWorker, type WorkerResult } from "./codex.js";
 import { readProjectConfig } from "./config.js";
 import { doctorProject } from "./doctor.js";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { initProject } from "./init.js";
 import { appendRouteJournal } from "./journal.js";
 import { inspectCodex, inspectGit } from "./preflight.js";
@@ -16,20 +17,21 @@ class UsageError extends Error {}
 type Command =
   | { command: "init"; project?: string; dryRun: boolean }
   | { command: "doctor"; project?: string; json: boolean; probe: boolean }
-  | { command: "run"; project?: string; write: boolean; task?: string };
+  | { command: "run"; project?: string; write: boolean; outputSchema?: string; task?: string };
 
 const USAGE =
   'usage: turnhelm init [--dry-run] [--project <dir>] | '
   + 'turnhelm doctor [--json] [--probe] [--project <dir>] | '
-  + 'turnhelm run [--write] [--project <dir>] [--] [<task>]';
+  + 'turnhelm run [--write] [--project <dir>] [--output-schema <file>] [--] [<task>]';
 
 const parse = (argv: readonly string[]): Command => {
   const [command, ...rest] = argv;
   const allowed = command === "init" ? ["--project", "--dry-run"]
     : command === "doctor" ? ["--project", "--json", "--probe"]
-    : ["--project", "--write"];
+    : ["--project", "--write", "--output-schema"];
   if (command !== "init" && command !== "doctor" && command !== "run") throw new UsageError(USAGE);
   let project: string | undefined;
+  let outputSchema: string | undefined;
   let task: string | undefined;
   let positional = false;
   let escaped = false;
@@ -46,10 +48,11 @@ const parse = (argv: readonly string[]): Command => {
       if (!allowed.includes(name)) throw new UsageError(USAGE);
       if (seen.has(name)) throw new UsageError(USAGE);
       seen.add(name);
-      if (name === "--project") {
+      if (name === "--project" || name === "--output-schema") {
         const value = equals === -1 ? rest[++index] : arg.slice(equals + 1);
         if (value === undefined || value === "") throw new UsageError(USAGE);
-        project = value;
+        if (name === "--project") project = value;
+        else outputSchema = value;
       } else if (equals !== -1) {
         throw new UsageError(USAGE);
       }
@@ -63,7 +66,7 @@ const parse = (argv: readonly string[]): Command => {
   if (escaped && !positional) throw new UsageError(USAGE);
   if (command === "init") return { command, project, dryRun: seen.has("--dry-run") };
   if (command === "doctor") return { command, project, json: seen.has("--json"), probe: seen.has("--probe") };
-  return { command, project, write: seen.has("--write"), task };
+  return { command, project, write: seen.has("--write"), outputSchema, task };
 };
 
 const diagnostic = (message: string): void => {
@@ -132,7 +135,54 @@ const doctorCommand = async (root: string, json: boolean, probe: boolean): Promi
   }
 };
 
-const runCommand = async (root: string, write: boolean, positionalTask: string | undefined): Promise<number> => {
+const SCHEMA_MAX_BYTES = 64 * 1024;
+
+// OC-1: the opt-in output schema is validated exactly once at the input
+// boundary, so only already-validated bytes cross toward the worker, which
+// stages its own copy inside the managed home — the caller's path is never
+// forwarded or re-read. O_NOFOLLOW pins the open to a regular file; the size
+// cap, UTF-8, and plain-object checks bound what may pass. Every rejection is
+// fixed wording; file content never reaches a diagnostic.
+const validateOutputSchema = (path: string): { bytes: Buffer } | { error: string } => {
+  let descriptor: number;
+  try {
+    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    return { error: "the output schema path is not a readable regular file." };
+  }
+  try {
+    if (!fstatSync(descriptor).isFile()) return { error: "the output schema path is not a readable regular file." };
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for (;;) {
+      const chunk = Buffer.alloc(Math.min(64 * 1024, SCHEMA_MAX_BYTES + 1 - total));
+      const got = readSync(descriptor, chunk, 0, chunk.length, null);
+      if (got === 0) break;
+      total += got;
+      if (total > SCHEMA_MAX_BYTES) return { error: "the output schema exceeds the 65536-byte limit." };
+      chunks.push(chunk.subarray(0, got));
+    }
+    const bytes = Buffer.concat(chunks);
+    try {
+      new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      return { error: "the output schema is not valid UTF-8." };
+    }
+    try {
+      const parsed: unknown = JSON.parse(bytes.toString("utf8"));
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        return { error: "the output schema must be a single JSON object." };
+      }
+    } catch {
+      return { error: "the output schema must be a single JSON object." };
+    }
+    return { bytes };
+  } finally {
+    closeSync(descriptor);
+  }
+};
+
+const runCommand = async (root: string, write: boolean, positionalTask: string | undefined, outputSchema?: string): Promise<number> => {
   // Recursion is rejected before any configuration read or classification.
   if (process.env.TURNHELM_MANAGED_CHILD === "1") {
     diagnostic("this process is a Turnhelm-managed child; run must not recurse. Execute the task directly.");
@@ -166,6 +216,17 @@ const runCommand = async (root: string, write: boolean, positionalTask: string |
     // The TTY fast path never touches stdin; release it so the run can end.
     // A redirected-file stdin is an fs.ReadStream without unref and needs none.
     if (typeof (process.stdin as { unref?: unknown }).unref === "function") process.stdin.unref();
+    // OC-1: schema validation sits at the input boundary with the task — a
+    // rejection is a usage error before any configuration read or spend.
+    let schemaBytes: Buffer | undefined;
+    if (outputSchema !== undefined) {
+      const schema = validateOutputSchema(outputSchema);
+      if ("error" in schema) {
+        diagnostic(schema.error);
+        return 2;
+      }
+      schemaBytes = schema.bytes;
+    }
     let config;
     try {
       config = await readProjectConfig(root);
@@ -232,6 +293,7 @@ const runCommand = async (root: string, write: boolean, positionalTask: string |
         executable: codex.executable,
         root,
         write,
+        ...(schemaBytes !== undefined ? { schemaBytes } : {}),
         env,
         signal: controller.signal,
         output: process.stdout,
@@ -290,7 +352,7 @@ const main = async (): Promise<number> => {
   }
   if (command.command === "init") return initCommand(root, command.dryRun);
   if (command.command === "doctor") return doctorCommand(root, command.json, command.probe);
-  return runCommand(root, command.write, command.task);
+  return runCommand(root, command.write, command.task, command.outputSchema);
 };
 
 main().then(code => {

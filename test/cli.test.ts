@@ -3,7 +3,7 @@ import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -63,6 +63,24 @@ record("argv.json", JSON.stringify(argv));
 record("cwd.txt", process.cwd());
 record("env.json", JSON.stringify(process.env));
 fs.appendFileSync(path.join(__dirname, "runs"), "1");
+const schemaFlag = argv.indexOf("--output-schema");
+if (schemaFlag !== -1) {
+  record("schema-arg.txt", argv[schemaFlag + 1]);
+  record("schema-bytes.json", JSON.stringify(fs.readFileSync(argv[schemaFlag + 1], "utf8")));
+}
+const tamper = process.env.TURNHELM_TEST_SCHEMA_TAMPER;
+if (tamper !== undefined && process.env.TURNHELM_TEST_SCHEMA_PATH !== undefined) {
+  // OC-1 TOCTOU seam: the worker tampers with the caller's own file after
+  // validation and staging; the staged bytes it reads must not follow.
+  const target = process.env.TURNHELM_TEST_SCHEMA_PATH;
+  try {
+    if (tamper === "mutate") fs.writeFileSync(target, '{"tampered":true}');
+    else if (tamper === "replace") { fs.unlinkSync(target); fs.writeFileSync(target, '{"replaced":true}'); }
+    else if (tamper === "delete") fs.unlinkSync(target);
+    else if (tamper === "symlink-swap") { fs.unlinkSync(target); fs.symlinkSync("/etc/hostname", target); }
+    record("tampered.json", "1");
+  } catch (error) { record("tampered.json", String(error)); }
+}
 if (process.env.TEST_CODEX_MODE === "hang") {
   // A live worker: signal readiness, then keep the process alive until TERM.
   record("ready", "1");
@@ -275,6 +293,8 @@ const workerRecords = async (f: Fixture): Promise<WorkerRecords> => {
   };
 };
 
+const readWorkerFile = (f: Fixture, name: string): Promise<string> => readFile(join(f.bin, name), "utf8");
+
 const DOCTOR_IDS = [
   "root", "node", "codex", "git", "assets", "config", "backends", "credentials",
   "instructions", "models", "backend.laya", "backend.jev"
@@ -448,6 +468,86 @@ test("a guard-passing Laya usage reaches the receipt as classifierUsage", async 
   const receipt = parseReceipt(result.stderr);
   assert.deepEqual(receipt.classifierUsage, { input_tokens: 412, state_tokens: 620 });
 });
+
+test("run --output-schema stages validated bytes inside the managed home", async t => {
+  const f = await fixture(t, { choice: "balanced" });
+  const schema = JSON.stringify({ type: "object", properties: { selected: { type: "string" } }, marker: "validated" });
+  const schemaPath = join(f.root, "schema.json");
+  await writeFile(schemaPath, schema);
+  const result = await f.run(["run", "--output-schema", schemaPath, TASK], { input: "" });
+  assert.equal(result.code, 0, result.stderr);
+  const records = await workerRecords(f);
+  const flag = records.argv.indexOf("--output-schema");
+  assert.ok(flag !== -1, "the worker argv carries the schema flag");
+  assert.match(records.argv[flag + 1], /turnhelm-worker-[^/]+\/output-schema\.json$/,
+    "the argv points inside the managed home, never at the caller's path");
+  assert.equal(JSON.parse(await readWorkerFile(f, "schema-bytes.json")), schema,
+    "the staged file carries the validated bytes verbatim");
+  const eqForm = await f.run(["run", "--output-schema=" + schemaPath, TASK], { input: "" });
+  assert.equal(eqForm.code, 0, eqForm.stderr);
+  assert.equal(JSON.parse(await readWorkerFile(f, "schema-bytes.json")), schema,
+    "the = form stages the same bytes");
+  const duplicate = await f.run(["run", "--output-schema", schemaPath, "--output-schema", schemaPath, TASK], { input: "" });
+  assert.equal(duplicate.code, 2);
+  assert.ok(duplicate.stderr.startsWith("turnhelm: usage:"), "duplicates are usage errors");
+});
+
+test("an invalid output schema is a fixed usage error before any classification", async t => {
+  const f = await fixture(t, { choice: "balanced" });
+  const real = join(f.root, "real-schema.json");
+  await writeFile(real, '{"type":"object"}');
+  const link = join(f.root, "schema-link.json");
+  await symlink(real, link);
+  const notUtf8 = join(f.root, "bad-utf8.json");
+  await writeFile(notUtf8, Buffer.concat([Buffer.from('{"a":"'), Buffer.from([0xff]), Buffer.from('"}')]));
+  const oversized = join(f.root, "big.json");
+  await writeFile(oversized, '{"pad":"' + "a".repeat(64 * 1024 - 9) + '"}');
+  const cases: { name: string; path: string; line: string }[] = [
+    { name: "missing file", path: join(f.root, "absent.json"),
+      line: "turnhelm: the output schema path is not a readable regular file." },
+    { name: "symlink", path: link,
+      line: "turnhelm: the output schema path is not a readable regular file." },
+    { name: "oversized", path: oversized,
+      line: "turnhelm: the output schema exceeds the 65536-byte limit." },
+    { name: "invalid UTF-8", path: notUtf8,
+      line: "turnhelm: the output schema is not valid UTF-8." },
+    { name: "bare true", path: join(f.root, "true.json"), line: "turnhelm: the output schema must be a single JSON object." }
+  ];
+  await writeFile(join(f.root, "true.json"), "true");
+  await writeFile(join(f.root, "array.json"), "[1,2]");
+  await writeFile(join(f.root, "number.json"), "42");
+  await writeFile(join(f.root, "broken.json"), "{oops");
+  cases.push(
+    { name: "array", path: join(f.root, "array.json"), line: "turnhelm: the output schema must be a single JSON object." },
+    { name: "number", path: join(f.root, "number.json"), line: "turnhelm: the output schema must be a single JSON object." },
+    { name: "invalid JSON", path: join(f.root, "broken.json"), line: "turnhelm: the output schema must be a single JSON object." });
+  for (const invalid of cases) {
+    const result = await f.run(["run", "--output-schema", invalid.path, TASK], { input: "" });
+    assert.equal(result.code, 2, invalid.name + " must be a usage error");
+    assert.equal(result.stderr, invalid.line + "\n", invalid.name + " prints exactly the fixed diagnostic");
+    assert.ok(!result.stderr.includes("turnhelm.receipt"), invalid.name + " emits no receipt");
+    assert.equal(f.requests.length, 0, invalid.name + " never reaches the classifier");
+    await assert.rejects(readFile(join(f.root, ".turnhelm", "routes.jsonl")), { code: "ENOENT" },
+      invalid.name + " appends no journal line");
+  }
+});
+
+for (const mode of ["mutate", "replace", "delete", "symlink-swap"] as const) {
+  test(`the staged schema bytes the worker reads survive caller-file ${mode}`, async t => {
+    const f = await fixture(t, { choice: "balanced" });
+    const schema = JSON.stringify({ type: "object", properties: { selected: { type: "string" } }, marker: "validated" });
+    const schemaPath = join(f.root, "schema.json");
+    await writeFile(schemaPath, schema);
+    const result = await f.run(["run", "--output-schema", schemaPath, TASK], {
+      input: "",
+      env: { TURNHELM_TEST_SCHEMA_TAMPER: mode, TURNHELM_TEST_SCHEMA_PATH: schemaPath }
+    });
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(await readWorkerFile(f, "tampered.json"), "1", "the tamper actually ran from inside the worker");
+    assert.equal(JSON.parse(await readWorkerFile(f, "schema-bytes.json")), schema,
+      "the staged bytes remain exactly the validated ones");
+  });
+}
 
 test("run --write selects workspace-write", async t => {
   const f = await fixture(t);
