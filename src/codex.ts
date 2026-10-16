@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
-import { accessSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { accessSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { decodeWorkerEvent, MAX_EVENT_BYTES, type FailureClass, type WorkerEvent, type WorkerUsage } from "./codex-events.js";
 import { classifyPayload, type PayloadMode } from "./payload.js";
 import type { TaskDecision } from "./route.js";
@@ -85,54 +85,64 @@ export function workerEnvironment(env: NodeJS.ProcessEnv, root: string, homeDir:
 }
 
 // WB-2: the parent-derived credential source — the parent's CODEX_HOME when
-// set, else ~/.codex/auth.json. Only its existence is probed here; which
-// credential mode backs it (file, keyring, in-memory) is not inferred.
+// set, else ~/.codex/auth.json, resolved absolute so a relative home still
+// links correctly from inside the managed directory. Only its existence is
+// probed here; which credential mode backs it (file, keyring, in-memory) is
+// not inferred.
 function authSourcePath(env: NodeJS.ProcessEnv): string | undefined {
   const parentHome = env.CODEX_HOME;
-  if (typeof parentHome === "string" && parentHome !== "") return join(parentHome, "auth.json");
+  if (typeof parentHome === "string" && parentHome !== "") return resolve(parentHome, "auth.json");
   const home = env.HOME;
-  if (typeof home === "string" && home !== "") return join(home, ".codex", "auth.json");
+  if (typeof home === "string" && home !== "") return resolve(home, ".codex", "auth.json");
   return undefined;
 }
 
 // WB-2 (review P1-3): pre-spend credential discovery — which source, if any,
-// a worker run could authenticate through: the parent-derived auth file when
-// one exists, else a nonblank OPENAI_API_KEY. Presence is probed, never read:
-// this proves a source exists, never that it works.
+// a worker run could authenticate through: a regular file at the parent-
+// derived source when one exists, else a nonblank OPENAI_API_KEY. Presence is
+// probed, never read: this proves a source exists, never that it works.
 export function discoverWorkerCredential(env: NodeJS.ProcessEnv): "file" | "key" | undefined {
   const source = authSourcePath(env);
   if (source !== undefined) {
     try {
-      accessSync(source);
-      return "file";
+      if (statSync(source).isFile()) return "file";
     } catch {
       // No file at the source; the exported key is the remaining source.
     }
   }
-  if (typeof env.OPENAI_API_KEY === "string" && env.OPENAI_API_KEY !== "") return "key";
+  if (typeof env.OPENAI_API_KEY === "string" && env.OPENAI_API_KEY.trim() !== "") return "key";
   return undefined;
 }
 
-// WB-2: a fresh per-run home holding exactly what this run may see — an
-// auth.json symlink to the parent-derived source when one exists, and the
-// already-validated schema bytes staged as output-schema.json. Any setup
-// failure fails the run closed (the spawn class); an inherited home is never
-// a fallback.
+// WB-2: a fresh per-run home initialized with exactly what this run may see —
+// an auth.json symlink to the parent-derived source when one exists, and the
+// already-validated schema bytes staged as output-schema.json (the native
+// runtime may add its own scratch). Setup is split by failure class: an
+// absent credential source is the credential-free case, but any fault while
+// building the home fails the run closed (the spawn class) with the partial
+// home removed; an inherited home is never a fallback.
 function createWorkerHome(env: NodeJS.ProcessEnv, schemaBytes?: Buffer): string | undefined {
+  let dir: string;
   try {
-    const dir = mkdtempSync(join(tmpdir(), "turnhelm-worker-"));
-    const source = authSourcePath(env);
+    dir = mkdtempSync(join(tmpdir(), "turnhelm-worker-"));
+  } catch {
+    return undefined;
+  }
+  try {
+    let source = authSourcePath(env);
     if (source !== undefined) {
       try {
         accessSync(source);
-        symlinkSync(source, join(dir, "auth.json"));
       } catch {
         // No credential file at the source: the home stays credential-free.
+        source = undefined;
       }
     }
+    if (source !== undefined) symlinkSync(source, join(dir, "auth.json"));
     if (schemaBytes !== undefined) writeFileSync(join(dir, "output-schema.json"), schemaBytes);
     return dir;
   } catch {
+    destroyWorkerHome(dir);
     return undefined;
   }
 }
@@ -186,14 +196,29 @@ export function executeWorker(
       progressEvents: 0, usageScope: "unverified", ownedShutdown: false, error: "spawn", failureClass: "unknown" });
   }
   return new Promise<WorkerResult>(resolve => {
-    const child = spawn(options.executable, buildWorkerArgs(decision, options.write,
-      options.schemaBytes === undefined ? undefined : join(managedHome, "output-schema.json")), {
-      shell: false,
-      cwd: options.root,
-      detached: true,
-      stdio: ["pipe", "pipe", "pipe"],
-      env: workerEnvironment(options.env, options.root, managedHome)
-    });
+    // The IIFE keeps spawn's stdio-typed overload on the successful path while
+    // converting a synchronous spawn fault to the spawn failure — never a
+    // rejected promise that skips the receipt — with the managed home removed.
+    const child = (() => {
+      try {
+        return spawn(options.executable, buildWorkerArgs(decision, options.write,
+          options.schemaBytes === undefined ? undefined : join(managedHome, "output-schema.json")), {
+          shell: false,
+          cwd: options.root,
+          detached: true,
+          stdio: ["pipe", "pipe", "pipe"],
+          env: workerEnvironment(options.env, options.root, managedHome)
+        });
+      } catch {
+        return undefined;
+      }
+    })();
+    if (child === undefined) {
+      destroyWorkerHome(managedHome);
+      resolve({ code: 1, status: "failed", durationMs: Math.round(performance.now() - started),
+        progressEvents: 0, usageScope: "unverified", ownedShutdown: false, error: "spawn", failureClass: "unknown" });
+      return;
+    }
     const output = options.output;
     const diagnostics = options.diagnostics ?? process.stderr;
     const stdin = child.stdin;

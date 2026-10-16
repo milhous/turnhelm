@@ -174,7 +174,8 @@ Offline only; zero paid calls (the single §6 review call aside). New/adjusted t
 1. `buildWorkerArgs` unit: exact argv vector includes `--ignore-user-config`, `--ignore-rules`, in position;
    with a schema, `--output-schema` points inside the managed home.
 2. Worker-environment tests: `CODEX_HOME` points at a fresh per-run directory created under `tmpdir()`;
-   the directory contains only the staged schema and (when the source exists) the `auth.json` symlink; an
+   the directory is initialized with only the staged schema and (when the source exists) the `auth.json`
+   symlink (the native runtime may add its own scratch); an
    inherited `CODEX_HOME` value is never forwarded as the worker's `CODEX_HOME`; the directory is gone after
    completed, failed, cancelled, spawn-error, and mid-setup-failure settlements — and only after owned-shutdown
    discharge, never before `closed`.
@@ -256,3 +257,26 @@ likewise), so it cannot render the enforced set of a worker argv and no behavior
 enforced set could be added. Its one offline use here is row 4's confirmation that `AGENTS.md` is a
 live model-visible source. Behavioral verification of enforced set and residuals rides the next
 authorized live campaign, as §4 already states.
+
+## 8. Implementation-review record — 2026-10-16 astra re-check of the branch
+
+Second astra review, of the implementation branch `feat/worker-boundary-output-contract` at `2c90b83`
+(Laya/direct selected `gpt-6-astra` / `high`, profile `deep`, routing 854 ms; worker completed in
+493.7 s, `codexHomeManaged: true`; root `/Users/zhangxiao/.local/state/turnhelm/astra-accept-20261016b`).
+Verdict **PROBLEMS** — 8 findings, all adjudicated Important-or-above by effect and fixed in one
+TDD pass (each fix verified by a failing test first, then the full suite):
+
+| # | Pri | Finding (condensed) | Disposition |
+| --- | --- | --- | --- |
+| 1 | P1 | Symlink setup failure did not fail closed (catch conflated missing credential with link-creation fault) | Fixed — setup faults destroy the partial home and refuse the run; `a credential-symlink setup fault fails the run closed` RED→GREEN |
+| 2 | P2 | Partial homes leaked on staging fault and synchronous spawn throw | Fixed — `createWorkerHome` owns cleanup on setup faults, spawn faults settle as one failed receipt; staging/spawn leak tests RED→GREEN |
+| 3 | P2 | FIFO schema path could hang the CLI before `fstat` | Fixed — `O_NONBLOCK` joins `O_NOFOLLOW` at the open; FIFO regression pinned (its watchdog now guards the fixed contract, not the hang) |
+| 4 | P2 | Relative `CODEX_HOME` produced a dangling credential link | Fixed — `authSourcePath` resolves to an absolute caller-frame path; relative-home test pins the absolute target |
+| 5 | P2 | The four TOCTOU regressions observed bytes before tampering (vacuous) | Fixed — tamper moved into the classifier's `onRequest` hook, between validation and spawn; green-on-arrival proven by mutation: a re-read-at-spawn regression fails all four |
+| 6 | P2 | Credential refusal admitted a directory named `auth.json` and whitespace-only keys | Fixed — `statSync` regular-file check and `trim()` on the env key; both refusal tests RED→GREEN |
+| 7 | P2 | `fstat`/`read` faults escaped the fixed usage-error contract (exit 1, not 2) | Fixed — descriptor-level faults keep the fixed wording with the descriptor closed in a `finally`; read-fault test RED→GREEN |
+| 8 | P3 | Docs made categorical boundary claims their own qualifications contradicted; "contains only" omitted native scratch | Fixed — README/SKILL/spec now name the suppressed sources, say the home is *initialized with* the link/schema, and keep the residuals explicit |
+
+Declined-to-judge (reviewer): full suite/build runs and real isolation/credential-refresh/performance
+behavior — the former is covered by this repository's offline suite; the latter remain the deferred
+live-campaign items of §4's closing note, unchanged by this review.

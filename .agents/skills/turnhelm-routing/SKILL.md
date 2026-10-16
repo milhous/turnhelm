@@ -123,9 +123,13 @@ settings to make a check pass.
 
 Every run also builds a worker instruction boundary on the codex side: a fresh
 per-run `CODEX_HOME` plus `--ignore-user-config --ignore-rules --ephemeral`,
-so the worker's ambient codex configuration is the task, the cwd project tree,
-and Turnhelm's argv. The managed home holds only the staged output schema and,
-when a source exists, a symlink to the parent `auth.json` (never copied);
+suppressing the ambient codex channels rooted in `CODEX_HOME` and the user
+profile (config.toml, profiles, `.rules`, the home's `AGENTS.md`, hooks, MCP
+servers, sessions); the remaining instruction surface is the task, the cwd
+project tree, and Turnhelm's argv. The managed home is initialized with only
+the staged output schema and,
+when a source exists, a symlink to the parent `auth.json` (never copied;
+codex itself may add scratch there);
 executed-worker receipts carry `codexHomeManaged: true` as a mechanism
 attestation, not an isolation claim. A run with no discoverable credential
 (no `auth.json` at the parent-derived source, no exported `OPENAI_API_KEY`)

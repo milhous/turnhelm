@@ -297,11 +297,15 @@ than opened.
   a check pass.
 - **Worker instruction boundary.** Every run creates a fresh per-run
   `CODEX_HOME` (a `mkdtemp` directory under the system temp dir) and passes
-  `--ignore-user-config --ignore-rules --ephemeral`, so the worker's ambient
-  codex configuration surface is the task, the cwd project tree, and Turnhelm's
-  explicit argv. The managed home contains only the staged output schema (when
-  one was given) and, when a credential source exists, a symlink to the
-  parent's `auth.json` — reached by symlink, never copied or logged; a
+  `--ignore-user-config --ignore-rules --ephemeral`, which suppress the ambient
+  codex channels rooted in `CODEX_HOME` and the user profile (`config.toml`,
+  `-p` profiles, `.rules` files, the home's `AGENTS.md`, hooks and persisted
+  hook trust, MCP servers, sessions). The remaining instruction surface is the
+  task, the cwd project tree, and Turnhelm's explicit argv. The managed home
+  is initialized with only the staged output schema (when one was given) and,
+  when a credential source exists, a symlink to the parent's `auth.json` — the
+  native codex runtime may add its own scratch there; the link is reached by
+  symlink, never copied or logged; a
   `CODEX_HOME` value inherited from the environment is never forwarded as the
   worker's home. A run with no discoverable credential (no `auth.json` at the
   parent-derived source and no exported `OPENAI_API_KEY`) is refused before

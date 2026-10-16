@@ -7,7 +7,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
@@ -63,23 +63,14 @@ record("argv.json", JSON.stringify(argv));
 record("cwd.txt", process.cwd());
 record("env.json", JSON.stringify(process.env));
 fs.appendFileSync(path.join(__dirname, "runs"), "1");
+if (process.env.CODEX_HOME !== undefined) {
+  // The managed-home credential link, as the worker itself resolves it.
+  try { record("authlink.txt", fs.readlinkSync(path.join(process.env.CODEX_HOME, "auth.json"))); } catch { /* no link */ }
+}
 const schemaFlag = argv.indexOf("--output-schema");
 if (schemaFlag !== -1) {
   record("schema-arg.txt", argv[schemaFlag + 1]);
   record("schema-bytes.json", JSON.stringify(fs.readFileSync(argv[schemaFlag + 1], "utf8")));
-}
-const tamper = process.env.TURNHELM_TEST_SCHEMA_TAMPER;
-if (tamper !== undefined && process.env.TURNHELM_TEST_SCHEMA_PATH !== undefined) {
-  // OC-1 TOCTOU seam: the worker tampers with the caller's own file after
-  // validation and staging; the staged bytes it reads must not follow.
-  const target = process.env.TURNHELM_TEST_SCHEMA_PATH;
-  try {
-    if (tamper === "mutate") fs.writeFileSync(target, '{"tampered":true}');
-    else if (tamper === "replace") { fs.unlinkSync(target); fs.writeFileSync(target, '{"replaced":true}'); }
-    else if (tamper === "delete") fs.unlinkSync(target);
-    else if (tamper === "symlink-swap") { fs.unlinkSync(target); fs.symlinkSync("/etc/hostname", target); }
-    record("tampered.json", "1");
-  } catch (error) { record("tampered.json", String(error)); }
 }
 if (process.env.TEST_CODEX_MODE === "hang") {
   // A live worker: signal readiness, then keep the process alive until TERM.
@@ -125,6 +116,53 @@ http.request = function (...args) {
   request.on("response", () => { process.env.ROOT_SNAPSHOT_TAG = "after"; });
   return request;
 };
+require("node:module").syncBuiltinESMExports();
+`;
+
+// Review-fix fault injection: a --require preload that patches one builtin
+// for the CLI child, selected by TURNHELM_TEST_FAULT. The patch is scoped to
+// the exact production call so earlier legitimate calls (config reads, the
+// preflight `codex exec --help` probe) stay on the real function.
+const FAULT_PRELOAD = `
+const fault = process.env.TURNHELM_TEST_FAULT;
+if (fault === "symlink") {
+  const fs = require("node:fs");
+  fs.symlinkSync = () => { throw Object.assign(new Error("injected"), { code: "EPERM" }); };
+} else if (fault === "staging") {
+  const fs = require("node:fs");
+  const real = fs.writeFileSync;
+  fs.writeFileSync = (...args) => {
+    if (String(args[0]).endsWith("output-schema.json")) {
+      fs.writeFileSync = real;
+      throw Object.assign(new Error("injected"), { code: "ENOSPC" });
+    }
+    return real(...args);
+  };
+} else if (fault === "readsync") {
+  const fs = require("node:fs");
+  const real = fs.readSync;
+  // Scoped to the production 5-arg call (position === null): Node's own
+  // readFileSync loads modules with a 4-arg readSync and must stay real, or
+  // the fault fires during ESM load before the CLI runs.
+  fs.readSync = (fd, buffer, offset, length, position) => {
+    if (typeof fd === "number" && fd > 2 && position === null) {
+      fs.readSync = real;
+      throw Object.assign(new Error("injected"), { code: "EIO" });
+    }
+    return real(fd, buffer, offset, length, position);
+  };
+} else if (fault === "spawn") {
+  const cp = require("node:child_process");
+  const real = cp.spawn;
+  cp.spawn = (...args) => {
+    const argv = args[1] ?? [];
+    if (String(args[0]).endsWith("codex") && argv[0] === "exec" && !argv.includes("--help")) {
+      cp.spawn = real;
+      throw Object.assign(new Error("injected"), { code: "EACCES" });
+    }
+    return real(...args);
+  };
+}
 require("node:module").syncBuiltinESMExports();
 `;
 
@@ -561,20 +599,134 @@ test("an invalid output schema is a fixed usage error before any classification"
 
 for (const mode of ["mutate", "replace", "delete", "symlink-swap"] as const) {
   test(`the staged schema bytes the worker reads survive caller-file ${mode}`, async t => {
-    const f = await fixture(t, { choice: "balanced" });
     const schema = JSON.stringify({ type: "object", properties: { selected: { type: "string" } }, marker: "validated" });
-    const schemaPath = join(f.root, "schema.json");
-    await writeFile(schemaPath, schema);
-    const result = await f.run(["run", "--output-schema", schemaPath, TASK], {
-      input: "",
-      env: { TURNHELM_TEST_SCHEMA_TAMPER: mode, TURNHELM_TEST_SCHEMA_PATH: schemaPath }
+    let schemaPath = "";
+    const f = await fixture(t, {
+      choice: "balanced",
+      // OC-1 TOCTOU: the tamper fires from the classifier's request hook —
+      // after the CLI validated the file, before the worker exists.
+      onRequest: async () => {
+        if (mode === "mutate") await writeFile(schemaPath, '{"tampered":true}');
+        else if (mode === "replace") { await rm(schemaPath); await writeFile(schemaPath, '{"replaced":true}'); }
+        else if (mode === "delete") await rm(schemaPath);
+        else { await rm(schemaPath); await symlink("/etc/hostname", schemaPath); }
+      }
     });
+    schemaPath = join(f.root, "schema.json");
+    await writeFile(schemaPath, schema);
+    const result = await f.run(["run", "--output-schema", schemaPath, TASK], { input: "" });
     assert.equal(result.code, 0, result.stderr);
-    assert.equal(await readWorkerFile(f, "tampered.json"), "1", "the tamper actually ran from inside the worker");
     assert.equal(JSON.parse(await readWorkerFile(f, "schema-bytes.json")), schema,
       "the staged bytes remain exactly the validated ones");
   });
 }
+
+// The review-fix regressions: each pins one boundary fault to its fail-closed
+// shape. Shared helper: write the fault preload and run with it armed.
+const faultEnv = async (f: Fixture, fault: string, extra: NodeJS.ProcessEnv = {}): Promise<NodeJS.ProcessEnv> => {
+  const preload = join(f.bin, "fault.cjs");
+  await writeFile(preload, FAULT_PRELOAD);
+  return { TURNHELM_TEST_FAULT: fault, NODE_OPTIONS: "--require " + preload, ...extra };
+};
+
+test("a credential-symlink setup fault fails the run closed", async t => {
+  const f = await fixture(t, { choice: "balanced" });
+  const result = await f.run(["run", TASK], { input: "", env: await faultEnv(f, "symlink") });
+  assert.equal(result.code, 1, result.stderr);
+  const receipt = parseReceipt(result.stderr);
+  assert.equal((receipt.worker as { status: string }).status, "failed");
+  assert.equal(await workerRecords(f).then(records => records.runs), 0, "no worker may launch without its credential link");
+  assert.equal(f.requests.length, 1, "classification already spent; only the worker is refused");
+});
+
+test("a schema-staging fault fails closed and leaves no managed home", async t => {
+  const f = await fixture(t, { choice: "balanced" });
+  const leakDir = await mkdtemp(join(tmpdir(), "turnhelm-cli-leak-"));
+  t.after(() => rm(leakDir, { recursive: true, force: true }));
+  const schemaPath = join(f.root, "schema.json");
+  await writeFile(schemaPath, '{"type":"object"}');
+  const result = await f.run(["run", "--output-schema", schemaPath, TASK],
+    { input: "", env: await faultEnv(f, "staging", { TMPDIR: leakDir }) });
+  assert.equal(result.code, 1, result.stderr);
+  assert.equal((parseReceipt(result.stderr).worker as { status: string }).status, "failed");
+  assert.equal(await workerRecords(f).then(records => records.runs), 0, "no worker launched");
+  assert.deepEqual(await readdir(leakDir), [], "the partial home is removed, never leaked");
+});
+
+test("a synchronous worker-spawn fault settles as one failed receipt with no home leaked", async t => {
+  const f = await fixture(t, { choice: "balanced" });
+  const leakDir = await mkdtemp(join(tmpdir(), "turnhelm-cli-leak-"));
+  t.after(() => rm(leakDir, { recursive: true, force: true }));
+  const result = await f.run(["run", TASK], { input: "", env: await faultEnv(f, "spawn", { TMPDIR: leakDir }) });
+  assert.equal(result.code, 1, result.stderr);
+  const receipt = parseReceipt(result.stderr);
+  assert.equal((receipt.worker as { status: string }).status, "failed");
+  assert.deepEqual(await readdir(leakDir), [], "the managed home is destroyed on the spawn-fault path");
+});
+
+test("a schema read fault is the fixed usage error, not an internal failure", async t => {
+  const f = await fixture(t, { choice: "balanced" });
+  const schemaPath = join(f.root, "schema.json");
+  await writeFile(schemaPath, '{"type":"object"}');
+  const result = await f.run(["run", "--output-schema", schemaPath, TASK],
+    { input: "", env: await faultEnv(f, "readsync") });
+  assert.equal(result.code, 2, "a descriptor-level read fault keeps the usage-error contract");
+  assert.equal(result.stderr, "turnhelm: the output schema path is not a readable regular file.\n");
+  assert.equal(f.requests.length, 0);
+});
+
+test("a FIFO output schema path is a fixed usage error, never a hang", { timeout: 20_000 }, async t => {
+  const f = await fixture(t, { choice: "balanced" });
+  const fifo = join(f.root, "schema.fifo");
+  const maker = spawn("mkfifo", [fifo]);
+  await new Promise<void>((resolve, reject) => maker.on("close", code => code === 0 ? resolve() : reject(new Error("mkfifo exited " + code))));
+  const child = f.spawn(["run", "--output-schema", fifo, TASK], { input: "" });
+  const outcome = capture(child);
+  // Raw spawn leaves stdin open; readTask waits on it, not the FIFO. Close it
+  // so the watchdog observes only the schema-open behavior.
+  child.stdin?.end("");
+  // A blocking open would wedge the event loop past every signal handler;
+  // the watchdog turns that hang into a visible failure.
+  const watchdog = setTimeout(() => child.kill("SIGKILL"), 10_000);
+  const result = await outcome;
+  clearTimeout(watchdog);
+  assert.equal(result.code, 2, "a FIFO is rejected as a usage error instead of blocking the open");
+  assert.equal(result.stderr, "turnhelm: the output schema path is not a readable regular file.\n");
+  assert.equal(f.requests.length, 0);
+});
+
+test("a credential source that is not a regular file is refused", async t => {
+  const f = await fixture(t);
+  await rm(join(f.codexHome, "auth.json"));
+  await mkdir(join(f.codexHome, "auth.json"));
+  const result = await f.run(["run", TASK], { input: "" });
+  assert.equal(result.code, 1);
+  assert.equal(result.stderr, "turnhelm: no worker credential is discoverable; provide a CODEX_HOME auth.json or export OPENAI_API_KEY.\n");
+  assert.equal(f.requests.length, 0, "the classifier is never called");
+});
+
+test("a whitespace-only API key is not a credential", async t => {
+  const f = await fixture(t, { choice: "balanced" });
+  const emptyHome = await mkdtemp(join(tmpdir(), "turnhelm-cli-empty-home-"));
+  t.after(() => rm(emptyHome, { recursive: true, force: true }));
+  const result = await f.run(["run", TASK], { input: "", env: { CODEX_HOME: emptyHome, OPENAI_API_KEY: "   " } });
+  assert.equal(result.code, 1);
+  assert.equal(result.stderr, "turnhelm: no worker credential is discoverable; provide a CODEX_HOME auth.json or export OPENAI_API_KEY.\n");
+  assert.equal(f.requests.length, 0, "the classifier is never called");
+});
+
+test("a relative CODEX_HOME still links an absolute credential source", async t => {
+  const f = await fixture(t, { choice: "balanced" });
+  await mkdir(join(f.root, "codex-home"));
+  await writeFile(join(f.root, "codex-home", "auth.json"), '{"token":"fixture"}');
+  const result = await f.run(["run", TASK], { input: "", env: { CODEX_HOME: "codex-home" } });
+  assert.equal(result.code, 0, result.stderr);
+  const link = await readWorkerFile(f, "authlink.txt");
+  assert.ok(isAbsolute(link), "the credential symlink target is absolute, got " + JSON.stringify(link));
+  // The child's cwd is the physical path (macOS resolves /var symlinkage),
+  // so the expectation must resolve through it too.
+  assert.equal(link, resolve(realpathSync(f.root), "codex-home", "auth.json"));
+});
 
 test("run --write selects workspace-write", async t => {
   const f = await fixture(t);
