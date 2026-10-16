@@ -137,9 +137,11 @@ git commit -m "test: keep coverage instrumentation out of disposable fixture chi
 
 ### Task 3 — Stress verification of the restored gate
 
-- [ ] **Step 1: Five consecutive stock runs**
+- [x] **Step 1: Five consecutive stock runs**
 
 Run `pnpm run test:coverage` five times; interleave at least one run with recorded parallel load (e.g. `pnpm run build` in a loop alongside, or the Laya service active). Record each run's all-files line/branch/function and exit code in the plan checklist. Expected per run: exit 0, ≥80/80/80, no `Could not report code coverage` warning.
+
+Results (2026-10-16; every run exit 0, zero warnings, lines/branches/functions): run 1 95.92/91.21/94.06; run 2 95.92/91.05/94.06; run 3 95.92/91.13/94.06; run 4 95.92/91.21/94.06 under recorded parallel load (3× `pnpm run build` loop alongside, load exit 0); run 5 95.92/91.13/94.06.
 
 - [ ] **Step 2: Failure protocol (only if a run fails)**
 
