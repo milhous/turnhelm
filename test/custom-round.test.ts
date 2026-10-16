@@ -608,6 +608,10 @@ const scratchExecuteRound = async (
   const port = (server.address() as AddressInfo).port;
   const bin = join(base, "bin");
   await mkdir(bin);
+  // WB-2: rounds run through the real CLI, which refuses without a worker
+  // credential source; stage one beside the fake codex.
+  await mkdir(join(base, "codex-home"));
+  await writeFile(join(base, "codex-home", "auth.json"), '{"token":"fixture"}');
   const invocations = join(bin, "invocations");
   const gitEnv = join(base, "git-env.txt");
   const workerEnv = join(bin, "worker-env.json");

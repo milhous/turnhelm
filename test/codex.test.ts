@@ -28,7 +28,7 @@ test("legacy route/codex worker exports no longer exist", () => {
 
 test("the module surface is exactly the project worker contract", () => {
   assert.deepEqual(Object.keys(codex).sort(),
-    ["buildWorkerArgs", "executeWorker", "subprocessEnvironment", "workerEnvironment"]);
+    ["buildWorkerArgs", "discoverWorkerCredential", "executeWorker", "subprocessEnvironment", "workerEnvironment"]);
 });
 
 const usageCases = [["route", "Review the boundary"], ["codex", "Review the boundary"]] as const;

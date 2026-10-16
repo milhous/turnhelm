@@ -65,6 +65,15 @@ test("classifyPayload: a whole-message JSON value is strict, verbatim", () => {
   assert.deepEqual(classifyPayload('{"a":1}\n\n\n'), { mode: "strict", emittedText: '{"a":1}\n\n\n' });
 });
 
+test("classifyPayload: valid JSON of the wrong shape for the schema still classifies strict", () => {
+  // OC-2: payload.mode reports framing only. A schema demanding
+  // {"selected","feasibleCount"} does not downgrade a well-framed
+  // {"selected":"safe-a"} — schema conformance stays the consumer's
+  // acceptance gate, never the emission classifier's.
+  assert.deepEqual(classifyPayload('{"selected":"safe-a"}'),
+    { mode: "strict", emittedText: '{"selected":"safe-a"}' });
+});
+
 test("classifyPayload: first-line JSON with inert trailers extracts the first line", () => {
   const sealed = '{"case":"x","status":"complete"}\n\n未访问网络；冻结测试通过。\n';
   assert.deepEqual(classifyPayload(sealed), {

@@ -954,6 +954,9 @@ const readEvidence = async (runRoot: string): Promise<Record<string, unknown>[]>
 const workerEnv = (fakeBin: string, mode: string, invocations?: string): NodeJS.ProcessEnv => ({
   PATH: fakeBin + ":" + (process.env.PATH ?? ""),
   TURNHELM_TEST_WORKER: mode,
+  // WB-2: the CLI refuses runs with no discoverable worker credential; the
+  // hermetic env carries neither HOME nor CODEX_HOME, so the key is the source.
+  OPENAI_API_KEY: "fixture",
   ...(invocations !== undefined ? { TURNHELM_TEST_INVOCATIONS: invocations } : {})
 });
 
@@ -4187,6 +4190,8 @@ test("singleton fallback binds its frozen 503 fixture", async t => {
     PATH: fakeBin + ":" + (process.env.PATH ?? ""),
     TURNHELM_TEST_WORKER: "ok-write",
     TURNHELM_TEST_INVOCATIONS: invocations,
+    // WB-2: no HOME/CODEX_HOME here, so the key is the discoverable credential.
+    OPENAI_API_KEY: "fixture",
     TURNHELM_ALLOW_HOSTED_JEV: "1",
     TYPESAFE_API_KEY: "fixture-only-synthetic-key",
     NODE_EXTRA_CA_CERTS: caPath,
@@ -4322,6 +4327,7 @@ test("specialized transport policy gates the two known live cases", async t => {
   const policyEnv = (workerMode: string, ownedPorts: readonly number[]): NodeJS.ProcessEnv => ({
     PATH: fakeBin + ":" + (process.env.PATH ?? ""),
     TURNHELM_TEST_WORKER: workerMode,
+    OPENAI_API_KEY: "fixture",
     TURNHELM_ALLOW_HOSTED_JEV: "1",
     TYPESAFE_API_KEY: "fixture-only-synthetic-key",
     NODE_EXTRA_CA_CERTS: caPath,
@@ -4438,6 +4444,7 @@ test("dual identity checks follow case ids not positions", async t => {
     env: {
       PATH: fakeBin + ":" + (process.env.PATH ?? ""),
       TURNHELM_TEST_WORKER: "ok-write",
+      OPENAI_API_KEY: "fixture",
       TURNHELM_ALLOW_HOSTED_JEV: "1",
       TYPESAFE_API_KEY: "fixture-only-synthetic-key",
       NODE_EXTRA_CA_CERTS: caPath,

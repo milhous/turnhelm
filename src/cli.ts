@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { executeWorker, type WorkerResult } from "./codex.js";
+import { discoverWorkerCredential, executeWorker, type WorkerResult } from "./codex.js";
 import { readProjectConfig } from "./config.js";
 import { doctorProject } from "./doctor.js";
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
@@ -254,6 +254,12 @@ const runCommand = async (root: string, write: boolean, positionalTask: string |
       diagnostic("no eligible classification backend; enable one in .turnhelm/config.json and provide its credentials.");
       return 1;
     }
+    // WB-2: pre-spend credential refusal — a worker with no discoverable
+    // credential source is rejected here, before any classification request.
+    if (discoverWorkerCredential(env) === undefined) {
+      diagnostic("no worker credential is discoverable; provide a CODEX_HOME auth.json or export OPENAI_API_KEY.");
+      return 1;
+    }
     // Classification starts here; exactly one receipt is emitted below.
     const routing = await routeTask(task, config, { env, signal: controller.signal });
     // Evidence for routing decisions is journaled best-effort before the worker;
@@ -311,6 +317,8 @@ const runCommand = async (root: string, write: boolean, positionalTask: string |
         ownedShutdown: worker.ownedShutdown
       };
       if (worker.lastEventAgeMs !== undefined) workerReceipt.lastEventAgeMs = worker.lastEventAgeMs;
+      // WB-4: the managed-home attestation rides executed-worker receipts only.
+      if (worker.codexHomeManaged === true) workerReceipt.codexHomeManaged = true;
       if (worker.signal !== undefined) workerReceipt.signal = worker.signal;
       if (worker.failureClass !== undefined) workerReceipt.failureClass = worker.failureClass;
       if (worker.errorSha256 !== undefined) workerReceipt.errorSha256 = worker.errorSha256;

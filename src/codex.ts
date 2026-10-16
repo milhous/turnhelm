@@ -95,6 +95,24 @@ function authSourcePath(env: NodeJS.ProcessEnv): string | undefined {
   return undefined;
 }
 
+// WB-2 (review P1-3): pre-spend credential discovery — which source, if any,
+// a worker run could authenticate through: the parent-derived auth file when
+// one exists, else a nonblank OPENAI_API_KEY. Presence is probed, never read:
+// this proves a source exists, never that it works.
+export function discoverWorkerCredential(env: NodeJS.ProcessEnv): "file" | "key" | undefined {
+  const source = authSourcePath(env);
+  if (source !== undefined) {
+    try {
+      accessSync(source);
+      return "file";
+    } catch {
+      // No file at the source; the exported key is the remaining source.
+    }
+  }
+  if (typeof env.OPENAI_API_KEY === "string" && env.OPENAI_API_KEY !== "") return "key";
+  return undefined;
+}
+
 // WB-2: a fresh per-run home holding exactly what this run may see — an
 // auth.json symlink to the parent-derived source when one exists, and the
 // already-validated schema bytes staged as output-schema.json. Any setup

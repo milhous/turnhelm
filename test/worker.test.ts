@@ -2329,6 +2329,9 @@ test("an end-to-end hostile worker failure yields class-only attribution in the 
   const bin = join(directory, "bin");
   const root = join(directory, "root");
   await mkdir(bin, { recursive: true });
+  await mkdir(join(directory, "codex-home"), { recursive: true });
+  // WB-2: the real CLI refuses an uncredentialed run; this e2e stages one.
+  await writeFile(join(directory, "codex-home", "auth.json"), '{"token":"fixture"}');
   await mkdir(join(root, ".turnhelm"), { recursive: true });
   // One local classify call answers a fixed balanced choice; no real backend.
   const server = createServer((request, response) => {

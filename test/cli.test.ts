@@ -190,6 +190,8 @@ async function fixture(t: TestContext, classifier: Classifier = {}, options: Fix
   const root = await mkdtemp(join(tmpdir(), "turnhelm-cli-root-"));
   const bin = await mkdtemp(join(tmpdir(), "turnhelm-cli-bin-"));
   const codexHome = await mkdtemp(join(tmpdir(), "turnhelm-cli-codexhome-"));
+  // WB-2: every default run carries a discoverable worker credential source.
+  await writeFile(join(codexHome, "auth.json"), '{"token":"fixture"}');
   const requests: Fixture["requests"] = [];
   const server = createServer((request, response) => {
     let body = "";
@@ -454,6 +456,12 @@ test("run routes once, executes one read-only worker, and emits one accurate rec
   assert.equal(typeof worker.durationMs, "number");
   assert.deepEqual(worker.usage, { input_tokens: 11, output_tokens: 7 });
   assert.deepEqual(worker.payload, { mode: "unstructured" });
+  // WB-4: the executed-worker receipt key set, with the managed-home
+  // attestation, pinned exactly — modulo the voluntary-exit/TERM race that
+  // conditionally adds "signal" (the code pin above allows both outcomes).
+  assert.deepEqual(Object.keys(receipt.worker as object).sort().filter(key => key !== "signal"),
+    ["code", "codexHomeManaged", "durationMs",
+      "lastEventAgeMs", "ownedShutdown", "payload", "progressEvents", "status", "usage"]);
   assert.equal(receipt.classifierUsage, "unreported");
   assert.equal(receipt.wholeRunUsageScope, "unverified");
   assert.equal(JSON.stringify(receipt).includes(TASK), false, "the receipt never carries task text");
@@ -467,6 +475,25 @@ test("a guard-passing Laya usage reaches the receipt as classifierUsage", async 
   assert.equal(result.code, 0);
   const receipt = parseReceipt(result.stderr);
   assert.deepEqual(receipt.classifierUsage, { input_tokens: 412, state_tokens: 620 });
+});
+
+test("an uncredentialed run is refused before classification", async t => {
+  const f = await fixture(t, { choice: "balanced" });
+  const emptyHome = await mkdtemp(join(tmpdir(), "turnhelm-cli-empty-home-"));
+  t.after(() => rm(emptyHome, { recursive: true, force: true }));
+  const refusal = await f.run(["run", TASK], { input: "", env: { CODEX_HOME: emptyHome } });
+  assert.equal(refusal.code, 1);
+  assert.equal(refusal.stderr, "turnhelm: no worker credential is discoverable; provide a CODEX_HOME auth.json or export OPENAI_API_KEY.\n");
+  assert.ok(!refusal.stderr.includes("turnhelm.receipt"), "no receipt is emitted");
+  assert.equal(f.requests.length, 0, "the classifier is never called");
+  await assert.rejects(readFile(join(f.root, ".turnhelm", "routes.jsonl")), { code: "ENOENT" },
+    "no journal line is appended");
+  // Either source alone unblocks the run: the fixture's auth file…
+  const byFile = await f.run(["run", TASK], { input: "" });
+  assert.equal(byFile.code, 0, byFile.stderr);
+  // …or an exported key against a credential-file-less home.
+  const byKey = await f.run(["run", TASK], { input: "", env: { CODEX_HOME: emptyHome, OPENAI_API_KEY: "TEST_OPENAI_SENTINEL" } });
+  assert.equal(byKey.code, 0, byKey.stderr);
 });
 
 test("run --output-schema stages validated bytes inside the managed home", async t => {
@@ -696,6 +723,7 @@ test("a worker terminal failure fails the run despite exit zero", async t => {
     lastEventAgeMs: (receipt.worker as { lastEventAgeMs?: number }).lastEventAgeMs,
     usage: "unreported",
     ownedShutdown: false,
+    codexHomeManaged: true,
     failureClass: "unknown"
   });
 });
@@ -789,7 +817,8 @@ test("a completed run without usage reports it explicitly unreported", async t =
     lastEventAgeMs: (receipt.worker as { lastEventAgeMs?: number }).lastEventAgeMs,
     usage: "unreported",
     payload: { mode: "unstructured" },
-    ownedShutdown: true
+    ownedShutdown: true,
+    codexHomeManaged: true
   });
   assert.ok(code === 0 || (code === 143 && signal === "SIGTERM"),
     "voluntary exit zero or the ladder's TERM, saw " + code + "/" + String(signal));
@@ -806,7 +835,7 @@ test("a completed run settles at the terminal event with an unchanged receipt sh
   const worker = receipt.worker as Record<string, unknown>;
   // The key set is pinned exactly: terminal-event settlement adds no field (TS-7).
   assert.deepEqual(Object.keys(worker).sort(),
-    ["code", "durationMs", "lastEventAgeMs", "ownedShutdown", "payload", "progressEvents", "signal", "status", "usage"]);
+    ["code", "codexHomeManaged", "durationMs", "lastEventAgeMs", "ownedShutdown", "payload", "progressEvents", "signal", "status", "usage"]);
   assert.equal(worker.status, "completed");
   assert.equal(worker.ownedShutdown, true, "the terminal event starts the owned ladder");
   assert.equal(worker.signal, "SIGTERM");
@@ -847,6 +876,7 @@ for (const [name, expectedCode] of [["SIGINT", 130], ["SIGTERM", 143]] as const)
       usage: "unreported",
       // Cancellation runs the parent-owned ladder; the worker dies by our TERM.
       ownedShutdown: true,
+      codexHomeManaged: true,
       signal: "SIGTERM"
     });
     assert.equal((await workerRecords(f)).runs, 1);
