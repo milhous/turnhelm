@@ -468,7 +468,6 @@ test("subprocess environment strips classifier credentials while preserving Code
     TYPESAFE_API_KEY: "TEST_JEV_SENTINEL",
     TURNHELM_ALLOW_HOSTED_JEV: "1",
     TURNHELM_CONFIG: "/tmp/turnhelm.json",
-    NODE_V8_COVERAGE: "/tmp/node-coverage-shared",
     BASH_ENV: "/tmp/host-bashenv",
     ENV: "/tmp/host-shenv",
     CODEX_HOME: "/tmp/codex",
@@ -478,11 +477,34 @@ test("subprocess environment strips classifier credentials while preserving Code
   assert.equal(env.TYPESAFE_API_KEY, undefined);
   assert.equal(env.TURNHELM_ALLOW_HOSTED_JEV, undefined);
   assert.equal(env.TURNHELM_CONFIG, undefined);
-  assert.equal(env.NODE_V8_COVERAGE, undefined);
   assert.equal(env.BASH_ENV, undefined);
   assert.equal(env.ENV, undefined);
   assert.equal(env.CODEX_HOME, "/tmp/codex");
   assert.equal(env.PATH, "/bin");
+});
+
+test("worker children do not inherit coverage instrumentation across the boundary", async () => {
+  const sentinel = "/tmp/turnhelm-test-coverage-sentinel";
+  const probe = "process.stdout.write(process.env.NODE_V8_COVERAGE ?? \"absent\")";
+  const run = (env: NodeJS.ProcessEnv): Promise<string> =>
+    execute(process.execPath, ["-e", probe], { encoding: "utf8", env }).then(out => out.stdout);
+  // Node reinserts the PARENT's value into any child env lacking the own
+  // property, so the parent must carry the sentinel for the boundary to mean
+  // anything; delete-based stripping forwards the parent's value through.
+  const previous = process.env.NODE_V8_COVERAGE;
+  process.env.NODE_V8_COVERAGE = sentinel;
+  try {
+    // Negative: across the boundary the child observes nothing (not even "").
+    assert.equal(
+      await run(workerEnvironment({ PATH: process.env.PATH ?? "", NODE_V8_COVERAGE: sentinel }, "/consumer/root")),
+      "absent");
+    // Positive control: an explicit own property still forwards, so the
+    // negative assertion above is a real boundary, not a broken probe.
+    assert.equal(await run({ PATH: process.env.PATH ?? "", NODE_V8_COVERAGE: sentinel }), sentinel);
+  } finally {
+    if (previous === undefined) delete process.env.NODE_V8_COVERAGE;
+    else process.env.NODE_V8_COVERAGE = previous;
+  }
 });
 
 test("worker environment additionally marks the managed child", () => {
