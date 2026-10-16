@@ -10,7 +10,10 @@ const TERM_GRACE_MS = 250;
 const CLOSE_BOUND_MS = 2000;
 const CAP_BYTES = 64 * 1024;
 const MIN_VERSION: readonly [number, number, number] = [0, 160, 0];
-const REQUIRED_CONTROLS: readonly string[] = ["--json", "--ephemeral", "--sandbox", "-"];
+// WB-3: the boundary controls are a capability floor — their presence in
+// `codex exec --help` is what gates an older codex out, never version math.
+const REQUIRED_CONTROLS: readonly string[] = ["--json", "--ephemeral", "--sandbox", "-",
+  "--ignore-user-config", "--ignore-rules", "--output-schema"];
 
 type RunOutcome = {
   code: number | null;

@@ -22,6 +22,9 @@ Options:
   --sandbox <MODE> Set the sandbox policy.
   -                Read the prompt from stdin.
   --config <KEY=VALUE>  Override a configuration value.
+  --ignore-user-config  Do not load CODEX_HOME config.toml.
+  --ignore-rules   Do not load execpolicy rules.
+  --output-schema <FILE>  Final-response JSON Schema.
 `;
 
 // Fake codex/git scripts record argv into FAKE_ARG_LOG so tests can pin that
@@ -137,6 +140,28 @@ test("inspectCodex rejects a missing required control", async (t) => {
   const result = await inspectCodex("/tmp", fakeEnv(bin, { FAKE_HELP: withoutEphemeral }));
   assert.equal(result.ok, false);
   assert.deepEqual([...(result.controls ?? [])], ["--json", "--sandbox", "-"]);
+});
+
+// WB-3: the worker-boundary controls are required alongside the transport
+// controls; a codex too old to carry them must fail the inspection.
+test("inspectCodex requires the worker-boundary controls (WB-3)", async (t) => {
+  const bin = await fakeBin(t, "codex", CODEX_SCRIPT);
+  const log = join(await tempDir(t, "turnhelm-preflight-log-"), "args");
+  const result = await inspectCodex("/tmp", fakeEnv(bin, { FAKE_ARG_LOG: log, FAKE_HELP: GOOD_HELP }));
+  assert.equal(result.ok, true);
+  assert.deepEqual([...(result.controls ?? [])], [
+    "--json", "--ephemeral", "--sandbox", "-",
+    "--ignore-user-config", "--ignore-rules", "--output-schema"
+  ]);
+});
+
+test("inspectCodex rejects help missing any one boundary control (WB-3)", async (t) => {
+  const bin = await fakeBin(t, "codex", CODEX_SCRIPT);
+  for (const flag of ["--ignore-user-config", "--ignore-rules", "--output-schema"]) {
+    const without = GOOD_HELP.split("\n").filter(line => !line.includes(flag)).join("\n");
+    const result = await inspectCodex("/tmp", fakeEnv(bin, { FAKE_HELP: without }));
+    assert.equal(result.ok, false, flag + " must be a required control");
+  }
 });
 
 test("inspectCodex never infers agents.enabled support from generic --config help", async (t) => {
