@@ -498,9 +498,12 @@ test("worker children do not inherit coverage instrumentation across the boundar
     assert.equal(
       await run(workerEnvironment({ PATH: process.env.PATH ?? "", NODE_V8_COVERAGE: sentinel }, "/consumer/root")),
       "absent");
-    // Positive control: an explicit own property still forwards, so the
-    // negative assertion above is a real boundary, not a broken probe.
+    // Positive controls: an explicit own property still forwards; and an env
+    // lacking the key — the measured harness spawn shape (CG-AC-02) — still
+    // receives the parent's value by Node's reinsertion, so an over-reaching
+    // override at a measured site fails here, not only at the thresholds.
     assert.equal(await run({ PATH: process.env.PATH ?? "", NODE_V8_COVERAGE: sentinel }), sentinel);
+    assert.equal(await run({ PATH: process.env.PATH ?? "" }), sentinel);
   } finally {
     if (previous === undefined) delete process.env.NODE_V8_COVERAGE;
     else process.env.NODE_V8_COVERAGE = previous;
