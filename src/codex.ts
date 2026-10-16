@@ -50,7 +50,9 @@ export function subprocessEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv
   // Coverage instrumentation belongs to this process, not to the external worker
   // binary; forwarding it lets test-spawned children write into the shared
   // coverage directory where a killed child leaves a truncated file behind.
-  delete copy.NODE_V8_COVERAGE;
+  // Node reinserts the parent's NODE_V8_COVERAGE into any child env lacking
+  // this own property, so deletion is not stripping: an explicit undefined is.
+  copy.NODE_V8_COVERAGE = undefined;
   return copy;
 }
 

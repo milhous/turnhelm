@@ -876,7 +876,10 @@ process.stdin.on("end", () => {
     require("node:child_process").spawn(process.execPath,
       ["-e", "require('node:fs').writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 3600);",
         pidFile], {
-      detached: true, stdio: ["ignore", "inherit", "inherit"]
+      detached: true, stdio: ["ignore", "inherit", "inherit"],
+      // This lingerer is SIGKILLed by the test after the fact, so it must not
+      // carry coverage instrumentation (an own undefined blocks reinsertion).
+      env: { ...process.env, NODE_V8_COVERAGE: undefined }
     }).unref();
   }
   if (mode === "mixed-verdict") {
@@ -2405,7 +2408,7 @@ test("a dead-peer fixture client cannot wedge the fail-stop exit", async t => {
       req.end(JSON.stringify({ state: "x", questions: {} }));
     };
     poll();
-  `], { stdio: "ignore" });
+  `], { stdio: "ignore", env: { ...process.env, NODE_V8_COVERAGE: undefined } });
   t.after(() => { peer.kill("SIGKILL"); });
 
   const code = await new Promise<number | null>(resolve => {

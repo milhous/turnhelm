@@ -8,7 +8,13 @@ const quote = (value: string): string => "'" + value.replaceAll("'", "'\\''") + 
 // Exported only for controlled broken-launcher lifecycle tests.
 export function prepareExecutable(path: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(path, [PREPARE], { detached: true, stdio: "ignore" });
+    // The detached launcher can be SIGKILLed mid-exit by the timeout path, so
+    // it must not carry coverage instrumentation (an own undefined blocks
+    // Node's reinsertion of the parent's value).
+    const child = spawn(path, [PREPARE], {
+      detached: true, stdio: "ignore",
+      env: { ...process.env, NODE_V8_COVERAGE: undefined }
+    });
     let failure: Error | undefined;
     let closeGuard: NodeJS.Timeout | undefined;
     let cleanupDone = false;
