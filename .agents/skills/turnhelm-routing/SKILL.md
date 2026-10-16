@@ -77,6 +77,12 @@ classifier and child cannot see session context. Input is limited to
   immediately before that run. Routing is not write authorization; `--write`
   does not override host-protected paths or approval policy. Review the
   resulting diff/tests and preserve unrelated changes.
+- `--output-schema <file>` (opt-in) hands Codex a JSON Schema for the final
+  message: a readable regular file (symlinks refused), at most 65536 bytes,
+  strict UTF-8, one JSON object, validated once at the input boundary and
+  staged inside the run's managed home — the caller's path is never forwarded
+  or re-read. `payload.mode` still reports framing only; schema conformance
+  stays the consumer's acceptance gate.
 - Successful classification selects among `fast`, `balanced`, `deep`, `frontier`,
   `frontier_xhigh`, `frontier_max`. Maximum effort is an ordinary automatic
   selection; no bypass, max flag, or extra stage exists. A run launches at most
@@ -115,7 +121,24 @@ absolute reads of host files, or a key exported by another mechanism remain
 outside this boundary. Do not read key values or change authentication/shell
 settings to make a check pass.
 
+Every run also builds a worker instruction boundary on the codex side: a fresh
+per-run `CODEX_HOME` plus `--ignore-user-config --ignore-rules --ephemeral`,
+so the worker's ambient codex configuration is the task, the cwd project tree,
+and Turnhelm's argv. The managed home holds only the staged output schema and,
+when a source exists, a symlink to the parent `auth.json` (never copied);
+executed-worker receipts carry `codexHomeManaged: true` as a mechanism
+attestation, not an isolation claim. A run with no discoverable credential
+(no `auth.json` at the parent-derived source, no exported `OPENAI_API_KEY`)
+is refused before classification. Enforced ≠ exhaustive: `$HOME/.agents/skills`
+discovery, managed/admin hook layers outside `CODEX_HOME`, other shells'
+startup files, and a project `AGENTS.override.md` remain residuals outside
+this boundary — documented, not closed.
+
 ## Interpret results
+
+Completion is not verification: a `completed` worker (exit 0) proves the child
+finished its turn, never that the task was done — consumer gates (output
+schema, oracle/contract checks, diff review) judge that.
 
 Worker output on stdout is at most one message — the final agent message of
 a completed run; earlier progress messages are discarded; fixed diagnostics
@@ -315,4 +338,9 @@ hermetic tests substitute a path-injected fake on every platform, and only
 the macOS-gated test exercises the real profile. Two harness pins landed with it: acceptance-style tests
 observe actual fake-worker invocations rather than reserved records, and the
 worker receipt's `lastEventAgeMs` is pinned positive through a post-drain
-settlement gap.
+settlement gap. Roster authoring rule: an oracle whose verdict depends on
+ordering, ties, or direction — sort order, first-match, prefix direction —
+must state the direction it judges and include one worked example with tied
+inputs, so a mis-graded tie is caught by the roster itself; sealed oracles
+and recorded grades are never edited after the fact — a defective oracle is
+retired and replaced, not rewritten.

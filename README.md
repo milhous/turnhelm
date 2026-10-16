@@ -15,7 +15,7 @@ responsible for its own authentication and provider access.
 | --- | --- | --- |
 | `turnhelm init [--dry-run]` | Install the managed skill, project config, and AGENTS block | No Codex child |
 | `turnhelm doctor [--json] [--probe]` | Report project, toolchain, config, and skill readiness | No Codex child |
-| `turnhelm run [--write] [--] ["<task>"]` | Route the complete task, then start at most one Codex child | `read-only`; `workspace-write` only with `--write` |
+| `turnhelm run [--write] [--output-schema <file>] [--] ["<task>"]` | Route the complete task, then start at most one Codex child | `read-only`; `workspace-write` only with `--write` |
 
 All three commands accept `--project <dir>` (relative to the current directory
 or absolute). Without it, the current directory is the project root; Turnhelm
@@ -295,6 +295,38 @@ than opened.
   outside this boundary. Keep secrets out of tasks, logs, diffs and config;
   do not read key values or change host authentication/startup files to make
   a check pass.
+- **Worker instruction boundary.** Every run creates a fresh per-run
+  `CODEX_HOME` (a `mkdtemp` directory under the system temp dir) and passes
+  `--ignore-user-config --ignore-rules --ephemeral`, so the worker's ambient
+  codex configuration surface is the task, the cwd project tree, and Turnhelm's
+  explicit argv. The managed home contains only the staged output schema (when
+  one was given) and, when a credential source exists, a symlink to the
+  parent's `auth.json` — reached by symlink, never copied or logged; a
+  `CODEX_HOME` value inherited from the environment is never forwarded as the
+  worker's home. A run with no discoverable credential (no `auth.json` at the
+  parent-derived source and no exported `OPENAI_API_KEY`) is refused before
+  classification. Executed-worker receipts carry `codexHomeManaged: true` — a
+  mechanism attestation that this machinery ran, not an isolation claim. The
+  enforced set does not reach HOME-rooted channels: `$HOME/.agents/skills`
+  discovery, managed/admin hook layers outside `CODEX_HOME`, other shells'
+  startup files, and a project `AGENTS.override.md` remain residuals outside
+  this boundary, stated as residuals. The home is destroyed after settlement
+  discharge on every path; a boundary-machinery failure fails closed (the run
+  is refused) rather than running with an inherited home.
+- **Opt-in output schema.** `run --output-schema <file>` passes a JSON Schema
+  to the worker so its final message is checked against your schema by Codex
+  itself. The file is validated exactly once at the input boundary — a
+  readable regular file (symlinks refused), at most 65536 bytes, strict
+  UTF-8, a single JSON object — and the validated bytes are staged inside the
+  managed home; the caller's path is never forwarded or re-read, so later
+  mutation of the file cannot change what the worker saw. The receipt's
+  `payload.mode` still reports framing only; schema conformance is the
+  consumer's acceptance gate.
+- **Completion is not verification.** A `completed` worker (exit 0) proves the
+  child finished its turn — nothing more. Whether the task was actually done
+  is judged by consumer-side gates: the output schema above, oracle and
+  contract checks, review of the diff and tests. Never treat native
+  completion as task verification.
 - **Bounded child output.** Raw worker stderr and arbitrary error text never
   cross the diagnostic boundary; the parent prints fixed-category lines and
   the structured receipt on stderr. A failed worker turn reports exactly one
@@ -594,7 +626,12 @@ hermetic tests substitute a path-injected fake on every platform, and only
 the macOS-gated test exercises the real profile. Two harness pins landed with it: acceptance-style tests
 observe actual fake-worker invocations rather than reserved records, and the
 worker receipt's `lastEventAgeMs` is pinned positive through a post-drain
-settlement gap.
+settlement gap. Roster authoring rule: an oracle whose verdict depends on
+ordering, ties, or direction — sort order, first-match, prefix direction —
+must state the direction it judges and include one worked example with tied
+inputs, so a mis-graded tie is caught by the roster itself; sealed oracles
+and recorded grades are never edited after the fact — a defective oracle is
+retired and replaced, not rewritten.
 
 The minimum Codex contract remains **0.160.0**. Compatibility evidence includes
 0.160.0 (official native binary:

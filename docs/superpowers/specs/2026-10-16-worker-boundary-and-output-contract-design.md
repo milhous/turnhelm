@@ -227,3 +227,32 @@ Verdict **PROBLEMS** → adjudicated against source; the spec above is the revis
 | 5 | P2 | OC-2 wording wrong: valid JSON of wrong shape classifies `strict`, not `unstructured`; envelope validation ≠ schema validity | Accepted — OC-1/OC-2 rewritten: mode is framing-only, no local validator, §4 item 8 pins the strict-on-wrong-shape regression |
 | 6 | P2 | Cleanup underspecified: races with native termination, symlink-following removal, crash remnants beyond a symlink | Accepted — WB-2 lifecycle: removal after settlement discharge on all paths, `rmSync`-unlinks-symlink pinned, remnant claim corrected to "whatever the native runtime wrote" |
 | 7 | P2 | Argv/empty-dir/help-token tests prove plumbing, not isolation; the ≈1 ms claim is unmeasured | Partially accepted — §4 closing note states exactly what the offline tests do not establish, adds the conditional no-inference introspection check, defers behavioral verification to the next authorized campaign; latency number removed. The reviewer's own answer (d1–d3 "unknown here") confirms full behavioral verification is not achievable in this work |
+
+## 7. Source→mechanism matrix — codex-cli 0.162.1, `--help` text and offline probes only
+
+No inference call was made. Every mechanism below is read off `codex exec --help` / `codex --help`
+(codex-cli 0.162.1) or verified by the offline `codex debug prompt-input` probe noted in row 4;
+nothing is inferred from undocumented behavior.
+
+| # | Instruction/policy source (0.162.1) | Closed by | Residual |
+| --- | --- | --- | --- |
+| 1 | `$CODEX_HOME/config.toml` — user config (model defaults, sandbox/approval policy, `shell_environment_policy`, `mcp_servers`, hooks, features) | Both: `--ignore-user-config` ("Do not load `$CODEX_HOME/config.toml`; auth still uses `CODEX_HOME`") and the empty managed home (no file exists) | none |
+| 2 | `$CODEX_HOME/<name>.config.toml` profile layering (`-p/--profile`) | argv shape: the worker passes no `-p`; a profile layers "on top of the base user config", which is absent | none |
+| 3 | User and project execpolicy `.rules` files | `--ignore-rules` ("Do not load user or project execpolicy `.rules` files") — both scopes named by the flag | none |
+| 4 | Global instructions `AGENTS.md` rooted at `CODEX_HOME` | Empty managed home (no such file). Verified offline both ways with `codex debug prompt-input`: a `CODEX_HOME/AGENTS.md` marker and a cwd `AGENTS.md` marker each render into the model-visible input list | none |
+| 5 | Project `AGENTS.md` in the cwd consumer tree | Not closed — deliberately: the project's instruction channel is the "task plus project docs" the boundary exists to keep | intended channel, not a residual |
+| 6 | Hooks (config-declared) and persisted hook trust (`CODEX_HOME`-rooted; `--dangerously-bypass-hook-trust` exists to bypass it) | Empty managed home: no config declares hooks, and no persisted trust exists to bypass. turnhelm never passes the bypass flag | none |
+| 7 | MCP servers (`[mcp_servers]` in config) | Empty managed home (no config file). `codex mcp` help documents no other source | none |
+| 8 | Session persistence (rollouts; `resume`/`fork`) | `--ephemeral` ("Run without persisting session files to disk") and argv shape (no resume/fork) | none |
+| 9 | Credentials: `$CODEX_HOME/auth.json` / `OPENAI_API_KEY` | Deliberately carried — the symlink (or inherited key) is the managed home's only content besides the staged schema; not an instruction source | inherited semantics (refresh write-through, shared-file concurrency) per §3 WB-2 |
+| 10 | HOME-rooted channels outside `CODEX_HOME`: `$HOME/.agents/skills` discovery, managed/admin hook layers, other shells' startup files, project `AGENTS.override.md` | **Not closed** — the enforced set does not reach them (astra review P1-2) | documented residual; no isolation claim is made over them |
+| 11 | Classifier/hosted keys and shell startup (`LAYA_API_KEY`, `TYPESAFE_API_KEY`, `TURNHELM_ALLOW_HOSTED_JEV`, `BASH_ENV`/`ENV`, `ZDOTDIR` redirect) | turnhelm's own env discipline (pre-existing, outside this spec's additions) | per its own contract |
+| 12 | The codex binary's built-in core instructions | Not configurable — out of scope; isolation governs ambient sources, not the tool itself | n/a |
+
+**§4 closing note, resolved (2026-10-16):** a no-inference introspection command *exists* —
+`codex debug prompt-input` ("Render the model-visible prompt input list as JSON") — but it rejects
+the isolation flags (`error: unexpected argument '--ignore-user-config' found`; `--ignore-rules`
+likewise), so it cannot render the enforced set of a worker argv and no behavioral check for the
+enforced set could be added. Its one offline use here is row 4's confirmation that `AGENTS.md` is a
+live model-visible source. Behavioral verification of enforced set and residuals rides the next
+authorized live campaign, as §4 already states.
