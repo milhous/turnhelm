@@ -94,7 +94,8 @@ test("inspectCodex accepts a sufficient version with all required controls", asy
   assert.equal(result.ok, true);
   assert.equal(result.executable, join(bin, "codex"));
   assert.equal(result.version, "0.160.1");
-  assert.deepEqual([...(result.controls ?? [])], ["--json", "--ephemeral", "--sandbox", "-"]);
+  assert.deepEqual([...(result.controls ?? [])], ["--json", "--ephemeral", "--sandbox", "-",
+    "--ignore-user-config", "--ignore-rules", "--output-schema"]);
   assert.deepEqual(await argLog(log), ["--version", "exec --help"]);
 });
 
@@ -139,7 +140,8 @@ test("inspectCodex rejects a missing required control", async (t) => {
   const withoutEphemeral = GOOD_HELP.split("\n").filter(line => !line.includes("--ephemeral")).join("\n");
   const result = await inspectCodex("/tmp", fakeEnv(bin, { FAKE_HELP: withoutEphemeral }));
   assert.equal(result.ok, false);
-  assert.deepEqual([...(result.controls ?? [])], ["--json", "--sandbox", "-"]);
+  assert.deepEqual([...(result.controls ?? [])], ["--json", "--sandbox", "-",
+    "--ignore-user-config", "--ignore-rules", "--output-schema"]);
 });
 
 // WB-3: the worker-boundary controls are required alongside the transport
@@ -170,7 +172,8 @@ test("inspectCodex never infers agents.enabled support from generic --config hel
   const result = await inspectCodex("/tmp", fakeEnv(bin, { FAKE_HELP: withConfigKey }));
   assert.equal(result.ok, true);
   assert.ok(!result.controls?.includes("agents.enabled"));
-  assert.deepEqual([...(result.controls ?? [])], ["--json", "--ephemeral", "--sandbox", "-"]);
+  assert.deepEqual([...(result.controls ?? [])], ["--json", "--ephemeral", "--sandbox", "-",
+    "--ignore-user-config", "--ignore-rules", "--output-schema"]);
 });
 
 // E3: a required control must appear as an exact flag token, so unrelated
@@ -392,7 +395,7 @@ if [ "$1" = "--version" ]; then
   exit 0
 fi
 if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
-  printf 'usage: codex exec\\n  --json\\n  --ephemeral\\n  --sandbox <MODE>\\n  -  read from stdin\\n'
+  printf 'usage: codex exec\\n  --json\\n  --ephemeral\\n  --sandbox <MODE>\\n  -  read from stdin\\n  --ignore-user-config\\n  --ignore-rules\\n  --output-schema <FILE>\\n'
   exit 0
 fi
 exit 64
