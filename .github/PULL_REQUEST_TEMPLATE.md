@@ -9,6 +9,7 @@
 ## Documentation sync
 
 - [ ] Every claim in `README.md` and `.agents/skills/turnhelm-routing/SKILL.md` touched by this PR's code changes was re-verified against the new behavior; stale claims were updated or removed.
+- [ ] `.archify/` diagrams still match the architecture at this PR's HEAD; if the pinned revision or component/flow structure drifted, regenerate them with the archify skill and repoint the README Diagrams section.
 
 ## Review notes
 
