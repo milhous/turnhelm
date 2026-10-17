@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { Readable } from "node:stream";
 import { PROFILE_IDS } from "../src/config.js";
+import { validateOutputSchema } from "../src/output-schema.js";
 import { validateTask } from "../src/task.js";
 import { envelopePayload, oracleSandboxPolicy, projectAttemptTransports, superviseCli } from "./live-acceptance.js";
 
@@ -244,11 +245,13 @@ export type RosterCase = {
   scope: string;
   task: string;
   transport: "arg" | "stdin-file";
+  deadlineMs: number;
   root: string;
   allowedChanges: string[];
   allowedProfiles: string[];
   grading: RosterGrading;
   files: RosterFiles;
+  outputSchema?: string;
 };
 
 export type Roster = {
@@ -399,7 +402,11 @@ const validateRoster = async (rosterPath: string): Promise<Roster> => {
   for (const raw of rawCases) {
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) rosterFail("every roster case must be an object");
     const item = raw as Record<string, unknown>;
-    expectExactKeys(item, ["id", "kind", "scope", "task", "transport", "root", "allowedChanges", "allowedProfiles", "grading", "files"], "case");
+    // outputSchema is the one optional case key: a case either carries it or
+    // omits it, and anything beyond the base set is still refused.
+    const caseKeys = ["id", "kind", "scope", "task", "transport", "deadlineMs", "root", "allowedChanges", "allowedProfiles", "grading", "files"];
+    if (item.outputSchema !== undefined) caseKeys.push("outputSchema");
+    expectExactKeys(item, caseKeys, "case");
     const id = item.id;
     if (typeof id !== "string" || id === "") rosterFail("case id must be a nonempty string");
     if (seenIds.has(id)) rosterFail("case id " + JSON.stringify(id) + " appears more than once");
@@ -418,6 +425,13 @@ const validateRoster = async (rosterPath: string): Promise<Roster> => {
     }
     const transport = item.transport;
     if (transport !== "arg" && transport !== "stdin-file") rosterFail(where + " transport must be arg or stdin-file");
+    // DL-1: the case owns its deadline — a bounded wall-clock budget frozen
+    // with the manifest, never an execute-time knob.
+    const deadlineMs = item.deadlineMs;
+    if (typeof deadlineMs !== "number" || !Number.isInteger(deadlineMs)
+      || deadlineMs < 5000 || deadlineMs > 3_600_000) {
+      rosterFail(where + " deadlineMs must be an integer between 5000 and 3600000");
+    }
     const root = item.root;
     if (typeof root !== "string" || root === "") rosterFail(where + " root must be a nonempty string");
     await isDirectory(root, where + " root");
@@ -471,6 +485,9 @@ const validateRoster = async (rosterPath: string): Promise<Roster> => {
     }
     if (typeof contract === "string") await isRegularFile(contract, where + " files.contract");
     for (const hook of (hooks as string[] | undefined) ?? []) await isRegularFile(hook, where + " files.hooks entry");
+    if (item.outputSchema !== undefined && typeof item.outputSchema !== "string") {
+      rosterFail(where + " outputSchema must be a string");
+    }
   }
   return roster as unknown as Roster;
 };
@@ -551,15 +568,23 @@ export async function prepareRound(
   const evidenceInfo = await stat(roster.evidenceRoot);
   const cases = [];
   for (const item of roster.cases) {
+    // SC-1: the schema is validated with the same input-boundary check the CLI
+    // runs, so a roster whose schema the CLI would refuse never freezes — no
+    // manifest, no spend. Fixed wording only; schema content never reaches it.
+    if (item.outputSchema !== undefined) {
+      const schema = validateOutputSchema(item.outputSchema);
+      if ("error" in schema) rosterFail("case " + JSON.stringify(item.id) + " outputSchema " + schema.error);
+    }
     const rootInfo = await stat(item.root);
     const tree = await hashTree(item.root);
     if (tree === null) {
       rosterFail("case " + JSON.stringify(item.id)
         + " root tree cannot be frozen (oversize, unreadable, or non-regular file)");
     }
-    const files: { role: string; path: string; sha256: string }[] = [];
+    const files: { role: string; path: string; sha256: string; dev: number; ino: number }[] = [];
     const addFile = async (role: string, path: string): Promise<void> => {
-      files.push({ role, path, sha256: sha256hex(await readFile(path)) });
+      const info = await stat(path);
+      files.push({ role, path, sha256: sha256hex(await readFile(path)), dev: info.dev, ino: info.ino });
     };
     if (item.files.contract !== undefined) await addFile("contract", item.files.contract);
     if (item.files.taskFile !== undefined) await addFile("taskFile", item.files.taskFile);
@@ -584,18 +609,26 @@ export async function prepareRound(
         await rm(runtimeDir, { recursive: true, force: true });
       }
     }
+    let outputSchema: { path: string; sha256: string; dev: number; ino: number } | undefined;
+    if (item.outputSchema !== undefined) {
+      const schemaInfo = await stat(item.outputSchema);
+      outputSchema = { path: item.outputSchema, sha256: sha256hex(await readFile(item.outputSchema)),
+        dev: schemaInfo.dev, ino: schemaInfo.ino };
+    }
     cases.push({
       id: item.id,
       kind: item.kind,
       scope: item.scope,
       task: item.task,
       transport: item.transport,
+      deadlineMs: item.deadlineMs,
       root: { canonical: await realpath(item.root), dev: rootInfo.dev, ino: rootInfo.ino },
       allowedChanges: item.allowedChanges,
       allowedProfiles: item.allowedProfiles,
       grading: item.grading,
       tree: Object.fromEntries(tree),
-      files
+      files,
+      outputSchema
     });
   }
   const manifest = {
@@ -625,12 +658,14 @@ type RoundCase = {
   kind: "worker-readonly" | "worker-write";
   task: string;
   transport: "arg" | "stdin-file";
+  deadlineMs: number;
   root: { canonical: string; dev: number; ino: number };
   allowedChanges: string[];
   allowedProfiles: string[];
   grading: { mode: string; expected: unknown };
   tree: Record<string, string>;
-  files: { role: string; path: string; sha256: string }[];
+  files: { role: string; path: string; sha256: string; dev: number; ino: number }[];
+  outputSchema?: { path: string; sha256: string; dev: number; ino: number };
 };
 
 type RoundManifest = {
@@ -645,7 +680,9 @@ type RoundManifest = {
 };
 
 const CLI_PATH = join(REPO_ROOT, "dist", "src", "cli.js");
-export const CASE_TIMEOUT_MS = 240_000;
+// DL-1: the default case deadline a roster may freeze when it wants the
+// standard budget; every case carries its own explicit deadlineMs either way.
+export const DEFAULT_CASE_DEADLINE_MS = 240_000;
 const CONTRACT_TIMEOUT_MS = 20_000;
 const JOURNAL_CAP_BYTES = 1 << 20;
 const SCRUBBED_ENV_KEYS = ["TURNHELM_ALLOW_HOSTED_JEV", "TYPESAFE_API_KEY", "LAYA_API_KEY", "OPENAI_API_KEY",
@@ -668,15 +705,23 @@ const parseRoundManifest = (bytes: Buffer): RoundManifest | null => {
     for (const item of value.cases) {
       if (typeof item?.id !== "string" || typeof item?.task !== "string"
         || (item.transport !== "arg" && item.transport !== "stdin-file")
+        || typeof item.deadlineMs !== "number" || !Number.isInteger(item.deadlineMs)
+        || item.deadlineMs < 5000 || item.deadlineMs > 3_600_000
         || (item.kind !== "worker-readonly" && item.kind !== "worker-write")
         || typeof item.root?.canonical !== "string"
         || !Number.isInteger(item.root?.dev) || !Number.isInteger(item.root?.ino)
         || typeof item.grading?.mode !== "string" || !Array.isArray(item.files)
+        || !item.files.every((file: { path?: unknown; sha256?: unknown; dev?: unknown; ino?: unknown }) =>
+          typeof file?.path === "string" && typeof file?.sha256 === "string"
+          && Number.isInteger(file?.dev) && Number.isInteger(file?.ino))
         || !Array.isArray(item.allowedChanges) || item.allowedChanges.some(v => typeof v !== "string")
         || !Array.isArray(item.allowedProfiles) || item.allowedProfiles.length === 0
         || item.allowedProfiles.some(v => typeof v !== "string")
         || typeof item.tree !== "object" || item.tree === null || Array.isArray(item.tree)
-        || !Object.values(item.tree).every(v => typeof v === "string")) return null;
+        || !Object.values(item.tree).every(v => typeof v === "string")
+        || (item.outputSchema !== undefined
+          && (typeof item.outputSchema?.path !== "string" || typeof item.outputSchema?.sha256 !== "string"
+            || !Number.isInteger(item.outputSchema?.dev) || !Number.isInteger(item.outputSchema?.ino)))) return null;
     }
     return value;
   } catch {
@@ -915,7 +960,7 @@ const ORACLE_INPUT_CAP_BYTES = 1 << 16;
 export async function executeRound(
   manifestPath: string,
   approvedSha256: string,
-  options?: Readonly<{ env?: NodeJS.ProcessEnv; signal?: AbortSignal; sandboxExecPath?: string; caseTimeoutMs?: number }>
+  options?: Readonly<{ env?: NodeJS.ProcessEnv; signal?: AbortSignal; sandboxExecPath?: string }>
 ): Promise<number> {
   // Signal ladder (spec §3.3): the first SIGINT stops gracefully — the owned
   // CLI child is signalled through its supervision abort path and the round
@@ -963,10 +1008,22 @@ const rootIdentityMatches = async (
     && await realpath(root.canonical).catch(() => "") === root.canonical;
 };
 
+// OR-1 (spec §3.3): a roster-referenced oracle file is its filesystem
+// identity, not its pathname or bytes — dev/ino beside the frozen hash, so a
+// same-path byte-identical replacement never passes once identity is frozen.
+const fileIdentityMatches = async (
+  frozen: Readonly<{ path: string; sha256: string; dev: number; ino: number }>
+): Promise<boolean> => {
+  const info = await stat(frozen.path).catch(() => null);
+  if (info === null || info.dev !== frozen.dev || info.ino !== frozen.ino) return false;
+  const bytes = await readFile(frozen.path).catch(() => null);
+  return bytes !== null && sha256hex(bytes) === frozen.sha256;
+};
+
 async function runGatedRound(
   manifestPath: string,
   approvedSha256: string,
-  options: Readonly<{ env?: NodeJS.ProcessEnv; sandboxExecPath?: string; caseTimeoutMs?: number }> | undefined,
+  options: Readonly<{ env?: NodeJS.ProcessEnv; sandboxExecPath?: string }> | undefined,
   signal: AbortSignal,
   terminated: () => boolean
 ): Promise<number> {
@@ -1036,15 +1093,31 @@ async function runGatedRound(
       stopReason = "root-identity";
     } else {
       for (const file of item.files) {
+        const info = await stat(file.path).catch(() => null);
+        if (info === null) {
+          stopReason = "case-files";
+          break;
+        }
         const fileBytes = await readFile(file.path).catch(() => null);
         if (fileBytes === null || sha256hex(fileBytes) !== file.sha256) {
           stopReason = "case-files";
+          break;
+        }
+        if (info.dev !== file.dev || info.ino !== file.ino) {
+          stopReason = "oracle-identity";
           break;
         }
       }
       const hasRole = (role: string): boolean => item.files.some(file => file.role === role);
       if ((item.transport === "stdin-file" && !hasRole("taskFile"))
         || (item.kind === "worker-write" && !hasRole("contract"))) stopReason = "case-files";
+      if (stopReason === null && item.outputSchema !== undefined) {
+        const schema = item.outputSchema;
+        const info = await stat(schema.path).catch(() => null);
+        const schemaBytes = info === null ? null : await readFile(schema.path).catch(() => null);
+        if (info === null || schemaBytes === null || sha256hex(schemaBytes) !== schema.sha256) stopReason = "case-files";
+        else if (info.dev !== schema.dev || info.ino !== schema.ino) stopReason = "oracle-identity";
+      }
       const launchTree = await hashTree(item.root.canonical);
       if (launchTree === null || treeChangedOutside(frozenTree, launchTree, []) !== null) {
         stopReason = "case-files";
@@ -1070,18 +1143,23 @@ async function runGatedRound(
     // file into the CLI's stdin through an exec'ing shell (superviseCli wires
     // the child's stdin to "ignore", so the redirect must happen in-shell).
     const writeArgs = item.kind === "worker-write" ? ["--write"] : [];
+    // SC-1: the schema rides the CLI flag from its frozen path; the CLI's own
+    // input boundary re-validates and stages the bytes into the managed home.
+    const schemaArgs = item.outputSchema === undefined ? [] : ["--output-schema", item.outputSchema.path];
     const taskFileEntry = item.files.find(file => file.role === "taskFile");
     const supervision = item.transport === "arg"
-      ? { file: process.execPath, args: [CLI_PATH, "run", "--project", item.root.canonical, ...writeArgs, "--", item.task] }
+      ? { file: process.execPath, args: [CLI_PATH, "run", "--project", item.root.canonical, ...writeArgs, ...schemaArgs, "--", item.task] }
       : {
           file: "/bin/sh",
           args: ["-c", ["exec", shQuote(process.execPath), shQuote(CLI_PATH), "run",
-            "--project", shQuote(item.root.canonical), ...writeArgs.map(shQuote),
+            "--project", shQuote(item.root.canonical), ...writeArgs.map(shQuote), ...schemaArgs.map(shQuote),
             "<", shQuote(taskFileEntry === undefined ? "" : taskFileEntry.path)].join(" ")]
         };
-    // caseTimeoutMs is a test knob; the production budget stays CASE_TIMEOUT_MS.
+    // DL-1: each case runs under its own frozen deadline — monotonic clock
+    // from CLI spawn to supervision settlement; the cleanup grace stays a
+    // separate budget execution can never extend.
     const observation = await superviseCli(supervision.file, supervision.args,
-      { env, timeoutMs: options?.caseTimeoutMs ?? CASE_TIMEOUT_MS, signal });
+      { env, timeoutMs: item.deadlineMs, signal });
     if (observation.aborted || signal.aborted) {
       await appendEvidence({ phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
       return terminated() ? 143 : 130;
@@ -1155,6 +1233,24 @@ async function runGatedRound(
     // ordinary case failure (spec §3.2(2)).
     if (passed && item.kind === "worker-write") {
       const contractEntry = item.files.find(file => file.role === "contract");
+      // OR-1: identity brackets the sandboxed check over every consumed input
+      // the round froze — contract, task file, and hooks alike. Each must be
+      // the same filesystem object when the check starts and again before its
+      // outcome is accepted; a rebind in that window spends trust in an
+      // oracle the round never froze.
+      const oracleFilesMatch = async (): Promise<boolean> => {
+        for (const file of item.files) {
+          if (!(await fileIdentityMatches(file))) return false;
+        }
+        return true;
+      };
+      if (contractEntry === undefined || !(await oracleFilesMatch())) {
+        await appendEvidence({
+          phase: "stopped", caseId: item.id, reason: "oracle-identity",
+          ...(workerFailure !== undefined ? { workerFailure } : {})
+        }).catch(() => {});
+        return 1;
+      }
       const runtimeDir = await mkdtemp(join(tmpdir(), "turnhelm-round-check-"));
       let contract: CheckOutcome;
       try {
@@ -1170,6 +1266,13 @@ async function runGatedRound(
         });
       } finally {
         await rm(runtimeDir, { recursive: true, force: true });
+      }
+      if (!(await oracleFilesMatch())) {
+        await appendEvidence({
+          phase: "stopped", caseId: item.id, reason: "oracle-identity",
+          ...(workerFailure !== undefined ? { workerFailure } : {})
+        }).catch(() => {});
+        return 1;
       }
       // A signal that lands mid-contract settles the round through the signal
       // ladder, never as a contract infrastructure stop.

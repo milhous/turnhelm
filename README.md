@@ -15,7 +15,7 @@ responsible for its own authentication and provider access.
 | --- | --- | --- |
 | `turnhelm init [--dry-run]` | Install the managed skill, project config, and AGENTS block | No Codex child |
 | `turnhelm doctor [--json] [--probe]` | Report project, toolchain, config, and skill readiness | No Codex child |
-| `turnhelm run [--write] [--output-schema <file>] [--] ["<task>"]` | Route the complete task, then start at most one Codex child | `read-only`; `workspace-write` only with `--write` |
+| `turnhelm run [--write] [--output-schema <file>] [--lifecycle] [--] ["<task>"]` | Route the complete task, then start at most one Codex child | `read-only`; `workspace-write` only with `--write` |
 
 All three commands accept `--project <dir>` (relative to the current directory
 or absolute). Without it, the current directory is the project root; Turnhelm
@@ -86,7 +86,7 @@ evidence of successful routing or access to the selected Codex model.
 
 Reuse an already healthy service; do not start a duplicate. If none is running
 and startup is authorized, this foreground reference is for an **already
-installed** Laya 0.3.22 serve-capable virtual environment with cached
+installed** Laya 0.4.8 serve-capable virtual environment with cached
 `typed-decisions` weights:
 
 ```bash
@@ -326,6 +326,15 @@ than opened.
   mutation of the file cannot change what the worker saw. The receipt's
   `payload.mode` still reports framing only; schema conformance is the
   consumer's acceptance gate.
+- **Opt-in lifecycle evidence.** `run --lifecycle` records a bounded,
+  content-free worker timeline: a frozen event taxonomy (spawned through
+  settle) with millisecond ages, never worker output, task text, or error
+  prose. The executed-worker receipt carries a `lifecycle` projection of at
+  most 64 events (first 8 and last 56 kept, with an `overflow` marker), and
+  each event is also appended best-effort to `.turnhelm/lifecycle.jsonl` under
+  the project root — the journal outlives a hard kill that prevents the
+  receipt. A journaling failure never fails the run; fire-and-forget appends
+  may briefly hold the event loop at exit.
 - **Completion is not verification.** A `completed` worker (exit 0) proves the
   child finished its turn — nothing more. Whether the task was actually done
   is judged by consumer-side gates: the output schema above, oracle and
@@ -423,7 +432,9 @@ To exercise both eligible classifiers, obtain separate request/hosted consent
 before `turnhelm doctor --probe --json --project "$PROJECT"`. It sends one
 synthetic request per eligible backend but no worker, through the same shared
 request boundary, eligibility gates, and explicit Jev transport policy as
-`run` — the probe has no separate network path. Both probe results plus
+`run` — the probe has no separate network path. A failed probe's evidence
+line carries the last observed HTTP status with the same fixed guidance
+wording, never a raw response body. Both probe results plus
 one successful real task prove only those observed paths, not general quality,
 all six model/effort combinations, whole-task cost, or savings.
 
@@ -492,7 +503,13 @@ the frozen failure class plus the `ownedShutdown` action boolean, with an
 optional correlation hash and observed death signal; no failure text —
 plus `workerProgress`, the receipt's decoded-event count and, when one
 decoded, the last decode's age at settlement, the same parent-observed
-projection that never claims liveness. Observed and case records also carry
+projection that never claims liveness. A failed or timed-out case additionally
+carries `workerLifecycle` — the bounded content-free worker timeline (`tMs`
+and `kind`, plus at most a fixed-vocabulary `detail` such as the observed
+failure class; at most 64 events) projected from the receipt's `lifecycle`
+field, or rebuilt from the best-effort `.turnhelm/lifecycle.jsonl` journal by
+the supervised CLI's pid when the CLI died before receipting; completed runs
+carry none. Observed and case records also carry
 `attemptTransports`, a bounded projection of the per-attempt backend and
 transport mode — at most two entries in a Laya-then-Jev subsequence with Laya
 always direct; missing, duplicate, reversed, oversized, or otherwise invalid
@@ -505,14 +522,21 @@ ordinary verdict path. The harness also exports its shared
 oracle primitives — the payload-agnostic `envelopePayload` envelope fact
 and the root-parameterized `oracleSandboxPolicy` sandbox profile — so
 sealed-round tooling and tests judge against one frozen definition instead
-of two that drift. Exit codes: `2` usage, `1`
-failure or incomplete, `0` complete pass, `3` a complete calibration roster
-containing a band-policy mismatch, `4` a complete worker roster containing at
-least one engineering failure, `130`/`143` on interrupt. In the calibration
-suites a legal-but-out-of-band selection is recorded as a policy mismatch and
-the roster continues to its full 12 calls; in worker suites a task-output
-failure — wrong or missing output with every integrity check true — fails
-that case and the approved roster continues. Only those two classes continue:
+of two that drift. Each worker-suite case freezes its own integer `deadlineMs`
+(5000–3600000 ms) at prepare and may carry its own output schema through the
+same CLI flag; an expired deadline is an unjudged `timeout` verdict behind
+custom-round's three gates — the CLI must close cleanly, carry exactly one
+CLI receipt (a receiptless timeout, a killed CLI, stops the round with its
+crash evidence retained), and leave a settled tree — never a stop by itself.
+Exit codes: `2`
+usage, `1` failure or incomplete, `0` complete pass, `3` a complete
+calibration roster containing a band-policy mismatch, `4` a complete worker
+roster containing at least one failed or timed-out case, `130`/`143` on
+interrupt. In the calibration suites a legal-but-out-of-band selection is
+recorded as a policy mismatch and the roster continues to its full 12 calls;
+in worker suites a task-output failure — wrong or missing output with every
+integrity check true — fails that case and the approved roster continues, as
+does an unjudged per-case timeout. Only those classes continue:
 every other failure, including any integrity failure (a mid-case replacement
 of the consumer root is caught by the `root-identity` check), stops the round
 immediately. A visible `completed` journal record plus its exit code is a
@@ -552,6 +576,10 @@ pnpm run build
 # Hermetic tests: do not use classifier credentials or hosted Jev.
 env -u TYPESAFE_API_KEY -u LAYA_API_KEY -u TURNHELM_ALLOW_HOSTED_JEV pnpm test
 env -u TYPESAFE_API_KEY -u LAYA_API_KEY -u TURNHELM_ALLOW_HOSTED_JEV pnpm run test:coverage
+# Coverage-claim rule: admission suites rebind profile mappings per tuple, so
+# admission is evidence of execution under a forced pair, never of natural
+# selection; any six-profile natural-coverage claim requires natural runs with
+# unchanged mappings, reported with actual selections and remaining gaps.
 
 # Dependency audit.
 pnpm audit --audit-level high
@@ -563,7 +591,9 @@ exported through the built `dist/test` surface and invocable as
 <sha256>` — for owner-defined validation rosters. The round input is a
 data-only JSON roster: nothing executable is trusted from it, and every
 referenced file is hashed into a frozen manifest as data, alongside a per-case
-snapshot of the whole consumer tree. `prepareRound` validates the roster,
+snapshot of the whole consumer tree. Each roster case carries a required
+integer `deadlineMs` (5000–3600000 ms) that the runner supervises the case CLI
+under, and may carry an `outputSchema` file frozen with the same hash record. `prepareRound` validates the roster,
 re-verifies the pinned HEAD and the whole-consumption baseline (every built
 module the round executes), preflights the sandbox machinery and each roster
 contract's loadability, and writes the manifest with a human approval request
@@ -587,7 +617,13 @@ Every case then passes the same settled-tree gate — root dev/ino plus
 canonical-path re-check and a re-hash against the case's allowedChanges —
 graded or timed out: a same-content root replacement stops `root-identity`,
 and a write outside the allowance stops `tree-drift`, even when the output
-graded fine. A timeout is an unjudged per-case outcome, not a stop
+graded fine. The same identity rule binds the frozen inputs: every
+roster-referenced file — including a case's `outputSchema` — re-verifies
+dev/ino plus bytes at the pre-spend gate, and the oracle's consumed inputs
+(contract, task file, hooks) re-verify again around the sandboxed contract
+check, so a byte-identical rebind of an oracle or contract
+file stops `oracle-identity` before any spend, while a mutated or missing
+file stops `case-files`. A timeout is an unjudged per-case outcome, not a stop
 (`outcome:"timeout"`): no oracle grading and no contract check, and after the
 settled-tree gate its case record is appended and the roster continues to the
 next reservation. Every case record (pass, failed, or timeout) and the
@@ -657,23 +693,24 @@ are historical design records, not current invocation instructions.
 Interactive, evidence-pinned diagrams live under [`.archify/`](.archify/).
 GitHub Markdown cannot embed interactive HTML, so the static captures below
 link to the artifacts; open the HTML files locally (for example
-`open .archify/architecture-turnhelm-20261014-072825/turnhelm-architecture.html`)
+`open .archify/architecture-turnhelm-20261017-153352/turnhelm-architecture.html`)
 for the interactive versions with zoom, guided views, and source links.
 
-[![Architecture diagram](.archify/architecture-turnhelm-20261014-072825/visual-check/turnhelm-architecture.visual-check.1440x900.light.png)](.archify/architecture-turnhelm-20261014-072825/turnhelm-architecture.html)
+[![Architecture diagram](.archify/architecture-turnhelm-20261017-153352/visual-check/turnhelm-architecture.visual-check.1440x900.light.png)](.archify/architecture-turnhelm-20261017-153352/turnhelm-architecture.html)
 
-[Architecture](.archify/architecture-turnhelm-20261014-072825/turnhelm-architecture.html)
+[Architecture](.archify/architecture-turnhelm-20261017-153352/turnhelm-architecture.html)
 — components, the host-loopback boundary, and trust gates including the
-ZDOTDIR managed-root redirect.
+per-run managed worker home (`CODEX_HOME`), alongside the routes and
+lifecycle journals.
 
-[![Routing workflow diagram](.archify/workflow-turnhelm-run-20261014-072825/visual-check/turnhelm-run-workflow.visual-check.1440x900.light.png)](.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html)
+[![Routing workflow diagram](.archify/workflow-turnhelm-run-20261017-153352/visual-check/turnhelm-run-workflow.visual-check.1440x900.light.png)](.archify/workflow-turnhelm-run-20261017-153352/turnhelm-run-workflow.html)
 
-[Routing workflow](.archify/workflow-turnhelm-run-20261014-072825/turnhelm-run-workflow.html)
+[Routing workflow](.archify/workflow-turnhelm-run-20261017-153352/turnhelm-run-workflow.html)
 — one `turnhelm run` from task submission to the classified-payload stdout
 contract and receipt, including rejection and fail-closed paths.
 
-Both diagrams are pinned at `733753e`, whose snapshot includes the
+Both diagrams are pinned at `76f44f1`, whose snapshot covers the
 structured payload emission contract (`src/payload.ts` modes: strict,
-extracted, conflict, unstructured) on top of the earlier
-final-message-only stdout contract; superseded `.archify/` generations
-live in git history.
+extracted, conflict, unstructured), the `--output-schema` staging and
+`--lifecycle` timeline flags, and the per-run managed worker home;
+superseded `.archify/` generations live in git history.

@@ -7,7 +7,7 @@ import { readProjectFile } from "./project.js";
 import { readCodexSignals } from "./models.js";
 import { inspectCodex, inspectGit } from "./preflight.js";
 import { isSupportedNode, MIN_NODE_VERSION } from "./runtime.js";
-import { eligibleBackends, requestTaskChoice, type ChoiceRequest, type TaskBackend } from "./systemone.js";
+import { classifierFailure, eligibleBackends, requestTaskChoice, type ChoiceRequest, type TaskBackend } from "./systemone.js";
 
 export type CheckStatus = "pass" | "warn" | "fail" | "unverified" | "skipped";
 
@@ -44,8 +44,10 @@ function present(value: unknown): boolean {
 }
 
 // Fixed, sanitized probe outcome; the injected request's error text is never
-// surfaced and nothing about the probe is persisted.
+// surfaced and nothing about the probe is persisted. The only retained detail
+// of a failure is the whitelisted httpStatus actually observed on the wire.
 type ProbeOutcome = "completed" | "failed" | "cancelled";
+type ProbeResult = Readonly<{ outcome: ProbeOutcome; httpStatus: number | null }>;
 
 // The probe travels the validated single-backend choice boundary: it sends
 // the real six-criteria request with instructions and only a valid choice
@@ -57,8 +59,8 @@ async function runProbe(
   env: NodeJS.ProcessEnv,
   request: ChoiceRequest | undefined,
   callerSignal: AbortSignal | undefined
-): Promise<ProbeOutcome> {
-  if (callerSignal?.aborted) return "cancelled";
+): Promise<ProbeResult> {
+  if (callerSignal?.aborted) return { outcome: "cancelled", httpStatus: null };
   // Each probe owns its controller so one configured budget and the caller's
   // signal cancel this request alone; a misbehaving request is raced by the
   // budget so the doctor always terminates (E7).
@@ -68,20 +70,22 @@ async function runProbe(
   const started = performance.now(); // E11: wall-clock corrections must never swing the budget recheck.
   const budget = setTimeout(() => controller.abort(), config.routingTimeoutMs);
   // The race keeps the doctor bounded even when an injected request ignores
-  // its signal and never settles.
-  const bounded = new Promise<"failed" | "cancelled">(resolve => {
-    controller.signal.addEventListener("abort", () => resolve(callerSignal?.aborted ? "cancelled" : "failed"), { once: true });
+  // its signal and never settles; a budget abort observed nothing, so no status.
+  const bounded = new Promise<ProbeResult>(resolve => {
+    controller.signal.addEventListener("abort", () =>
+      resolve(callerSignal?.aborted ? { outcome: "cancelled", httpStatus: null } : { outcome: "failed", httpStatus: null }), { once: true });
   });
   try {
     const attempted = requestTaskChoice(config, PROBE_TASK, backend, env, controller.signal, request)
-      .then(() => "completed" as const, (): ProbeOutcome => "failed");
+      .then((): ProbeResult => ({ outcome: "completed", httpStatus: null }),
+        (error): ProbeResult => ({ outcome: "failed", httpStatus: classifierFailure(error).httpStatus }));
     const outcome = await Promise.race([attempted, bounded]);
-    if (outcome === "failed" && callerSignal?.aborted) return "cancelled";
-    if (outcome === "completed") {
+    if (outcome.outcome === "failed" && callerSignal?.aborted) return { outcome: "cancelled", httpStatus: null };
+    if (outcome.outcome === "completed") {
       // Recheck the caller and a monotonic deadline before settling success:
       // the budget timer cannot run while a busy request blocks the loop (E7).
-      if (callerSignal?.aborted) return "cancelled";
-      if (performance.now() - started > config.routingTimeoutMs) return "failed";
+      if (callerSignal?.aborted) return { outcome: "cancelled", httpStatus: null };
+      if (performance.now() - started > config.routingTimeoutMs) return { outcome: "failed", httpStatus: null };
     }
     return outcome;
   } finally {
@@ -302,7 +306,16 @@ async function backendCheck(
     return check(id, "unverified", "probe refused on an unsupported runtime",
       "upgrade node to " + MIN_NODE_VERSION.join(".") + " or newer, then re-run turnhelm doctor --probe");
   }
-  const outcome = await runProbe(backend, config, env, options.request, options.signal);
+  const { outcome, httpStatus } = await runProbe(backend, config, env, options.request, options.signal);
   const probed = PROBE_STATUS[outcome];
-  return check(id, probed.status, probed.evidence, probed.status === "pass" ? "" : "check backend connectivity and credentials, then re-run turnhelm doctor --probe");
+  // A refused request reports what was observed — the retained status — with
+  // fixed guidance; no causation is asserted for why the backend refused.
+  const evidence = outcome === "failed" && httpStatus !== null
+    ? probed.evidence + "; last observed HTTP status " + httpStatus
+    : probed.evidence;
+  const next = probed.status === "pass" ? ""
+    : outcome === "failed"
+      ? "disable the backend in .turnhelm/config.json or resolve access with its operator, then re-run turnhelm doctor --probe"
+      : "check backend connectivity and credentials, then re-run turnhelm doctor --probe";
+  return check(id, probed.status, evidence, next);
 }

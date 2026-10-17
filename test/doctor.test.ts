@@ -9,7 +9,7 @@ import { initProject } from "../src/init.js";
 import { readTemplates } from "../src/assets.js";
 import { doctorProject } from "../src/doctor.js";
 import { PROFILE_IDS } from "../src/config.js";
-import type { ChoiceRequest, RequestSpec } from "../src/systemone.js";
+import { ClassifierRequestError, type ChoiceRequest, type RequestSpec } from "../src/systemone.js";
 
 const SENTINELS: NodeJS.ProcessEnv = {
   LAYA_API_KEY: "TEST_LAYA_SENTINEL",
@@ -285,6 +285,42 @@ test("probe mode requests each eligible backend exactly once and persists nothin
   assert.equal(byId.get("backend.laya")?.status, "pass");
   assert.equal(byId.get("backend.jev")?.status, "pass");
   assert.equal(result.code, 0);
+});
+
+test("a probe failure surfaces its observed http status with fixed guidance", async (t) => {
+  const root = await preparedProject(t);
+  await writeProjectConfig(root, config => {
+    const backends = config.backends as Record<string, unknown>;
+    backends.jev = { enabled: false, transport: { mode: "direct" } };
+  });
+  const bin = await fakeBin(t);
+  const request: ChoiceRequest = () => Promise.reject(
+    new ClassifierRequestError({ kind: "http", httpStatus: 451, code: null }, "refused"));
+  const result = await doctorProject(root, { probe: true, env: await doctorEnv(t, bin), request });
+  const byId = new Map(result.checks.map(check => [check.id, check]));
+  const laya = byId.get("backend.laya")!;
+  assert.equal(laya.status, "fail");
+  assert.ok(laya.evidence.includes("HTTP status 451"),
+    "the retained status reaches the evidence: " + laya.evidence);
+  assert.ok(laya.next.includes("resolve access with its operator"), laya.next);
+  assert.equal(result.code, 1);
+});
+
+test("a budget-abort probe failure fabricates no http status", async (t) => {
+  const root = await preparedProject(t);
+  await writeProjectConfig(root, config => {
+    config.routingTimeoutMs = 200;
+    const backends = config.backends as Record<string, unknown>;
+    backends.jev = { enabled: false, transport: { mode: "direct" } };
+  });
+  const bin = await fakeBin(t);
+  const request: ChoiceRequest = () => new Promise(() => { /* never settles, ignores signal */ });
+  const result = await doctorProject(root, { probe: true, env: await doctorEnv(t, bin), request });
+  const byId = new Map(result.checks.map(check => [check.id, check]));
+  const laya = byId.get("backend.laya")!;
+  assert.equal(laya.status, "fail");
+  assert.ok(!laya.evidence.includes("HTTP status"),
+    "no status was observed, so none may be printed: " + laya.evidence);
 });
 
 test("a probe that never answers terminates on its configured budget", async (t) => {

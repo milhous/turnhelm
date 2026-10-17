@@ -1,0 +1,1126 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "architecture",
+  "quality": "showcase",
+  "startedAt": "2026-10-17T07:45:22.198Z",
+  "specification": {
+    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261017-153352/candidate.json",
+    "sha256": "ff5b90b82bdbfaff2a0227a0b4f6375833d75082c4deec7b5a7f6421093a1702",
+    "bytes": 11991
+  },
+  "artifact": {
+    "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261017-153352/turnhelm-architecture.html",
+    "sha256": "9418397f262062f06cd31b801fa2e0374890f99715020974b777aa246b7f1771",
+    "bytes": 774675
+  },
+  "stages": {
+    "validate": {
+      "status": "pass",
+      "exitCode": 0,
+      "durationMs": null,
+      "execution": "embedded-in-deliver",
+      "command": [
+        "/opt/homebrew/Cellar/node/26.5.0/bin/node",
+        "/Users/zhangxiao/.agents/skills/archify/bin/archify.mjs",
+        "deliver",
+        "architecture",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261017-153352/candidate.json",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261017-153352/turnhelm-architecture.html",
+        "--quality",
+        "showcase",
+        "--repo-root",
+        "/Users/zhangxiao/Documents/work/github/turnhelm",
+        "--json"
+      ],
+      "receipt": {
+        "schemaVersion": 1,
+        "ok": true,
+        "command": "validate",
+        "specification": {
+          "sha256": "ff5b90b82bdbfaff2a0227a0b4f6375833d75082c4deec7b5a7f6421093a1702",
+          "bytes": 11991
+        },
+        "validation": {
+          "checksPassed": 9,
+          "checkCount": 9,
+          "compositionProfile": "showcase",
+          "compositionStatus": "pass",
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    "deliver": {
+      "status": "pass",
+      "exitCode": 0,
+      "durationMs": 337,
+      "command": [
+        "/opt/homebrew/Cellar/node/26.5.0/bin/node",
+        "/Users/zhangxiao/.agents/skills/archify/bin/archify.mjs",
+        "deliver",
+        "architecture",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261017-153352/candidate.json",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261017-153352/turnhelm-architecture.html",
+        "--quality",
+        "showcase",
+        "--repo-root",
+        "/Users/zhangxiao/Documents/work/github/turnhelm",
+        "--json"
+      ],
+      "receipt": {
+        "schemaVersion": 1,
+        "receiptId": "4ae76f32-1d06-4770-b1e0-d5b0d99c762e",
+        "ok": true,
+        "command": "deliver",
+        "type": "architecture",
+        "input": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261017-153352/candidate.json",
+        "output": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261017-153352/turnhelm-architecture.html",
+        "specification": {
+          "sha256": "ff5b90b82bdbfaff2a0227a0b4f6375833d75082c4deec7b5a7f6421093a1702",
+          "bytes": 11991
+        },
+        "artifact": {
+          "sha256": "9418397f262062f06cd31b801fa2e0374890f99715020974b777aa246b7f1771",
+          "bytes": 774675
+        },
+        "validation": {
+          "checksPassed": 9,
+          "checkCount": 9,
+          "compositionProfile": "showcase",
+          "compositionStatus": "pass",
+          "errors": 0,
+          "warnings": 0
+        },
+        "evidence": {
+          "verified": true,
+          "repository": "git@github.com:milhous/turnhelm",
+          "revision": "76f44f1749e6f014b663999d270cd8fe4c2920a7",
+          "references": 21,
+          "linkMode": "local-only"
+        },
+        "update": {
+          "status": "unavailable",
+          "installedVersion": null,
+          "availableVersion": null,
+          "releaseNotes": null,
+          "checkedAt": null,
+          "source": null,
+          "noticeRequired": false,
+          "noticeText": null,
+          "reason": "disabled"
+        }
+      }
+    },
+    "check": {
+      "status": "pass",
+      "exitCode": 0,
+      "durationMs": 193,
+      "command": [
+        "/opt/homebrew/Cellar/node/26.5.0/bin/node",
+        "/Users/zhangxiao/.agents/skills/archify/bin/archify.mjs",
+        "check",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261017-153352/turnhelm-architecture.html",
+        "--require-provenance"
+      ],
+      "receipt": {
+        "ok": true,
+        "file": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261017-153352/turnhelm-architecture.html",
+        "artifact": {
+          "sha256": "9418397f262062f06cd31b801fa2e0374890f99715020974b777aa246b7f1771",
+          "bytes": 774675
+        },
+        "checks": [
+          {
+            "name": "single_svg",
+            "ok": true,
+            "details": [
+              "found 1 <svg> block(s)"
+            ]
+          },
+          {
+            "name": "finite_svg",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "orthogonal_arrows",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "label_route_clearance",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "relationship_crossings",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "relationship_corridors",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "container_border_runs",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "route_rhythm",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "legend_clearance",
+            "ok": true,
+            "details": []
+          }
+        ],
+        "composition": {
+          "schemaVersion": 1,
+          "profile": "showcase",
+          "status": "pass",
+          "summary": {
+            "errors": 0,
+            "warnings": 0
+          },
+          "metrics": {
+            "properCrossings": 0,
+            "resolvedCrossovers": 2,
+            "ambiguousCorridors": 0,
+            "arrowheadCollisions": 0,
+            "containerBorderRuns": 0,
+            "labelRouteClearanceIssues": 0,
+            "labelCanvasOverflowIssues": 0,
+            "minLabelRouteClearance": 6,
+            "desktopReadabilityIssues": 0,
+            "viewportHeightIssues": 0,
+            "minProjectedNodeTextPx": 6.4,
+            "maxBends": 4,
+            "routesOverSuggestedBends": 3,
+            "maxStretch": 1.811,
+            "routesOverSuggestedStretch": 1,
+            "minSegmentPx": 20,
+            "minInteriorSegmentPx": 30.6,
+            "shortSegmentCount": 0,
+            "shortEndpointSegmentCount": 0,
+            "shortInteriorSegmentCount": 0,
+            "microSegmentCount": 0
+          },
+          "suggestedLimits": {
+            "bendsPerRelationship": 2,
+            "stretch": 1.35,
+            "segmentPx": 16,
+            "microSegmentPx": 8
+          },
+          "routeReview": {
+            "crossings": [
+              {
+                "left": {
+                  "id": "conPreflight",
+                  "from": "turnhelmCli",
+                  "to": "preflight",
+                  "label": "Node/Codex/Git",
+                  "collectionIndex": 6,
+                  "artifactIndex": 7
+                },
+                "right": {
+                  "id": "conJournal",
+                  "from": "turnhelmCli",
+                  "to": "routeJournal",
+                  "label": "append decision",
+                  "collectionIndex": 7,
+                  "artifactIndex": 8
+                },
+                "point": [
+                  310,
+                  477
+                ],
+                "sharedNode": "turnhelmCli"
+              },
+              {
+                "left": {
+                  "id": "conLifecycle",
+                  "from": "turnhelmCli",
+                  "to": "lifecycleJournal",
+                  "label": "append timeline (--lifecycle)",
+                  "collectionIndex": 8,
+                  "artifactIndex": 9
+                },
+                "right": {
+                  "id": "conSpawn",
+                  "from": "turnhelmCli",
+                  "to": "codexWorker",
+                  "label": "spawn ≤1 Codex worker",
+                  "collectionIndex": 9,
+                  "artifactIndex": 10
+                },
+                "point": [
+                  366,
+                  427.9999999999999
+                ],
+                "sharedNode": "turnhelmCli"
+              }
+            ],
+            "crowdedSides": [
+              {
+                "node": "turnhelmCli",
+                "label": "turnhelm CLI",
+                "side": "right",
+                "relationships": 4,
+                "sidePx": 64,
+                "neededPx": 74
+              }
+            ],
+            "detours": [
+              {
+                "relationship": {
+                  "id": "conLifecycle",
+                  "from": "turnhelmCli",
+                  "to": "lifecycleJournal",
+                  "label": "append timeline (--lifecycle)",
+                  "collectionIndex": 8,
+                  "artifactIndex": 9
+                },
+                "bends": 4,
+                "stretch": 1
+              },
+              {
+                "relationship": {
+                  "id": "conSpawn",
+                  "from": "turnhelmCli",
+                  "to": "codexWorker",
+                  "label": "spawn ≤1 Codex worker",
+                  "collectionIndex": 9,
+                  "artifactIndex": 10
+                },
+                "bends": 4,
+                "stretch": 1.175,
+                "directCorridorBlockers": [
+                  {
+                    "id": "router",
+                    "label": "Router",
+                    "box": [
+                      510,
+                      340,
+                      150,
+                      64
+                    ]
+                  }
+                ]
+              },
+              {
+                "relationship": {
+                  "id": "conOutput",
+                  "from": "codexWorker",
+                  "to": "parentSession",
+                  "label": "stdout · classified payload",
+                  "collectionIndex": 11,
+                  "artifactIndex": 12
+                },
+                "bends": 4,
+                "stretch": 1.811,
+                "directCorridorBlockers": [
+                  {
+                    "id": "turnhelmCli",
+                    "label": "turnhelm CLI",
+                    "box": [
+                      270,
+                      340,
+                      150,
+                      64
+                    ]
+                  },
+                  {
+                    "id": "router",
+                    "label": "Router",
+                    "box": [
+                      510,
+                      340,
+                      150,
+                      64
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "leadingSpace": {
+            "measured": true,
+            "emptyTopPx": 130,
+            "emptyTopRatio": 0.181,
+            "occupiedTop": 130,
+            "viewBoxTop": 0,
+            "canvasHeight": 718,
+            "typicalNodeHeight": 64,
+            "reviewSuggested": false
+          },
+          "desktopReadability": {
+            "budgetBasis": "recognized-declared-wide",
+            "readerContract": "declared-wide-v1",
+            "availableDiagramWidth": 1200,
+            "actualBudgetPx": 1200,
+            "actualReaderWidth": 1230,
+            "desiredReaderWidth": 1230,
+            "viewportCap": 1376,
+            "limit": "source-size",
+            "requestedTargetPx": 7.5,
+            "requestedTargetMet": false,
+            "hardFloorPx": 6,
+            "hardFloorMet": true,
+            "minimumOwner": {
+              "kind": "node",
+              "id": "projectConfig"
+            },
+            "minimumSourceTextPx": 6.4,
+            "minimumProjectedTextPx": 6.4,
+            "semanticTextCount": 37
+          },
+          "issues": []
+        },
+        "provenance": "current",
+        "deliveryReceiptId": "4ae76f32-1d06-4770-b1e0-d5b0d99c762e"
+      }
+    },
+    "browser-check": {
+      "status": "pass",
+      "exitCode": 0,
+      "durationMs": 1083,
+      "command": [
+        "/opt/homebrew/Cellar/node/26.5.0/bin/node",
+        "/Users/zhangxiao/.agents/skills/archify/bin/archify.mjs",
+        "browser-check",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261017-153352/turnhelm-architecture.html",
+        "--json",
+        "--require-provenance",
+        "--out-dir",
+        "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261017-153352/review-2"
+      ],
+      "execution": "in-process",
+      "receipt": {
+        "schemaVersion": 1,
+        "ok": true,
+        "command": "browser-check",
+        "evidenceKind": "automated-browser",
+        "status": "pass",
+        "visualReview": "not-requested",
+        "provenance": "current",
+        "deliveryReceiptId": "4ae76f32-1d06-4770-b1e0-d5b0d99c762e",
+        "artifact": {
+          "path": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261017-153352/turnhelm-architecture.html",
+          "sha256": "9418397f262062f06cd31b801fa2e0374890f99715020974b777aa246b7f1771",
+          "bytes": 774675
+        },
+        "state": {
+          "detail": "read",
+          "motion": "still"
+        },
+        "chrome": {
+          "status": "available",
+          "executable": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        },
+        "diagnostics": [],
+        "containment": {
+          "status": "pass",
+          "policy": "fit-or-reader-declared-readable-vertical-scroll",
+          "viewports": [
+            {
+              "width": 1440,
+              "height": 900,
+              "theme": "light",
+              "innerWidth": 1440,
+              "innerHeight": 900,
+              "scrollWidth": 1440,
+              "scrollHeight": 900,
+              "overflowX": false,
+              "overflowY": false,
+              "verticalScrollAccepted": false,
+              "overflowDisposition": "contained",
+              "readerLayout": "adaptive",
+              "readerOverflow": null,
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 1277,
+              "diagramWidth": 1247,
+              "pageComposition": {
+                "bodyPaddingPx": 12,
+                "headerPx": 52,
+                "diagramChromePx": 78,
+                "svgPx": 746,
+                "cardsPx": 0,
+                "viewBoxHeight": 718
+              },
+              "viewBoxWidth": 1200,
+              "minimumProjectedNodeTextPx": 6.4,
+              "minimumProjectedNonEdgeTextPx": 6.4,
+              "minimumProjectedEdgeTextPx": 8,
+              "minimumProjectedNodeText": "v2 · 6 profiles · explicit transports",
+              "minimumProjectedNodeTextDetail": "context",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "node",
+                "id": "projectConfig"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 1600,
+              "height": 1000,
+              "theme": "light",
+              "innerWidth": 1600,
+              "innerHeight": 1000,
+              "scrollWidth": 1600,
+              "scrollHeight": 1000,
+              "overflowX": false,
+              "overflowY": false,
+              "verticalScrollAccepted": false,
+              "overflowDisposition": "contained",
+              "readerLayout": "adaptive",
+              "readerOverflow": null,
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 1334,
+              "diagramWidth": 1304,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 60,
+                "diagramChromePx": 84,
+                "svgPx": 780,
+                "cardsPx": 0,
+                "viewBoxHeight": 718
+              },
+              "viewBoxWidth": 1200,
+              "minimumProjectedNodeTextPx": 6.4,
+              "minimumProjectedNonEdgeTextPx": 6.4,
+              "minimumProjectedEdgeTextPx": 8,
+              "minimumProjectedNodeText": "v2 · 6 profiles · explicit transports",
+              "minimumProjectedNodeTextDetail": "context",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "node",
+                "id": "projectConfig"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 1920,
+              "height": 1080,
+              "theme": "light",
+              "innerWidth": 1920,
+              "innerHeight": 1080,
+              "scrollWidth": 1920,
+              "scrollHeight": 1080,
+              "overflowX": false,
+              "overflowY": false,
+              "verticalScrollAccepted": false,
+              "overflowDisposition": "contained",
+              "readerLayout": "adaptive",
+              "readerOverflow": null,
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 1467,
+              "diagramWidth": 1437,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 60,
+                "diagramChromePx": 84,
+                "svgPx": 860,
+                "cardsPx": 0,
+                "viewBoxHeight": 718
+              },
+              "viewBoxWidth": 1200,
+              "minimumProjectedNodeTextPx": 6.4,
+              "minimumProjectedNonEdgeTextPx": 6.4,
+              "minimumProjectedEdgeTextPx": 8,
+              "minimumProjectedNodeText": "v2 · 6 profiles · explicit transports",
+              "minimumProjectedNodeTextDetail": "context",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "node",
+                "id": "projectConfig"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 2048,
+              "height": 1320,
+              "theme": "light",
+              "innerWidth": 2048,
+              "innerHeight": 1320,
+              "scrollWidth": 2048,
+              "scrollHeight": 1320,
+              "overflowX": false,
+              "overflowY": false,
+              "verticalScrollAccepted": false,
+              "overflowDisposition": "contained",
+              "readerLayout": "adaptive",
+              "readerOverflow": null,
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 1858,
+              "diagramWidth": 1808,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 68,
+                "diagramChromePx": 94,
+                "svgPx": 1082,
+                "cardsPx": 0,
+                "viewBoxHeight": 718
+              },
+              "viewBoxWidth": 1200,
+              "minimumProjectedNodeTextPx": 6.4,
+              "minimumProjectedNonEdgeTextPx": 6.4,
+              "minimumProjectedEdgeTextPx": 8,
+              "minimumProjectedNodeText": "v2 · 6 profiles · explicit transports",
+              "minimumProjectedNodeTextDetail": "context",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "node",
+                "id": "projectConfig"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 44,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            }
+          ]
+        },
+        "themeStates": {
+          "status": "pass",
+          "viewports": [
+            {
+              "width": 1440,
+              "height": 900,
+              "requestedTheme": "light",
+              "resolvedTheme": "light",
+              "ok": true
+            },
+            {
+              "width": 1600,
+              "height": 1000,
+              "requestedTheme": "light",
+              "resolvedTheme": "light",
+              "ok": true
+            },
+            {
+              "width": 1920,
+              "height": 1080,
+              "requestedTheme": "light",
+              "resolvedTheme": "light",
+              "ok": true
+            },
+            {
+              "width": 2048,
+              "height": 1320,
+              "requestedTheme": "light",
+              "resolvedTheme": "light",
+              "ok": true
+            },
+            {
+              "width": 1440,
+              "height": 900,
+              "requestedTheme": "dark",
+              "resolvedTheme": "dark",
+              "ok": true
+            },
+            {
+              "width": 2048,
+              "height": 1320,
+              "requestedTheme": "dark",
+              "resolvedTheme": "dark",
+              "ok": true
+            }
+          ]
+        },
+        "readability": {
+          "status": "pass",
+          "minimumProjectedNodeTextPx": 6,
+          "viewports": [
+            {
+              "width": 1440,
+              "height": 900,
+              "theme": "light",
+              "innerWidth": 1440,
+              "innerHeight": 900,
+              "scrollWidth": 1440,
+              "scrollHeight": 900,
+              "overflowX": false,
+              "overflowY": false,
+              "verticalScrollAccepted": false,
+              "overflowDisposition": "contained",
+              "readerLayout": "adaptive",
+              "readerOverflow": null,
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 1277,
+              "diagramWidth": 1247,
+              "pageComposition": {
+                "bodyPaddingPx": 12,
+                "headerPx": 52,
+                "diagramChromePx": 78,
+                "svgPx": 746,
+                "cardsPx": 0,
+                "viewBoxHeight": 718
+              },
+              "viewBoxWidth": 1200,
+              "minimumProjectedNodeTextPx": 6.4,
+              "minimumProjectedNonEdgeTextPx": 6.4,
+              "minimumProjectedEdgeTextPx": 8,
+              "minimumProjectedNodeText": "v2 · 6 profiles · explicit transports",
+              "minimumProjectedNodeTextDetail": "context",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "node",
+                "id": "projectConfig"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 1600,
+              "height": 1000,
+              "theme": "light",
+              "innerWidth": 1600,
+              "innerHeight": 1000,
+              "scrollWidth": 1600,
+              "scrollHeight": 1000,
+              "overflowX": false,
+              "overflowY": false,
+              "verticalScrollAccepted": false,
+              "overflowDisposition": "contained",
+              "readerLayout": "adaptive",
+              "readerOverflow": null,
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 1334,
+              "diagramWidth": 1304,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 60,
+                "diagramChromePx": 84,
+                "svgPx": 780,
+                "cardsPx": 0,
+                "viewBoxHeight": 718
+              },
+              "viewBoxWidth": 1200,
+              "minimumProjectedNodeTextPx": 6.4,
+              "minimumProjectedNonEdgeTextPx": 6.4,
+              "minimumProjectedEdgeTextPx": 8,
+              "minimumProjectedNodeText": "v2 · 6 profiles · explicit transports",
+              "minimumProjectedNodeTextDetail": "context",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "node",
+                "id": "projectConfig"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 1920,
+              "height": 1080,
+              "theme": "light",
+              "innerWidth": 1920,
+              "innerHeight": 1080,
+              "scrollWidth": 1920,
+              "scrollHeight": 1080,
+              "overflowX": false,
+              "overflowY": false,
+              "verticalScrollAccepted": false,
+              "overflowDisposition": "contained",
+              "readerLayout": "adaptive",
+              "readerOverflow": null,
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 1467,
+              "diagramWidth": 1437,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 60,
+                "diagramChromePx": 84,
+                "svgPx": 860,
+                "cardsPx": 0,
+                "viewBoxHeight": 718
+              },
+              "viewBoxWidth": 1200,
+              "minimumProjectedNodeTextPx": 6.4,
+              "minimumProjectedNonEdgeTextPx": 6.4,
+              "minimumProjectedEdgeTextPx": 8,
+              "minimumProjectedNodeText": "v2 · 6 profiles · explicit transports",
+              "minimumProjectedNodeTextDetail": "context",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "node",
+                "id": "projectConfig"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 2048,
+              "height": 1320,
+              "theme": "light",
+              "innerWidth": 2048,
+              "innerHeight": 1320,
+              "scrollWidth": 2048,
+              "scrollHeight": 1320,
+              "overflowX": false,
+              "overflowY": false,
+              "verticalScrollAccepted": false,
+              "overflowDisposition": "contained",
+              "readerLayout": "adaptive",
+              "readerOverflow": null,
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 1858,
+              "diagramWidth": 1808,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 68,
+                "diagramChromePx": 94,
+                "svgPx": 1082,
+                "cardsPx": 0,
+                "viewBoxHeight": 718
+              },
+              "viewBoxWidth": 1200,
+              "minimumProjectedNodeTextPx": 6.4,
+              "minimumProjectedNonEdgeTextPx": 6.4,
+              "minimumProjectedEdgeTextPx": 8,
+              "minimumProjectedNodeText": "v2 · 6 profiles · explicit transports",
+              "minimumProjectedNodeTextDetail": "context",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "node",
+                "id": "projectConfig"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 44,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            }
+          ]
+        },
+        "viewerChrome": {
+          "status": "pass",
+          "viewports": [
+            {
+              "width": 1440,
+              "height": 900,
+              "theme": "light",
+              "innerWidth": 1440,
+              "innerHeight": 900,
+              "scrollWidth": 1440,
+              "scrollHeight": 900,
+              "overflowX": false,
+              "overflowY": false,
+              "verticalScrollAccepted": false,
+              "overflowDisposition": "contained",
+              "readerLayout": "adaptive",
+              "readerOverflow": null,
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 1277,
+              "diagramWidth": 1247,
+              "pageComposition": {
+                "bodyPaddingPx": 12,
+                "headerPx": 52,
+                "diagramChromePx": 78,
+                "svgPx": 746,
+                "cardsPx": 0,
+                "viewBoxHeight": 718
+              },
+              "viewBoxWidth": 1200,
+              "minimumProjectedNodeTextPx": 6.4,
+              "minimumProjectedNonEdgeTextPx": 6.4,
+              "minimumProjectedEdgeTextPx": 8,
+              "minimumProjectedNodeText": "v2 · 6 profiles · explicit transports",
+              "minimumProjectedNodeTextDetail": "context",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "node",
+                "id": "projectConfig"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 1600,
+              "height": 1000,
+              "theme": "light",
+              "innerWidth": 1600,
+              "innerHeight": 1000,
+              "scrollWidth": 1600,
+              "scrollHeight": 1000,
+              "overflowX": false,
+              "overflowY": false,
+              "verticalScrollAccepted": false,
+              "overflowDisposition": "contained",
+              "readerLayout": "adaptive",
+              "readerOverflow": null,
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 1334,
+              "diagramWidth": 1304,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 60,
+                "diagramChromePx": 84,
+                "svgPx": 780,
+                "cardsPx": 0,
+                "viewBoxHeight": 718
+              },
+              "viewBoxWidth": 1200,
+              "minimumProjectedNodeTextPx": 6.4,
+              "minimumProjectedNonEdgeTextPx": 6.4,
+              "minimumProjectedEdgeTextPx": 8,
+              "minimumProjectedNodeText": "v2 · 6 profiles · explicit transports",
+              "minimumProjectedNodeTextDetail": "context",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "node",
+                "id": "projectConfig"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 1920,
+              "height": 1080,
+              "theme": "light",
+              "innerWidth": 1920,
+              "innerHeight": 1080,
+              "scrollWidth": 1920,
+              "scrollHeight": 1080,
+              "overflowX": false,
+              "overflowY": false,
+              "verticalScrollAccepted": false,
+              "overflowDisposition": "contained",
+              "readerLayout": "adaptive",
+              "readerOverflow": null,
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 1467,
+              "diagramWidth": 1437,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 60,
+                "diagramChromePx": 84,
+                "svgPx": 860,
+                "cardsPx": 0,
+                "viewBoxHeight": 718
+              },
+              "viewBoxWidth": 1200,
+              "minimumProjectedNodeTextPx": 6.4,
+              "minimumProjectedNonEdgeTextPx": 6.4,
+              "minimumProjectedEdgeTextPx": 8,
+              "minimumProjectedNodeText": "v2 · 6 profiles · explicit transports",
+              "minimumProjectedNodeTextDetail": "context",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "node",
+                "id": "projectConfig"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 2048,
+              "height": 1320,
+              "theme": "light",
+              "innerWidth": 2048,
+              "innerHeight": 1320,
+              "scrollWidth": 2048,
+              "scrollHeight": 1320,
+              "overflowX": false,
+              "overflowY": false,
+              "verticalScrollAccepted": false,
+              "overflowDisposition": "contained",
+              "readerLayout": "adaptive",
+              "readerOverflow": null,
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 1858,
+              "diagramWidth": 1808,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 68,
+                "diagramChromePx": 94,
+                "svgPx": 1082,
+                "cardsPx": 0,
+                "viewBoxHeight": 718
+              },
+              "viewBoxWidth": 1200,
+              "minimumProjectedNodeTextPx": 6.4,
+              "minimumProjectedNonEdgeTextPx": 6.4,
+              "minimumProjectedEdgeTextPx": 8,
+              "minimumProjectedNodeText": "v2 · 6 profiles · explicit transports",
+              "minimumProjectedNodeTextDetail": "context",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "node",
+                "id": "projectConfig"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 44,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            }
+          ]
+        },
+        "captures": {
+          "status": "not-requested",
+          "screenshots": [],
+          "contactSheet": null
+        },
+        "sidecars": {
+          "directory": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261017-153352/review-2",
+          "receipt": "turnhelm-architecture.browser-check.json",
+          "files": []
+        }
+      }
+    }
+  },
+  "diagnostics": [],
+  "evidence": {
+    "receipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261017-153352/review-2/turnhelm-architecture.finalize.json",
+    "summaryReceipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261017-153352/review-2/turnhelm-architecture.finalize-summary.json",
+    "browserCheckReceipt": "/Users/zhangxiao/Documents/work/github/turnhelm/.archify/architecture-turnhelm-20261017-153352/review-2/turnhelm-architecture.browser-check.json"
+  },
+  "visualReview": "not-requested",
+  "finishedAt": "2026-10-17T07:45:24.015Z",
+  "durationMs": 1816,
+  "update": {
+    "status": "update_available",
+    "installedVersion": "3.0.1",
+    "availableVersion": "3.1.0",
+    "releaseNotes": "https://github.com/tt-a1i/archify/releases/tag/v3.1.0",
+    "severity": "normal",
+    "checkedAt": "2026-10-17T07:37:49.329Z",
+    "source": "cache",
+    "noticeRequired": true,
+    "noticeText": "Archify update: 3.0.1 → 3.1.0. A previous check at 2026-10-17T07:37:49.329Z found a newer release. Release notes: https://github.com/tt-a1i/archify/releases/tag/v3.1.0. The installed Skill has not changed; ask to snooze or ignore this reminder.",
+    "eventKey": "archify@sha256:ffedc53390c9da6e859f41e432c5d2d0615a23cf00a503181f07efbba88a7ce8"
+  }
+}

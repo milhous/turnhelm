@@ -1,0 +1,508 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Turnhelm Task-Entry Architecture",
+    "output": ".archify/architecture-turnhelm-20261017-153352/turnhelm-architecture.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "git@github.com:milhous/turnhelm.git",
+      "link_mode": "local-only",
+      "revision": "76f44f1749e6f014b663999d270cd8fe4c2920a7"
+    },
+    "views": [
+      {
+        "id": "viewRouting",
+        "label": "Routing path",
+        "focus": [
+          "turnhelmCli",
+          "router",
+          "layaClassifier",
+          "codexWorker"
+        ],
+        "note": "Laya-first classification ends in one sandboxed Codex worker"
+      },
+      {
+        "id": "viewTrust",
+        "label": "Trust gates",
+        "focus": [
+          "preflight",
+          "hostedJev",
+          "codexWorker",
+          "managedHome"
+        ],
+        "note": "Version gate, hosted triple gate, sandbox, managed child env, and the per-run worker home"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "parentSession",
+      "type": "external",
+      "label": "Parent Agent Session",
+      "sublabel": "Codex CLI · Claude Code",
+      "pos": [
+        40,
+        340
+      ],
+      "size": [
+        130,
+        64
+      ],
+      "sources": [
+        {
+          "path": ".agents/skills/turnhelm-routing/SKILL.md",
+          "line": 69,
+          "label": "invokes turnhelm run"
+        }
+      ]
+    },
+    {
+      "id": "routingSkill",
+      "type": "frontend",
+      "label": "Routing Skill + AGENTS",
+      "sublabel": "installed by turnhelm init",
+      "pos": [
+        40,
+        160
+      ],
+      "size": [
+        140,
+        60
+      ],
+      "sources": [
+        {
+          "path": ".agents/skills/turnhelm-routing/SKILL.md",
+          "line": 1,
+          "label": "canonical template"
+        },
+        {
+          "path": "src/cli.ts",
+          "line": 94,
+          "label": "init writes"
+        }
+      ]
+    },
+    {
+      "id": "projectConfig",
+      "type": "database",
+      "label": ".turnhelm/config.json",
+      "sublabel": "v2 · 6 profiles · explicit transports",
+      "pos": [
+        270,
+        160
+      ],
+      "size": [
+        152,
+        60
+      ],
+      "sources": [
+        {
+          "path": "assets/config.json",
+          "line": 2,
+          "end_line": 8,
+          "label": "version + budget + backends"
+        }
+      ]
+    },
+    {
+      "id": "layaClassifier",
+      "type": "backend",
+      "label": "Laya Classifier",
+      "sublabel": "typed-decisions · local service",
+      "pos": [
+        510,
+        160
+      ],
+      "size": [
+        150,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/systemone.ts",
+          "line": 240,
+          "label": "POST /v1/systemone"
+        }
+      ]
+    },
+    {
+      "id": "hostedJev",
+      "type": "cloud",
+      "label": "Hosted Jev",
+      "sublabel": "api.typesafe.ai · triple-gated",
+      "pos": [
+        760,
+        160
+      ],
+      "size": [
+        150,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/systemone.ts",
+          "line": 259,
+          "end_line": 261,
+          "label": "triple gate"
+        },
+        {
+          "path": "src/systemone.ts",
+          "line": 76,
+          "label": "fixed origin"
+        }
+      ]
+    },
+    {
+      "id": "turnhelmCli",
+      "type": "backend",
+      "label": "turnhelm CLI",
+      "sublabel": "init · doctor · run",
+      "pos": [
+        270,
+        340
+      ],
+      "size": [
+        150,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/cli.ts",
+          "line": 94,
+          "label": "init"
+        },
+        {
+          "path": "src/cli.ts",
+          "line": 139,
+          "label": "run"
+        }
+      ]
+    },
+    {
+      "id": "router",
+      "type": "backend",
+      "label": "Router",
+      "sublabel": "sequential · fail-closed",
+      "pos": [
+        510,
+        340
+      ],
+      "size": [
+        150,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/route.ts",
+          "line": 37,
+          "label": "routeTask"
+        },
+        {
+          "path": "src/route.ts",
+          "line": 58,
+          "label": "budgeted sequence"
+        }
+      ]
+    },
+    {
+      "id": "codexWorker",
+      "type": "backend",
+      "label": "Codex Worker",
+      "sublabel": "≤1 · read-only / workspace-write",
+      "pos": [
+        760,
+        340
+      ],
+      "size": [
+        150,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/codex.ts",
+          "line": 44,
+          "end_line": 54,
+          "label": "exec --ephemeral --sandbox [--output-schema]"
+        },
+        {
+          "path": "src/codex.ts",
+          "line": 77,
+          "end_line": 92,
+          "label": "strips credentials; ZDOTDIR → managed root"
+        },
+        {
+          "path": "src/codex.ts",
+          "line": 228,
+          "label": "lifecycle events recorded"
+        }
+      ]
+    },
+    {
+      "id": "managedHome",
+      "type": "security",
+      "label": "Managed Worker Home",
+      "sublabel": "per-run CODEX_HOME · auth symlink",
+      "pos": [
+        1010,
+        340
+      ],
+      "size": [
+        150,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/codex.ts",
+          "line": 123,
+          "end_line": 146,
+          "label": "mkdtemp home; schema staged; auth.json symlinked"
+        }
+      ]
+    },
+    {
+      "id": "preflight",
+      "type": "security",
+      "label": "Preflight",
+      "sublabel": "Node ≥24.5 · Codex ≥0.160 · Git",
+      "pos": [
+        40,
+        550
+      ],
+      "size": [
+        150,
+        60
+      ],
+      "sources": [
+        {
+          "path": "src/doctor.ts",
+          "line": 214,
+          "label": "codex floor + required controls"
+        },
+        {
+          "path": "src/preflight.ts",
+          "line": 186,
+          "end_line": 187,
+          "label": "version inspected, never trusted"
+        }
+      ]
+    },
+    {
+      "id": "routeJournal",
+      "type": "database",
+      "label": ".turnhelm/routes.jsonl",
+      "sublabel": "SHA-256 · never task text",
+      "pos": [
+        510,
+        550
+      ],
+      "size": [
+        150,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/journal.ts",
+          "line": 56,
+          "label": "route decision entry"
+        },
+        {
+          "path": "src/journal.ts",
+          "line": 83,
+          "label": "journal path"
+        }
+      ]
+    },
+    {
+      "id": "lifecycleJournal",
+      "type": "database",
+      "label": ".turnhelm/lifecycle.jsonl",
+      "sublabel": "content-free timeline · --lifecycle",
+      "pos": [
+        760,
+        550
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/journal.ts",
+          "line": 91,
+          "end_line": 103,
+          "label": "per-event safe-open append"
+        },
+        {
+          "path": "src/lifecycle.ts",
+          "line": 14,
+          "label": "ring: first 8 + last 56 of 64"
+        }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "security-group",
+      "label": "Host loopback 127.0.0.1",
+      "wraps": [
+        "layaClassifier"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "conRun",
+      "from": "parentSession",
+      "to": "turnhelmCli",
+      "label": "run \"<task>\"",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "conReadConfig",
+      "from": "turnhelmCli",
+      "to": "projectConfig",
+      "label": "reads v2",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "conInstallSkill",
+      "from": "turnhelmCli",
+      "to": "routingSkill",
+      "label": "init installs",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "conRoute",
+      "from": "turnhelmCli",
+      "to": "router",
+      "label": "routeTask",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "conClassifyFirst",
+      "from": "router",
+      "to": "layaClassifier",
+      "label": "first attempt",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "conFailover",
+      "from": "router",
+      "to": "hostedJev",
+      "label": "failover · triple gate",
+      "variant": "security",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "conPreflight",
+      "from": "turnhelmCli",
+      "to": "preflight",
+      "label": "Node/Codex/Git",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "conJournal",
+      "from": "turnhelmCli",
+      "to": "routeJournal",
+      "label": "append decision",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "conLifecycle",
+      "from": "turnhelmCli",
+      "to": "lifecycleJournal",
+      "label": "append timeline (--lifecycle)",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "conSpawn",
+      "from": "turnhelmCli",
+      "to": "codexWorker",
+      "label": "spawn ≤1 Codex worker",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "conHome",
+      "from": "codexWorker",
+      "to": "managedHome",
+      "label": "CODEX_HOME"
+    },
+    {
+      "id": "conOutput",
+      "from": "codexWorker",
+      "to": "parentSession",
+      "label": "stdout · classified payload",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "left",
+      "via": [
+        [
+          965,
+          372
+        ],
+        [
+          965,
+          650
+        ],
+        [
+          20,
+          650
+        ],
+        [
+          20,
+          372
+        ]
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Routing budget",
+      "items": [
+        "Default routing budget 10000 ms (routingTimeoutMs)",
+        "Dual-backend: Laya gets floor(remaining × ¾) — 7500 ms at defaults, reserving a quarter for Jev",
+        "Sole backend receives the full remaining budget",
+        "Attempts are sequential; the first valid typed choice ends routing"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Trust and isolation",
+      "items": [
+        "Hosted Jev requires all three gates: config enabled, TURNHELM_ALLOW_HOSTED_JEV=1, non-empty TYPESAFE_API_KEY",
+        "Worker child env strips routing credentials; ZDOTDIR redirects to the managed .turnhelm root so zsh descendants skip host startup files",
+        "Every run builds a fresh per-run CODEX_HOME (--ephemeral, --ignore-user-config, --ignore-rules); a run with no discoverable credential is refused before classification, and receipts attest codexHomeManaged",
+        "TURNHELM_MANAGED_CHILD=1 blocks recursion; sandbox read-only unless --write, at most one worker per run"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Task entry and evidence",
+      "items": [
+        "Task limited to 8192 UTF-8 bytes via argv or stdin; continuation-only prompts rejected",
+        "--output-schema validates the caller's file once at the boundary and stages the bytes inside the managed home — the caller's path is never forwarded",
+        "Stdout carries at most one message — the final agent message of a completed run, classified at emission as strict, extracted, conflict, or unstructured; no write starts once failure or cancellation is observed (delivery is not transactional)",
+        "Exactly one turnhelm.receipt on stderr once classification starts",
+        "routes.jsonl journals the task SHA-256, decision, and classifier confidence when reported — never task text; --lifecycle appends a content-free timeline (first 8 + last 56 of 64 events, overflow marked) to lifecycle.jsonl"
+      ]
+    }
+  ]
+}

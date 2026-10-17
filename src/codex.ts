@@ -3,6 +3,7 @@ import { accessSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { decodeWorkerEvent, MAX_EVENT_BYTES, type FailureClass, type WorkerEvent, type WorkerUsage } from "./codex-events.js";
+import type { LifecycleEvent, LifecycleRecorder } from "./lifecycle.js";
 import { classifyPayload, type PayloadMode } from "./payload.js";
 import type { TaskDecision } from "./route.js";
 
@@ -34,6 +35,10 @@ export type WorkerResult = Readonly<{
   // — including a cancellation that lands mid-write after bytes were delivered —
   // carries none; those receipts already tell that story.
   payload?: Readonly<{ mode: PayloadMode; trailerBytes?: number }>;
+  // EV-1: the bounded content-free lifecycle ring, attached iff a recorder was
+  // supplied — never worker output, task text, or error prose. Parent-observed
+  // milestones only; thread correlation is deliberately absent.
+  lifecycle?: Readonly<{ events: readonly LifecycleEvent[]; overflow: boolean }>;
 }>;
 
 export function buildWorkerArgs(decision: TaskDecision, write: boolean, schemaPath?: string): string[] {
@@ -182,6 +187,7 @@ export function executeWorker(
     signal?: AbortSignal;
     output: NodeJS.WritableStream;
     diagnostics?: NodeJS.WritableStream;
+    lifecycle?: LifecycleRecorder;
   }
 ): Promise<WorkerResult> {
   const started = performance.now();
@@ -219,6 +225,7 @@ export function executeWorker(
         progressEvents: 0, usageScope: "unverified", ownedShutdown: false, error: "spawn", failureClass: "unknown" });
       return;
     }
+    options.lifecycle?.record("spawned", { pid: child.pid });
     const output = options.output;
     const diagnostics = options.diagnostics ?? process.stderr;
     const stdin = child.stdin;
@@ -318,7 +325,7 @@ export function executeWorker(
         durationMs: Math.round(performance.now() - started),
         progressEvents,
         usageScope: "unverified"
-      } as { code: number; status: WorkerResult["status"]; durationMs: number; progressEvents: number; usageScope: "unverified"; ownedShutdown: boolean; codexHomeManaged?: true; usage?: WorkerUsage; error?: WorkerResult["error"]; signal?: "SIGINT" | "SIGTERM" | "SIGKILL"; failureClass?: FailureClass; errorSha256?: string; lastEventAgeMs?: number; payload?: WorkerResult["payload"] };
+      } as { code: number; status: WorkerResult["status"]; durationMs: number; progressEvents: number; usageScope: "unverified"; ownedShutdown: boolean; codexHomeManaged?: true; usage?: WorkerUsage; error?: WorkerResult["error"]; signal?: "SIGINT" | "SIGTERM" | "SIGKILL"; failureClass?: FailureClass; errorSha256?: string; lastEventAgeMs?: number; payload?: WorkerResult["payload"]; lifecycle?: WorkerResult["lifecycle"] };
       result.ownedShutdown = ownedShutdown;
       result.codexHomeManaged = true;
       if (lastEventAt !== undefined) result.lastEventAgeMs = Math.round(performance.now() - lastEventAt);
@@ -335,6 +342,11 @@ export function executeWorker(
       // Attached iff completed and emission was initiated — finalEmitted is
       // that initiation record; a completed zero-message run never set it.
       if (status === "completed" && finalEmitted && payloadProjection !== undefined) result.payload = payloadProjection;
+      // EV-1: settle is recorded last so the ring always ends at settlement.
+      if (options.lifecycle !== undefined) {
+        options.lifecycle.record("settle", { status });
+        result.lifecycle = options.lifecycle.snapshot();
+      }
       resolve(result);
     };
 
@@ -384,6 +396,7 @@ export function executeWorker(
     const dischargeShutdown = (): void => {
       if (pollTimer !== undefined) { clearInterval(pollTimer); pollTimer = undefined; }
       shutdownDischarged = true;
+      options.lifecycle?.record("shutdown-discharged");
       settle();
     };
 
@@ -415,11 +428,13 @@ export function executeWorker(
       ownedShutdown = true;
       shutdownDischarged = false;
       signalGroup("SIGTERM");
+      options.lifecycle?.record("shutdown-term");
       const shutdownAt = performance.now();
       pollTimer = setInterval(() => {
         if (!signalGroup(0)) { dischargeShutdown(); return; }
         if (performance.now() - shutdownAt >= TERM_GRACE_MS) {
           signalGroup("SIGKILL");
+          options.lifecycle?.record("shutdown-kill");
           dischargeShutdown();
         }
       }, GROUP_POLL_MS);
@@ -444,6 +459,7 @@ export function executeWorker(
     const recordFailure = (cause: "spawn" | "stdin" | "protocol" | "output"): void => {
       if (failure !== undefined || decided || shutdownStarted || finished) return;
       failure = cause;
+      options.lifecycle?.record("failure", { class: cause });
       beginShutdown();
     };
 
@@ -458,7 +474,7 @@ export function executeWorker(
       beginShutdown();
     };
 
-    const onAbort = (): void => { cancelled = true; beginShutdown(); settle(); };
+    const onAbort = (): void => { cancelled = true; options.lifecycle?.record("abort"); beginShutdown(); settle(); };
     const onOutputError = (): void => failSink("message");
 
     // Listener lifetime must cover our accepted bytes: while any write this
@@ -627,6 +643,7 @@ export function executeWorker(
           return;
         case "completed":
           completionSeen = true;
+          options.lifecycle?.record("completion");
           // Latest valid snapshot replaces; absent or empty usage keeps the earlier one.
           if (event.usage) usage = event.usage;
           tryDecide();
@@ -638,7 +655,12 @@ export function executeWorker(
           // failure event owns the attribution and the single diagnostic line;
           // the deadline, not an immediate shutdown, now bounds the
           // group-cleanup obligation.
-          if (!stickyFailed) reportWorkerFailed(event.failureClass);
+          if (!stickyFailed) {
+            reportWorkerFailed(event.failureClass);
+            // EV-1: the observed failure class from the frozen taxonomy rides
+            // the timeline — never the message prose behind it.
+            options.lifecycle?.record("failure", { class: event.failureClass });
+          }
           stickyFailed = true;
           if (failureClass === undefined) {
             failureClass = event.failureClass;
@@ -681,6 +703,7 @@ export function executeWorker(
         }
         progressEvents += 1;
         lastEventAt = performance.now();
+        options.lifecycle?.record("event", { eventKind: event.kind });
         dispatch(event);
         if (cancelDrainWait !== undefined) return; // Sink blocked; the drain resumes the loop.
       }
@@ -694,7 +717,7 @@ export function executeWorker(
       recordFailure("spawn");
     } else {
       stdin.on("error", () => { recordFailure("stdin"); });
-      stdin.end(task, (error?: Error | null) => { if (!error) { inputDelivered = true; tryDecide(); } });
+      stdin.end(task, (error?: Error | null) => { if (!error) { inputDelivered = true; options.lifecycle?.record("stdin-delivered"); tryDecide(); } });
       stderr.on("error", () => { /* Drained and discarded; never stalls stdout. */ });
       stderr.resume();
       stdout.on("data", (chunk: Buffer) => {
@@ -704,6 +727,7 @@ export function executeWorker(
       });
       stdout.once("end", () => {
         stdoutEnded = true;
+        options.lifecycle?.record("stdout-end");
         checkFinalTail();
         settle();
       });
@@ -714,6 +738,7 @@ export function executeWorker(
       closed = true;
       childCode = code;
       childSignal = signal;
+      options.lifecycle?.record("close", { exitCode: code, signal: signal ?? undefined });
       if (stickyFailed) settleObligation();
       settle();
     });

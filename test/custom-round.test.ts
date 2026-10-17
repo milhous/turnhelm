@@ -13,7 +13,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
-import { CASE_TIMEOUT_MS, executeRound, nodeReadClosure, prepareRound, projectWorkerReceipt, runSandboxedCheck } from "./custom-round.js";
+import { DEFAULT_CASE_DEADLINE_MS, executeRound, nodeReadClosure, prepareRound, projectWorkerReceipt, runSandboxedCheck } from "./custom-round.js";
 import { executableFixture } from "./executable-fixture.js";
 
 const FORGED_MARKER_LINE = "__TURNHELM_CHECK_OUTCOME__" + JSON.stringify({ pass: true });
@@ -296,12 +296,12 @@ const scratchRoster = async (t: TestContext): Promise<ScratchRoster> => {
     cases: [
       {
         id: "case-a", kind: "worker-readonly", scope: "readonly sum", task: taskText,
-        transport: "arg", root: rootA, allowedChanges: [], allowedProfiles: ["fast", "balanced"],
+        transport: "arg", deadlineMs: DEFAULT_CASE_DEADLINE_MS, root: rootA, allowedChanges: [], allowedProfiles: ["fast", "balanced"],
         grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, files: {}
       },
       {
         id: "case-b", kind: "worker-write", scope: "write envelope", task: taskText,
-        transport: "stdin-file", root: rootB, allowedChanges: ["ledger.json"], allowedProfiles: ["deep"],
+        transport: "stdin-file", deadlineMs: DEFAULT_CASE_DEADLINE_MS, root: rootB, allowedChanges: ["ledger.json"], allowedProfiles: ["deep"],
         grading: { mode: "envelope-equal", expected: { count: 1, sum: 2 } },
         files: { contract, taskFile }
       }
@@ -362,7 +362,7 @@ test("a valid roster freezes a manifest with the exact baseline and zero spend",
   assert.equal(cases.length, 2);
   for (const item of cases) {
     assert.deepEqual(Object.keys(item).sort(),
-      ["allowedChanges", "allowedProfiles", "files", "grading", "id", "kind", "root", "scope", "task", "transport", "tree"]);
+      ["allowedChanges", "allowedProfiles", "deadlineMs", "files", "grading", "id", "kind", "root", "scope", "task", "transport", "tree"]);
     const root = item.root as { canonical: string; dev: number; ino: number };
     assert.ok(Number.isInteger(root.ino) && root.ino > 0, "the case root is pinned by dev/ino identity");
   }
@@ -403,6 +403,74 @@ test("an invalid roster is refused with no manifest written", async t => {
     const path = scratch.write(mutate);
     await assert.rejects(prepareRound(path, { sandboxExecPath: fake }), messageStartingWith("roster: "), what);
   }
+  assert.deepEqual(await readdir(scratch.evidenceRoot), [], "no refusal path leaves manifest artifacts");
+});
+
+test("prepare refuses a roster schema the CLI would reject, before spend", async t => {
+  const scratch = await scratchRoster(t);
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const schemaDir = await mkdtemp(join(tmpdir(), "turnhelm-schema-"));
+  t.after(() => rm(schemaDir, { recursive: true, force: true }).catch(() => {}));
+  const arrayPath = join(schemaDir, "array.json");
+  await writeFile(arrayPath, "[]\n");
+  const bytesPath = join(schemaDir, "invalid-utf8.json");
+  await writeFile(bytesPath, Buffer.from([0xff, 0xfe, 0x7b]));
+  const variants: readonly [string, string, RegExp][] = [
+    ["a JSON array", arrayPath, /the output schema must be a single JSON object/],
+    ["non-UTF-8 bytes", bytesPath, /the output schema is not valid UTF-8/]
+  ];
+  for (const [what, path, wording] of variants) {
+    const rosterPath = scratch.write(roster => {
+      (roster as { cases: [{ outputSchema?: string }] }).cases[0].outputSchema = path;
+    });
+    await assert.rejects(prepareRound(rosterPath, { sandboxExecPath: fake }), wording, what);
+  }
+  assert.deepEqual(await readdir(scratch.evidenceRoot), [], "no refusal path leaves manifest artifacts");
+});
+
+test("prepare freezes a valid roster schema into the manifest", async t => {
+  const scratch = await scratchRoster(t);
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const schemaDir = await mkdtemp(join(tmpdir(), "turnhelm-schema-"));
+  t.after(() => rm(schemaDir, { recursive: true, force: true }).catch(() => {}));
+  const schemaPath = join(schemaDir, "schema.json");
+  const schemaText = '{"type":"object","properties":{"count":{"type":"number"}},"required":["count"]}\n';
+  await writeFile(schemaPath, schemaText);
+  const rosterPath = scratch.write(roster => {
+    (roster as { cases: [{ outputSchema?: string }] }).cases[0].outputSchema = schemaPath;
+  });
+  await prepareRound(rosterPath, { sandboxExecPath: fake });
+  const manifest = JSON.parse(await readFile(join(scratch.evidenceRoot, "custom-round-manifest.json"), "utf8")) as {
+    cases: [{ outputSchema?: { path: string; sha256: string; dev: number; ino: number } }, Record<string, unknown>];
+  };
+  const schemaStat = await stat(schemaPath);
+  assert.deepEqual(manifest.cases[0].outputSchema,
+    { path: schemaPath, sha256: sha256hex(await readFile(schemaPath)), dev: schemaStat.dev, ino: schemaStat.ino },
+    "the schema freezes as a path+hash+identity entry in its case");
+  assert.equal("outputSchema" in manifest.cases[1], false, "a schema-less case freezes no entry");
+});
+
+test("prepare refuses a roster case without deadlineMs", async t => {
+  const scratch = await scratchRoster(t);
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const rosterPath = scratch.write(roster => {
+    delete (roster as { cases: [{ deadlineMs?: number }] }).cases[0].deadlineMs;
+  });
+  await assert.rejects(prepareRound(rosterPath, { sandboxExecPath: fake }),
+    messageStartingWith("roster: case keys must be exactly"),
+    "deadlineMs is a required case key");
+  assert.deepEqual(await readdir(scratch.evidenceRoot), [], "no refusal path leaves manifest artifacts");
+});
+
+test("prepare refuses a roster case with an out-of-bounds deadlineMs", async t => {
+  const scratch = await scratchRoster(t);
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const rosterPath = scratch.write(roster => {
+    (roster as { cases: [{ deadlineMs?: number }] }).cases[0].deadlineMs = 4999;
+  });
+  await assert.rejects(prepareRound(rosterPath, { sandboxExecPath: fake }),
+    messageStartingWith('roster: case "case-a" deadlineMs must be an integer between 5000 and 3600000'),
+    "a deadline below the floor is refused");
   assert.deepEqual(await readdir(scratch.evidenceRoot), [], "no refusal path leaves manifest artifacts");
 });
 
@@ -476,7 +544,7 @@ test("a roster contract that cannot load is refused at prepare, not frozen", asy
 // stallMs holds the FIRST execution's turn open so a signal or timeout test
 // can land mid-case (a roster's later cases run the fake unstalled), and a
 // rebuildRoot swaps the case root for a byte-identical rebuild mid-run.
-const fakeCodexBody = (options: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string; rebuildRoot?: boolean }> = {}): string => `
+const fakeCodexBody = (options: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string; rebuildRoot?: boolean; recordArgv?: string; rebindFile?: { path: string; bytes: string } }> = {}): string => `
 const argv = process.argv.slice(2);
 if (argv[0] === "--version") { process.stdout.write("codex-cli 0.160.2\\n"); process.exit(0); }
 if (argv[0] === "exec" && argv[1] === "--help") { process.stdout.write("--json\\n--ephemeral\\n--sandbox <MODE>\\n-\\n--ignore-user-config\\n--ignore-rules\\n--output-schema <FILE>\\n"); process.exit(0); }
@@ -500,8 +568,22 @@ process.stdin.on("end", () => {
   const firstRun = !fs.existsSync(path.join(__dirname, "invocations"));
   fs.appendFileSync(path.join(__dirname, "invocations"), "1");
   fs.writeFileSync(path.join(process.cwd(), "worker-task.txt"), task);
-` + (options.extraWrite !== undefined
+` + (options.recordArgv !== undefined
+    ? `  {
+    const schemaIndex = argv.indexOf("--output-schema");
+    fs.writeFileSync(path.join(process.cwd(), ${JSON.stringify(options.recordArgv)}), JSON.stringify({
+      argv,
+      outputSchema: schemaIndex === -1 ? null : fs.readFileSync(argv[schemaIndex + 1], "utf8")
+    }));
+  }
+`
+    : "") + (options.extraWrite !== undefined
     ? `  fs.writeFileSync(path.join(process.cwd(), ${JSON.stringify(options.extraWrite)}), "unauthorized outside allowedChanges\\n");\n`
+    : "") + (options.rebindFile !== undefined
+    ? `  // OR-1: a mid-run rebind of a frozen oracle input — new bytes over the
+  // frozen path while the worker executes, exactly the window between the
+  // pre-reservation identity gate and the grading-time bracket.
+  fs.writeFileSync(${JSON.stringify(options.rebindFile.path)}, ${JSON.stringify(options.rebindFile.bytes)});\n`
     : "") + (options.rebuildRoot === true
     ? `  // Swap the case root for a byte-identical rebuild: the staging directory
   // is allocated while the original still exists, so the replacement inode
@@ -560,8 +642,12 @@ type ExecuteCaseSpec = {
   transport: "arg" | "stdin-file";
   grading: Record<string, unknown>;
   outputLines: readonly string[];
+  deadlineMs?: number;
   contractSource?: string;
+  contractDir?: string;
   allowedChanges?: readonly string[];
+  outputSchemaText?: string;
+  hooks?: readonly { name: string; source: string }[];
 };
 
 const scratchExecuteRound = async (
@@ -571,7 +657,7 @@ const scratchExecuteRound = async (
   options?: Readonly<{
     caps?: { classifierRequests: number; workerExecutions: number };
     choice?: string;
-    codex?: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string; rebuildRoot?: boolean }>;
+    codex?: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string; rebuildRoot?: boolean; recordArgv?: string; rebindFile?: { path: string; bytes: string } }>;
     poisonJournal?: boolean;
     journalAttempts?: unknown;
     baselineFiles?: readonly string[];
@@ -615,7 +701,12 @@ const scratchExecuteRound = async (
   const invocations = join(bin, "invocations");
   const gitEnv = join(base, "git-env.txt");
   const workerEnv = join(bin, "worker-env.json");
-  await executableFixture(join(bin, "codex"), fakeCodexBody(options?.codex), "node");
+  // The rebindFile knob carries a $BASE placeholder: only here is the
+  // scratch base knowable before the fake body is frozen.
+  const codexOptions = options?.codex === undefined ? undefined
+    : options.codex.rebindFile === undefined ? options.codex
+    : { ...options.codex, rebindFile: { ...options.codex.rebindFile, path: options.codex.rebindFile.path.replace("$BASE", base) } };
+  await executableFixture(join(bin, "codex"), fakeCodexBody(codexOptions), "node");
   await executableFixture(join(bin, "git"),
     `/usr/bin/env > '${gitEnv}'\nif [ "$1" = "-C" ]; then echo true; exit 0; fi\nexit 64\n`, "shell");
   const taskText = "Sum the ledger rows and print the JSON result.";
@@ -643,18 +734,32 @@ const scratchExecuteRound = async (
         JSON.stringify({ taskSha256: sha256hex(taskText), backend: "laya", profileId: "balanced",
           attempts: options.journalAttempts }) + "\n");
     }
-    const contract = join(base, spec.id + "-contract.mjs");
+    const contract = join(spec.contractDir === undefined ? base : join(base, spec.contractDir), spec.id + "-contract.mjs");
+    await mkdir(dirname(contract), { recursive: true });
     await writeFile(contract,
       spec.contractSource ?? "import assert from \"node:assert/strict\";\nassert.equal(1 + 1, 2);\n");
+    let outputSchema: string | undefined;
+    if (spec.outputSchemaText !== undefined) {
+      outputSchema = join(base, spec.id + "-output-schema.json");
+      await writeFile(outputSchema, spec.outputSchemaText);
+    }
+    const hooks: string[] = [];
+    for (const hook of spec.hooks ?? []) {
+      const hookPath = join(base, hook.name);
+      await writeFile(hookPath, hook.source);
+      hooks.push(hookPath);
+    }
+    const frozenFiles = spec.kind === "worker-write"
+      ? (spec.transport === "stdin-file" ? { contract, taskFile } : { contract })
+      : (spec.transport === "stdin-file" ? { taskFile } : {});
     cases.push({
       id: spec.id, kind: spec.kind, scope: spec.id + " scope", task: taskText,
-      transport: spec.transport, root,
+      transport: spec.transport, root, deadlineMs: spec.deadlineMs ?? DEFAULT_CASE_DEADLINE_MS,
       allowedChanges: spec.allowedChanges ?? [...(spec.kind === "worker-write" ? ["ledger.json"] : []), "worker-task.txt"],
       allowedProfiles: ["fast", "balanced"],
       grading: spec.grading,
-      files: spec.kind === "worker-write"
-        ? (spec.transport === "stdin-file" ? { contract, taskFile } : { contract })
-        : (spec.transport === "stdin-file" ? { taskFile } : {})
+      files: hooks.length > 0 ? { ...frozenFiles, hooks } : frozenFiles,
+      ...(outputSchema !== undefined ? { outputSchema } : {})
     });
   }
   const rosterPath = join(base, "roster.json");
@@ -725,6 +830,34 @@ test("execute runs both transports, grades both cases, and exits zero with an ev
     }
   });
 
+test("the worker CLI receives --output-schema only for schema cases", { timeout: 90_000 }, async t => {
+  const schemaText = '{"type":"object","properties":{"count":{"type":"number"}},"required":["count"]}\n';
+  const round = await scratchExecuteRound(t, [
+    {
+      id: "case-a", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } },
+      outputLines: ['{"count":3,"sum":6}'], outputSchemaText: schemaText,
+      allowedChanges: ["worker-task.txt", "worker-argv.json"]
+    },
+    {
+      id: "case-b", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 1, sum: 2 } }, outputLines: ['{"count":1,"sum":2}'],
+      allowedChanges: ["worker-task.txt", "worker-argv.json"]
+    }
+  ], {}, { codex: { recordArgv: "worker-argv.json" } });
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const code = await executeRound(round.manifestPath, round.approvalSha256,
+    { env: round.env, sandboxExecPath: fake });
+  assert.equal(code, 0, "a round whose case carries a schema still grades all-pass");
+  const readArgv = async (root: string): Promise<{ argv: string[]; outputSchema: string | null }> =>
+    JSON.parse(await readFile(join(root, "worker-argv.json"), "utf8"));
+  const withSchema = await readArgv(round.roots[0]);
+  assert.ok(withSchema.argv.includes("--output-schema"), "the schema case's run forwards the flag");
+  assert.equal(withSchema.outputSchema, schemaText, "the staged bytes are the frozen schema's bytes");
+  const withoutSchema = await readArgv(round.roots[1]);
+  assert.ok(!withoutSchema.argv.includes("--output-schema"), "a schema-less case forwards no flag");
+});
+
 test("a same-path replaced root is refused at the identity gate before any launch",
   { timeout: 90_000 }, async t => {
     const round = await scratchExecuteRound(t, [
@@ -749,6 +882,63 @@ test("a same-path replaced root is refused at the identity gate before any launc
       "zero journals written");
     const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
     assert.deepEqual(ledger.at(-1), { phase: "stopped", caseId: "case-a", reason: "root-identity" });
+  });
+
+test("an oracle root rebind with identical contents stops as oracle-identity",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-write", transport: "arg", contractDir: "oracle",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ]);
+    // OR-1: the rebinding oracle keeps its pathname and its bytes — only the
+    // directory's and the file's identity change. The replacement directory is
+    // allocated before the original is freed, mirroring the root-identity test,
+    // so a recycled inode can never mask the rebind.
+    const oracleDir = join(round.base, "oracle");
+    const contractPath = join(oracleDir, "case-a-contract.mjs");
+    const contractBytes = await readFile(contractPath);
+    const replacement = join(round.base, "oracle-replacement");
+    await mkdir(replacement);
+    await writeFile(join(replacement, "case-a-contract.mjs"), contractBytes);
+    await rm(oracleDir, { recursive: true, force: true });
+    await rename(replacement, oracleDir);
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 1, "a rebound oracle file is a structural refusal");
+    await assert.rejects(readFile(round.invocations), { code: "ENOENT" }, "zero worker invocations");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    assert.deepEqual(ledger.at(-1), { phase: "stopped", caseId: "case-a", reason: "oracle-identity" });
+    assert.ok(!ledger.some(r => r.phase === "reserved"), "identity gates before any reservation");
+  });
+
+test("a frozen hook rebound during the worker run stops as oracle-identity at grading",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-write", transport: "arg", contractDir: "oracle",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}'],
+        hooks: [{ name: "case-a-hook.mjs", source: "export const factor = 1;\n" }]
+      }
+    ], {}, {
+      codex: { rebindFile: { path: "$BASE/case-a-hook.mjs", bytes: "export const factor = 2;\n" } }
+    });
+    // OR-1: the rebind lands in the window between the pre-reservation
+    // identity gate (which every frozen file passes) and the sandboxed check —
+    // only a grading-time bracket over every consumed input can catch it.
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 1, "a rebound oracle helper is a structural refusal at grading");
+    assert.equal((await readFile(round.invocations, "utf8")).length, 1, "the worker did run before the rebind was caught");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    // The worker completed cleanly, so its own receipt projection rides the
+    // stop record; the pin is the stop itself.
+    assert.equal(ledger.at(-1)?.phase, "stopped");
+    assert.equal(ledger.at(-1)?.caseId, "case-a");
+    assert.equal(ledger.at(-1)?.reason, "oracle-identity");
   });
 
 test("a copied manifest outside the evidence root is refused without a claim",
@@ -1306,11 +1496,12 @@ test("unknown mode does not stop ordinary rounds", { timeout: 240_000 }, async t
     [["case-a", "failed"], ["case-b", "pass"]], "the failed outcome and continuation are unchanged");
   assert.ok(!failedLedger.some(r => r.phase === "stopped"), "an ordinary failure never becomes a stop");
 
-  // A timeout outcome is unjudged, continuable evidence: the same shape holds.
-  const timedOut = await scratchExecuteRound(t, [passing("case-a"), passing("case-b")],
+  // A timeout outcome is unjudged, continuable evidence: the same shape holds,
+  // now driven by the case's own frozen deadline instead of an execute knob.
+  const timedOut = await scratchExecuteRound(t, [{ ...passing("case-a"), deadlineMs: 5000 }, passing("case-b")],
     {}, { journalAttempts: [{ backend: "laya" }], codex: { stallMs: 8000 } });
   assert.equal(await executeRound(timedOut.manifestPath, timedOut.approvalSha256,
-    { env: timedOut.env, sandboxExecPath: fake, caseTimeoutMs: 1000 }), 4,
+    { env: timedOut.env, sandboxExecPath: fake }), 4,
     "the timed-out round still completes the roster");
   const timeoutLedger = await readLedger(join(timedOut.evidenceRoot, "custom-round-evidence.jsonl"));
   const timeoutCases = timeoutLedger.filter(r => r.phase === "case");
@@ -1569,7 +1760,7 @@ test("a timed-out case records an unjudged timeout outcome and the roster contin
   { timeout: 90_000 }, async t => {
     const round = await scratchExecuteRound(t, [
       {
-        id: "case-a", kind: "worker-readonly", transport: "arg",
+        id: "case-a", kind: "worker-readonly", transport: "arg", deadlineMs: 5000,
         grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
       },
       {
@@ -1579,7 +1770,7 @@ test("a timed-out case records an unjudged timeout outcome and the roster contin
     ], {}, { codex: { stallMs: 8000 } });
     const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
     const code = await executeRound(round.manifestPath, round.approvalSha256,
-      { env: round.env, sandboxExecPath: fake, caseTimeoutMs: 1000 });
+      { env: round.env, sandboxExecPath: fake });
     assert.equal(code, 4, "a complete round with a timed-out case exits four, not one");
     assert.equal(await readFile(round.invocations, "utf8"), "11",
       "a timeout is an outcome, not a stop: case-b still runs");
@@ -1587,7 +1778,7 @@ test("a timed-out case records an unjudged timeout outcome and the roster contin
     const record = ledger.find(r => r.phase === "case" && r.caseId === "case-a");
     assert.equal(record?.outcome, "timeout");
     assert.equal(record?.exitCode, 130, "the CLI's own SIGINT shutdown settles the exit code");
-    assert.ok(typeof record?.durationMs === "number" && record.durationMs >= 1000,
+    assert.ok(typeof record?.durationMs === "number" && record.durationMs >= 5000,
       "the supervisor's wall-clock budget is the duration floor");
     assert.equal(record?.taskSha256, sha256hex("Sum the ledger rows and print the JSON result."));
     assert.deepEqual([record?.backend, record?.profileId], ["laya", "balanced"],
@@ -1602,22 +1793,22 @@ test("a timed-out case records an unjudged timeout outcome and the roster contin
     assert.ok(!ledger.some(r => r.phase === "stopped"), "no stop record on a timeout-outcome round");
   });
 
-test("an all-pass round with the case timeout knob present still exits zero",
+test("an all-pass round with explicit per-case deadlines still exits zero",
   { timeout: 90_000 }, async t => {
     const round = await scratchExecuteRound(t, [
       {
-        id: "case-a", kind: "worker-readonly", transport: "arg",
+        id: "case-a", kind: "worker-readonly", transport: "arg", deadlineMs: 30_000,
         grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
       },
       {
-        id: "case-b", kind: "worker-readonly", transport: "arg",
+        id: "case-b", kind: "worker-readonly", transport: "arg", deadlineMs: 30_000,
         grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
       }
     ]);
     const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
     const code = await executeRound(round.manifestPath, round.approvalSha256,
-      { env: round.env, sandboxExecPath: fake, caseTimeoutMs: 30_000 });
-    assert.equal(code, 0, "a knob comfortably above the fast cases never fires");
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 0, "a deadline comfortably above the fast cases never fires");
     const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
     assert.deepEqual(ledger.filter(r => r.phase === "case").map(r => [r.caseId, r.outcome]).sort(),
       [["case-a", "pass"], ["case-b", "pass"]]);
@@ -1627,7 +1818,7 @@ test("a timed-out case that wrote outside its allowance stops as tree-drift",
   { timeout: 90_000 }, async t => {
     const round = await scratchExecuteRound(t, [
       {
-        id: "case-a", kind: "worker-readonly", transport: "arg",
+        id: "case-a", kind: "worker-readonly", transport: "arg", deadlineMs: 5000,
         grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
       },
       {
@@ -1637,7 +1828,7 @@ test("a timed-out case that wrote outside its allowance stops as tree-drift",
     ], {}, { codex: { stallMs: 8000, extraWrite: "evil.txt" } });
     const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
     const code = await executeRound(round.manifestPath, round.approvalSha256,
-      { env: round.env, sandboxExecPath: fake, caseTimeoutMs: 1000 });
+      { env: round.env, sandboxExecPath: fake });
     assert.equal(code, 1, "the settled-tree gate outranks the timeout outcome");
     assert.equal(await readFile(round.invocations, "utf8"), "1", "a drift stop reserves no further case");
     const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
@@ -1654,7 +1845,7 @@ test("a timed-out case that rebuilt its root byte-identically stops as root-iden
   { timeout: 90_000 }, async t => {
     const round = await scratchExecuteRound(t, [
       {
-        id: "case-a", kind: "worker-readonly", transport: "arg",
+        id: "case-a", kind: "worker-readonly", transport: "arg", deadlineMs: 5000,
         grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
       },
       {
@@ -1664,7 +1855,7 @@ test("a timed-out case that rebuilt its root byte-identically stops as root-iden
     ], {}, { codex: { stallMs: 8000, rebuildRoot: true } });
     const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
     const code = await executeRound(round.manifestPath, round.approvalSha256,
-      { env: round.env, sandboxExecPath: fake, caseTimeoutMs: 1000 });
+      { env: round.env, sandboxExecPath: fake });
     assert.equal(code, 1, "identity is checked before any hash at the shared gate");
     assert.equal(await readFile(round.invocations, "utf8"), "1", "an identity stop reserves no further case");
     const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
@@ -1677,14 +1868,14 @@ test("a timed-out case that rebuilt its root byte-identically stops as root-iden
     assert.ok(!ledger.some(r => r.phase === "case"), "a replaced root never records an outcome");
   });
 
-test("the case timeout knob pins the frozen default and never reaches prepare", async t => {
-  assert.equal(CASE_TIMEOUT_MS, 240_000, "the production case budget is unchanged");
+test("the frozen default deadline pins at 240000 with no knob name left", async t => {
+  assert.equal(DEFAULT_CASE_DEADLINE_MS, 240_000, "the production case budget is unchanged");
   const scratch = await scratchRoster(t);
   const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
   const prepared = await prepareRound(scratch.rosterPath, { sandboxExecPath: fake });
   const raw = await readFile(prepared.manifestPath, "utf8");
   assert.equal(raw.includes("caseTimeoutMs"), false,
-    "prepare mode never reads or freezes the execute-time knob");
+    "the removed execute-time knob survives nowhere in the frozen surface");
 });
 
 test("a roster exceeding its declared caps is refused before any spend",
@@ -1822,7 +2013,7 @@ test("a mixed round reconciles written outcomes into the completed record",
   { timeout: 90_000 }, async t => {
     const round = await scratchExecuteRound(t, [
       {
-        id: "case-a", kind: "worker-readonly", transport: "arg",
+        id: "case-a", kind: "worker-readonly", transport: "arg", deadlineMs: 5000,
         grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
       },
       {
@@ -1832,7 +2023,7 @@ test("a mixed round reconciles written outcomes into the completed record",
     ], {}, { codex: { stallMs: 8000 } });
     const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
     const code = await executeRound(round.manifestPath, round.approvalSha256,
-      { env: round.env, sandboxExecPath: fake, caseTimeoutMs: 1000 });
+      { env: round.env, sandboxExecPath: fake });
     assert.equal(code, 4, "a complete round with failures exits four");
     const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
     assert.deepEqual(ledger.filter(r => r.phase === "case").map(r => [r.caseId, r.outcome]),
@@ -1901,14 +2092,14 @@ test("a dead ledger fails the terminal case append instead of failing open",
     // a complete-with-failures exit either.
     const stalled = await scratchExecuteRound(t, [
       {
-        id: "case-a", kind: "worker-readonly", transport: "arg",
+        id: "case-a", kind: "worker-readonly", transport: "arg", deadlineMs: 5000,
         grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
       }
     ], {}, { codex: { stallMs: 8000 } });
     const stalledLedgerPath = join(stalled.evidenceRoot, "custom-round-evidence.jsonl");
     t.after(async () => { await chmod(stalledLedgerPath, 0o600).catch(() => {}); });
     const stalledRun = executeRound(stalled.manifestPath, stalled.approvalSha256,
-      { env: stalled.env, sandboxExecPath: fake, caseTimeoutMs: 1000 });
+      { env: stalled.env, sandboxExecPath: fake });
     await waitForLedgerRecord(stalledLedgerPath, r => r.phase === "reserved" && r.caseId === "case-a");
     await chmod(stalledLedgerPath, 0o000);
     assert.equal(await stalledRun, 1, "a timed-out case whose record cannot be written never exits four");

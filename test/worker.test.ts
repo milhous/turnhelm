@@ -1,6 +1,6 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -563,6 +563,80 @@ finish(() => emit({ type: "turn.completed" }));
   assert.equal(dirname(String(observedEnv.CODEX_HOME)), join(directory, "tmp"),
     "CODEX_HOME is a fresh managed home under tmpdir(), never the inherited value");
   assert.match(basename(String(observedEnv.CODEX_HOME)), /^turnhelm-worker-/);
+});
+
+test("a surviving descendant keeps the stripped key set and managed marker after leader exit", { timeout: 30_000 }, async t => {
+  // AF-2: an owned home (with its own startup file) means nothing host is
+  // read; the sentinel descendant is node, so the .zshenv is ownership
+  // hygiene, not a leak probe. The descendant outlives the worker and pins
+  // what the process chain carries across the leader's death.
+  const home = await mkdtemp(join(tmpdir(), "turnhelm-sentinel-home-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  await writeFile(join(home, ".zshenv"), "export TURNHELM_TEST_SENTINEL_MARKER=leaked\n");
+  const { recorded, directory } = await runWorker(t, {
+    // The startup-file keys ride the parent env so their null samples below
+    // demonstrate stripping in-chain, not mere absence.
+    parentEnv: { HOME: home, BASH_ENV: "/tmp/host-bashenv", ENV: "/tmp/host-shenv" },
+    script: `
+const KEYS = ["LAYA_API_KEY", "TYPESAFE_API_KEY", "TURNHELM_ALLOW_HOSTED_JEV", "TURNHELM_CONFIG",
+  "BASH_ENV", "ENV", "TURNHELM_MANAGED_CHILD", "CODEX_HOME", "ZDOTDIR"];
+fs.writeFileSync(path.join(here, "leader.json"), JSON.stringify({ pid: process.pid, codexHome: process.env.CODEX_HOME }));
+const descendantSource = [
+  'const fs = require("node:fs");',
+  'const path = require("node:path");',
+  'const dir = ' + JSON.stringify(here) + ';',
+  'const KEYS = ' + JSON.stringify(KEYS) + ';',
+  'const sample = function () {',
+  '  return Object.fromEntries(KEYS.map(function (key) {',
+  '    return [key, Object.hasOwn(process.env, key) ? process.env[key] : null];',
+  '  }));',
+  '};',
+  'const before = sample();',
+  'fs.writeFileSync(path.join(dir, "descendant-ready.json"), JSON.stringify({ pid: process.pid }));',
+  '(function poll() {',
+  '  try { process.kill(process.ppid, 0); setTimeout(poll, 25); }',
+  '  catch (error) { fs.writeFileSync(path.join(dir, "descendant-samples.json"),',
+  '    JSON.stringify({ before: before, after: sample() })); }',
+  '})();',
+  'setInterval(function () {}, 500);'
+].join("\\n");
+fs.writeFileSync(path.join(here, "descendant.js"), descendantSource);
+const descendant = require("node:child_process").spawn(process.execPath, [path.join(here, "descendant.js")],
+  { detached: true, stdio: "ignore" });
+descendant.unref();
+(function waitReady() {
+  if (fs.existsSync(path.join(here, "descendant-ready.json"))) finish(() => emit({ type: "turn.completed" }));
+  else setTimeout(waitReady, 25);
+})();
+`
+  });
+  assert.equal(recorded.status, "completed", "the worker completes normally while the descendant survives");
+  const leader = JSON.parse(await fakeFile(directory, "leader.json")) as { pid: number; codexHome: string };
+  // The descendant's death is registered before any assertion can abandon it;
+  // the leader only settles after descendant-ready.json exists, so no poll is
+  // needed to read it here.
+  const descendant = JSON.parse(await fakeFile(directory, "descendant-ready.json")) as { pid: number };
+  t.after(() => { try { process.kill(descendant.pid, "SIGKILL"); } catch { /* already gone */ } });
+  const samplesPath = join(directory, "descendant-samples.json");
+  const deadline = Date.now() + 15_000;
+  let samplesRaw: string | null = null;
+  while (Date.now() < deadline) {
+    samplesRaw = await readFile(samplesPath, "utf8").catch(() => null);
+    if (samplesRaw !== null) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.ok(samplesRaw !== null, "the descendant samples after the leader exits");
+  const samples = JSON.parse(samplesRaw) as { before: Record<string, string | null>; after: Record<string, string | null> };
+  assert.notEqual(descendant.pid, leader.pid, "the survivor is a separate process");
+  for (const [name, sample] of [["before", samples.before], ["after", samples.after]] as const) {
+    for (const key of ["LAYA_API_KEY", "TYPESAFE_API_KEY", "TURNHELM_ALLOW_HOSTED_JEV", "TURNHELM_CONFIG", "BASH_ENV", "ENV"]) {
+      assert.equal(sample[key], null, name + " sample: " + key + " stays stripped");
+    }
+    assert.equal(sample.TURNHELM_MANAGED_CHILD, "1", name + " sample: the managed-child marker persists");
+    assert.equal(sample.CODEX_HOME, leader.codexHome, name + " sample: the managed home is the leader's");
+    assert.equal(sample.ZDOTDIR, join(directory, "root", ".turnhelm"),
+      name + " sample: the zsh lookup stays redirected to the turnhelm-owned root");
+  }
 });
 
 test("worker descendant zsh never sources host startup files", { timeout: 30_000 }, async t => {
@@ -2414,4 +2488,206 @@ test("an end-to-end hostile worker failure yields class-only attribution in the 
     assert.ok(!surfaces.includes(window), `20-char window at ${i} of the raw message leaked`);
   }
   assert.ok(surfaces.includes("turnhelm: worker-failed: rate-limit"), "the class-only diagnostic line is present");
+});
+
+// EV-1: the lifecycle CLI tests share one staging shape — a local classify
+// server answering a fixed choice, a mode-driven fake codex, and the same
+// config/credential staging as the hostile-worker e2e above. The fake answer
+// text doubles as the content-free canary.
+const LIFECYCLE_CANARY_TEXT = "lifecycle-canary-final-answer-4f9d2c";
+const LIFECYCLE_RATE_LIMIT_TEXT = "upstream rate limit exceeded while the caller waited";
+type FakeWorkerMode = "single-message" | "stall" | "event-flood" | "rate-fail" | "protocol-fail";
+
+const stageLifecycleCli = async (t: TestContext, mode: FakeWorkerMode): Promise<{ root: string; spawnCli: (args: string[]) => ChildProcess }> => {
+  const directory = await mkdtemp(join(tmpdir(), "turnhelm-lifecycle-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const bin = join(directory, "bin");
+  const root = join(directory, "root");
+  await mkdir(bin, { recursive: true });
+  await mkdir(join(directory, "codex-home"), { recursive: true });
+  await writeFile(join(directory, "codex-home", "auth.json"), '{"token":"fixture"}');
+  await mkdir(join(root, ".turnhelm"), { recursive: true });
+  const server = createServer((request, response) => {
+    request.resume();
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ answers: { route: { type: "choice", choice: "balanced" } } }));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  });
+  const frames: string[] = [];
+  if (mode === "event-flood") {
+    for (let index = 0; index < 100; index += 1) {
+      frames.push(JSON.stringify({ type: "item.completed", item: { type: "tool-call", call: "frame-" + index } }));
+    }
+  }
+  frames.push(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: LIFECYCLE_CANARY_TEXT } }));
+  if (mode !== "stall") frames.push(JSON.stringify({ type: "turn.completed" }));
+  if (mode === "rate-fail") {
+    frames.length = 0;
+    frames.push(JSON.stringify({ type: "error", message: LIFECYCLE_RATE_LIMIT_TEXT }));
+    frames.push(JSON.stringify({ type: "turn.failed", message: LIFECYCLE_RATE_LIMIT_TEXT }));
+  }
+  if (mode === "protocol-fail") {
+    frames.length = 0;
+    frames.push("!!!not-a-json-frame");
+  }
+  await executableFixture(join(bin, "codex"), [
+    `#!${process.execPath}`,
+    "const argv = process.argv.slice(2);",
+    'if (argv[0] === "--version") { console.log("codex-cli 0.160.2"); process.exit(0); }',
+    'if (argv[0] === "exec" && argv[1] === "--help") { console.log("--json\\n--ephemeral\\n--sandbox <MODE>\\n-\\n--ignore-user-config\\n--ignore-rules\\n--output-schema <FILE>"); process.exit(0); }',
+    "process.stdin.setEncoding(\"utf8\");",
+    "process.stdin.on(\"data\", () => {});",
+    "process.stdin.on(\"end\", () => {",
+    `  ${JSON.stringify(frames)}.forEach(frame => process.stdout.write(frame + "\\n"));`,
+    ...(mode === "stall" ? [
+      "  require(\"node:fs\").writeFileSync(require(\"node:path\").join(process.cwd(), \"stalled-worker.pid\"), String(process.pid));",
+      "  setInterval(() => {}, 1000);"
+    ] : [
+      "  process.exit(0);"
+    ]),
+    "});"
+  ].join("\n"), "node");
+  await executableFixture(join(bin, "git"), "#!/bin/sh\nif [ \"$1\" = \"-C\" ]; then echo true; exit 0; fi\nexit 64\n", "shell");
+  await writeFile(join(root, ".turnhelm", "config.json"), JSON.stringify({
+    version: 2,
+    routingTimeoutMs: 4000,
+    backends: {
+      laya: { enabled: true, url: `http://127.0.0.1:${port}` },
+      jev: { enabled: false, transport: { mode: "direct" } }
+    },
+    profiles: {
+      fast: { model: "gpt-6-luna", effort: "low" },
+      balanced: { model: "gpt-6.1-sol", effort: "medium" },
+      deep: { model: "gpt-6.1-sol", effort: "high" },
+      frontier: { model: "gpt-6-astra", effort: "high" },
+      frontier_xhigh: { model: "gpt-6-astra", effort: "xhigh" },
+      frontier_max: { model: "gpt-6-astra", effort: "max" }
+    }
+  }));
+  const spawnCli = (args: string[]): ChildProcess => {
+    const child = spawn(process.execPath, [
+      fileURLToPath(new URL("../src/cli.js", import.meta.url)), "run", ...args, "Summarize the pending pago row in one line."
+    ], { cwd: root, env: { PATH: bin, LAYA_API_KEY: "dummy-laya-key", CODEX_HOME: join(directory, "codex-home") } });
+    const guard = setTimeout(() => child.kill("SIGKILL"), 20_000);
+    t.after(() => { clearTimeout(guard); child.kill("SIGKILL"); });
+    return child;
+  };
+  return { root, spawnCli };
+};
+
+const collectRun = (child: ChildProcess): Promise<{ code: number; stdout: string; stderr: string }> =>
+  new Promise(resolve => {
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk; });
+    child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk; });
+    child.stdin?.end();
+    child.on("close", code => resolve({ code: code ?? -1, stdout, stderr }));
+  });
+
+const receiptOf = (stderr: string): Record<string, unknown> => {
+  const receiptLines = stderr.split("\n").filter(line => line.includes("turnhelm.receipt"));
+  assert.equal(receiptLines.length, 1, "exactly one receipt line");
+  return JSON.parse(receiptLines[0]) as Record<string, unknown>;
+};
+
+test("a completed run's receipt carries a bounded content-free lifecycle", { timeout: 30_000 }, async t => {
+  const { spawnCli } = await stageLifecycleCli(t, "single-message");
+  const run = await collectRun(spawnCli(["--lifecycle"]));
+  assert.equal(run.code, 0, "the run completes: " + run.stderr);
+  const lifecycle = ((receiptOf(run.stderr).worker as Record<string, unknown>).lifecycle ?? null) as
+    { events: { kind: string }[]; overflow: boolean } | null;
+  assert.ok(lifecycle !== null, "the receipt worker object carries a lifecycle projection");
+  assert.ok(lifecycle.events.length > 0, "the ring is non-empty");
+  assert.equal(lifecycle.events[0].kind, "spawned", "the ring begins at spawn");
+  assert.equal(lifecycle.events.at(-1)?.kind, "settle", "the ring ends at settlement");
+  assert.ok(!JSON.stringify(lifecycle).includes(LIFECYCLE_CANARY_TEXT), "the lifecycle projection stays content-free");
+});
+
+test("a reported worker failure rides the lifecycle timeline with its class", { timeout: 30_000 }, async t => {
+  const { spawnCli } = await stageLifecycleCli(t, "rate-fail");
+  const run = await collectRun(spawnCli(["--lifecycle"]));
+  assert.notEqual(run.code, 0, "the reported failure fails the run");
+  const lifecycle = ((receiptOf(run.stderr).worker as Record<string, unknown>).lifecycle ?? null) as
+    { events: { kind: string; detail?: { class?: string } }[]; overflow: boolean } | null;
+  assert.ok(lifecycle !== null, "the receipt worker object carries a lifecycle projection");
+  const failure = lifecycle.events.find(event => event.kind === "failure");
+  assert.ok(failure !== undefined, "the timeline keeps the failure milestone");
+  assert.equal(failure.detail?.class, "rate-limit",
+    "the observed failure class from the frozen taxonomy rides the event, never the raw text");
+  assert.equal(lifecycle.events.at(-1)?.kind, "settle", "the ring still ends at settlement");
+  assert.ok(!JSON.stringify(lifecycle).includes(LIFECYCLE_RATE_LIMIT_TEXT),
+    "the class projection stays content-free: no failure prose");
+});
+
+test("a transport failure rides the lifecycle timeline with its cause", { timeout: 30_000 }, async t => {
+  const { spawnCli } = await stageLifecycleCli(t, "protocol-fail");
+  const run = await collectRun(spawnCli(["--lifecycle"]));
+  assert.notEqual(run.code, 0, "the protocol failure fails the run");
+  const lifecycle = ((receiptOf(run.stderr).worker as Record<string, unknown>).lifecycle ?? null) as
+    { events: { kind: string; detail?: { class?: string } }[]; overflow: boolean } | null;
+  assert.ok(lifecycle !== null, "the receipt worker object carries a lifecycle projection");
+  const failure = lifecycle.events.find(event => event.kind === "failure");
+  assert.ok(failure !== undefined, "the timeline keeps the failure milestone");
+  assert.equal(failure.detail?.class, "protocol",
+    "the parent-observed transport cause rides the event");
+  assert.equal(lifecycle.events.at(-1)?.kind, "settle", "the ring still ends at settlement");
+});
+
+test("the lifecycle journal outlives an outer kill before settlement", { timeout: 30_000 }, async t => {
+  const { root, spawnCli } = await stageLifecycleCli(t, "stall");
+  const child = spawnCli(["--lifecycle"]);
+  // The positional task rides argv; stdin still ends so readTask's non-TTY
+  // collectInput completes instead of holding the CLI before classification.
+  child.stdin?.end();
+  const journalPath = join(root, ".turnhelm", "lifecycle.jsonl");
+  const sawEvent = (text: string): boolean => text.split("\n").some(line => {
+    if (line === "") return false;
+    try {
+      const entry = JSON.parse(line) as { type?: string; pid?: number; kind?: string };
+      return entry.type === "turnhelm.worker-lifecycle" && entry.pid === child.pid && entry.kind === "event";
+    } catch {
+      return false;
+    }
+  });
+  const deadline = Date.now() + 15_000;
+  let journaled = "";
+  while (Date.now() < deadline) {
+    journaled = await readFile(journalPath, "utf8").catch(() => "");
+    if (sawEvent(journaled)) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  if (child.exitCode === null) {
+    child.kill("SIGKILL");
+    await new Promise<void>(resolve => child.on("close", resolve));
+  }
+  // The stalled fake worker never exits on its own; stop it now.
+  const workerPid = Number(await readFile(join(root, "stalled-worker.pid"), "utf8").catch(() => ""));
+  if (Number.isInteger(workerPid) && workerPid > 0) {
+    try { process.kill(workerPid, "SIGKILL"); } catch { /* the stalled fake is already gone */ }
+  }
+  const text = await readFile(journalPath, "utf8").catch(() => "");
+  assert.ok(sawEvent(text), "a decoded event was journaled before the kill");
+  const kinds = text.split("\n").filter(line => line !== "").map(line => {
+    try { return JSON.parse(line) as { pid?: number; kind?: string }; } catch { return { pid: undefined, kind: undefined }; }
+  }).filter(entry => entry.pid === child.pid).map(entry => entry.kind);
+  assert.ok(kinds.includes("spawned"), "spawned is journaled before the kill");
+  assert.ok(kinds.includes("event"), "the decoded event is journaled for this CLI pid");
+  assert.ok(!kinds.includes("settle"), "a killed run journals no settlement");
+});
+
+test("an event flood trips the overflow marker without losing the settlement tail", { timeout: 30_000 }, async t => {
+  const { spawnCli } = await stageLifecycleCli(t, "event-flood");
+  const run = await collectRun(spawnCli(["--lifecycle"]));
+  assert.equal(run.code, 0, "the run completes: " + run.stderr);
+  const lifecycle = ((receiptOf(run.stderr).worker as Record<string, unknown>).lifecycle ?? null) as
+    { events: { kind: string }[]; overflow: boolean } | null;
+  assert.ok(lifecycle !== null, "the receipt worker object carries a lifecycle projection");
+  assert.equal(lifecycle.overflow, true, "100 decoded frames overflow the 64-entry ring");
+  assert.equal(lifecycle.events.at(-1)?.kind, "settle", "the settlement tail survives the flood");
 });

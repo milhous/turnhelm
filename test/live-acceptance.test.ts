@@ -17,7 +17,7 @@ import { parseProjectConfig } from "../src/config.js";
 import { readProjectFile } from "../src/project.js";
 import {
   appendEvidence, claimAcceptance, envelopePayload, executeAcceptance, findOnPath, oracleSandboxPolicy,
-  prepareAcceptance, projectAttemptTransports, superviseCli,
+  prepareAcceptance, projectAttemptTransports, projectWorkerLifecycle, readWorkerLifecycleJournal, superviseCli,
   type AcceptanceManifest, type AttemptTransportEvidence, type ClaimedRun, type SafeEvidence
 } from "./live-acceptance.js";
 
@@ -534,6 +534,10 @@ test("prepare is offline and freezes independent consumers", async t => {
         ".agents/skills/turnhelm-routing/agents/openai.yaml", "input.json"] as const;
       const expectedHashes: Record<string, string> = {};
       for (const file of frozenCaseFiles) expectedHashes[file] = sha256hex(await readFile(join(item.root, file)));
+      // SC-1: readonly (stdout-json) cases freeze the fixed output schema too.
+      if (item.kind === "worker-readonly") {
+        expectedHashes["output-schema.json"] = sha256hex(await readFile(join(item.root, "output-schema.json")));
+      }
       assert.deepEqual(item.inputHashes, expectedHashes);
       assert.equal(item.allowedChanges.length, item.kind === "worker-write" ? 1 : 0);
       if (item.kind === "worker-write") assert.deepEqual(item.allowedChanges, ["out/summary.json"]);
@@ -543,7 +547,9 @@ test("prepare is offline and freezes independent consumers", async t => {
   // Strict per-case keys, task bounds, and hashes for every case.
   for (const item of laya.cases) {
     assert.deepEqual(Object.keys(item).sort(),
-      ["allowedChanges", "config", "id", "identity", "inputHashes", "kind", "oracle", "reservation", "root", "task", "taskBytes", "taskHash"]);
+      item.kind === "worker-readonly"
+        ? ["allowedChanges", "config", "deadlineMs", "id", "identity", "inputHashes", "kind", "oracle", "outputSchema", "reservation", "root", "task", "taskBytes", "taskHash"]
+        : ["allowedChanges", "config", "deadlineMs", "id", "identity", "inputHashes", "kind", "oracle", "reservation", "root", "task", "taskBytes", "taskHash"]);
     assert.ok(item.taskBytes <= 8192, item.id + " task fits the transport bound");
     const taskBytes = Buffer.from(item.task, "utf8");
     assert.equal(item.taskBytes, taskBytes.length);
@@ -683,6 +689,33 @@ const choiceBody = (profileId: string): string => JSON.stringify({
   usage: { truncated: false, state_tokens_dropped: 0 }
 });
 
+test("prepare writes and freezes the stdout-json case schema", { timeout: 120_000 }, async t => {
+  const result = await prepareAcceptance("laya");
+  t.after(() => rm(dirname(result.manifestPath), { recursive: true, force: true }).catch(() => {}));
+  const schemaBytes = Buffer.from(STDOUT_JSON_SCHEMA_TEXT, "utf8");
+  const schemaSha = sha256hex(schemaBytes);
+  type SchemaCase = {
+    id: string; kind: string; root: string;
+    outputSchema?: { relative: string; sha256: string };
+    inputHashes: Record<string, string>;
+  };
+  const cases = (await loadManifest(result.manifestPath)).cases as readonly SchemaCase[];
+  const readonlyCases = cases.filter(item => item.kind === "worker-readonly");
+  assert.ok(readonlyCases.length > 0, "the laya suite freezes readonly cases");
+  for (const item of readonlyCases) {
+    assert.deepEqual(item.outputSchema, { relative: "output-schema.json", sha256: schemaSha },
+      item.id + " freezes the fixed schema by relative path and hash");
+    const onDisk = await readFile(join(item.root, "output-schema.json"));
+    assert.ok(onDisk.equals(schemaBytes), item.id + " wrote the exact schema bytes");
+    assert.equal(item.inputHashes["output-schema.json"], schemaSha,
+      item.id + " hashes the schema with the other frozen inputs");
+  }
+  for (const item of cases.filter(entry => entry.kind !== "worker-readonly")) {
+    assert.equal(item.outputSchema, undefined, item.id + " carries no schema");
+    assert.equal(item.inputHashes["output-schema.json"], undefined, item.id + " hashes no schema");
+  }
+});
+
 const startClassifierFixture = async (t: TestContext, onRequest?: (count: number) => void) => {
   const state = { requests: 0 };
   const scripted: string[] = [];
@@ -710,6 +743,12 @@ const HOSTILE_ANSWER = '"}\\n before {"count":4,"sum":17} after "'
 
 // A failure message whose text must never survive past the class+hash pair.
 const HOSTILE_FAILURE = "upstream rate limit exceeded while password=p@ss.word! stayed live for the caller";
+
+// SC-1 (spec §3.1) pins the stdout-json case schema's exact bytes. The literal
+// here is deliberately independent of the harness's copy so a drift in either
+// direction fails a test instead of silently agreeing.
+const STDOUT_JSON_SCHEMA_TEXT = '{"type":"object","required":["count","sum"],'
+  + '"properties":{"count":{"type":"number"},"sum":{"type":"number"}},"additionalProperties":false}';
 
 // Modes: ok-readonly, ok-write, write-readonly (writes despite read-only sandbox),
 // fail, hang, emit-then-hang (one decoded event, then idles until cancelled),
@@ -740,6 +779,13 @@ process.stdin.on("end", () => {
     fs.appendFileSync(process.env.TURNHELM_TEST_INVOCATIONS,
       JSON.stringify({ argv: process.argv.length }) + "\\n");
   }
+  if (process.env.TURNHELM_TEST_ARGV_FILE) {
+    const schemaIndex = args.indexOf("--output-schema");
+    fs.writeFileSync(process.env.TURNHELM_TEST_ARGV_FILE, JSON.stringify({
+      argv: args,
+      outputSchema: schemaIndex === -1 ? null : fs.readFileSync(args[schemaIndex + 1], "utf8")
+    }));
+  }
   const emit = event => process.stdout.write(JSON.stringify(event) + "\\n");
   const answer = JSON.stringify({ count: 4, sum: 17 });
   if (mode === "fail") process.exit(3);
@@ -750,6 +796,58 @@ process.stdin.on("end", () => {
     process.exit(9);
   }
   if (mode === "hang") { setInterval(() => {}, 3600); return; }
+  if (mode === "hang-first") {
+    // DL-1: only the first worker invocation stalls; later cases answer. The
+    // invocation log above already counted this spawn, so a single line means
+    // this is the first.
+    const log = process.env.TURNHELM_TEST_INVOCATIONS;
+    const prior = log !== undefined && fs.existsSync(log)
+      ? fs.readFileSync(log, "utf8").split("\\n").filter(line => line !== "").length : 0;
+    if (prior <= 1) { setInterval(() => {}, 3600); return; }
+  }
+  if (mode === "mutiny-first") {
+    // EV-1: the first invocation hangs until the CLI's owned shutdown ladder
+    // SIGINTs it, then hard-kills the parent CLI — a deadline kill that can
+    // leave no receipt, so only the CLI's journal timeline survives. Later
+    // cases answer normally.
+    const log = process.env.TURNHELM_TEST_INVOCATIONS;
+    const prior = log !== undefined && fs.existsSync(log)
+      ? fs.readFileSync(log, "utf8").split("\\n").filter(line => line !== "").length : 0;
+    if (prior <= 1) {
+      const mutiny = () => {
+        try { process.kill(process.ppid, "SIGKILL"); } catch {}
+        process.exit(0);
+      };
+      process.on("SIGINT", mutiny);
+      process.on("SIGTERM", mutiny);
+      setInterval(() => {}, 3600);
+      return;
+    }
+  }
+  if (mode === "mutiny-fail-first") {
+    // EV-1: the first invocation reports a rate-limited failure (the CLI
+    // observes and journals the class), hangs to its deadline, then kills the
+    // CLI from inside the shutdown ladder — delayed so the failure journal
+    // append is safely past. No receipt can exist; the class must survive.
+    const log = process.env.TURNHELM_TEST_INVOCATIONS;
+    const prior = log !== undefined && fs.existsSync(log)
+      ? fs.readFileSync(log, "utf8").split("\\n").filter(line => line !== "").length : 0;
+    if (prior <= 1) {
+      const hostile = ${JSON.stringify(HOSTILE_FAILURE)};
+      emit({ type: "error", message: hostile });
+      emit({ type: "turn.failed", message: hostile });
+      const mutiny = () => {
+        setTimeout(() => {
+          try { process.kill(process.ppid, "SIGKILL"); } catch {}
+          process.exit(0);
+        }, 250);
+      };
+      process.on("SIGINT", mutiny);
+      process.on("SIGTERM", mutiny);
+      setInterval(() => {}, 3600);
+      return;
+    }
+  }
   if (mode === "emit-then-hang") {
     // One decoded event, then a gate file once it has flushed, then idle: the
     // caller aborts after the gate, cancelling a run that already decoded.
@@ -824,6 +922,12 @@ process.stdin.on("end", () => {
     emit({ type: "turn.completed" });
     process.exit(0);
   }
+  if (mode === "fat-journal") {
+    // EV-1: bloat the CLI-owned lifecycle journal past the tree read bound —
+    // an append-only journal with no size contract of its own must never fail
+    // a clean case's tree walk.
+    fs.appendFileSync(path.join(process.cwd(), ".turnhelm", "lifecycle.jsonl"), "x".repeat(1024 * 1024 + 4096));
+  }
   if (mode === "mutate-input") {
     fs.writeFileSync(path.join(process.cwd(), "input.json"), JSON.stringify({ values: [1] }));
   }
@@ -832,11 +936,17 @@ process.stdin.on("end", () => {
   }
   if (mode === "spawn-linger") {
     // A descendant in its own process group that inherits stdout: the CLI can
-    // exit, but the supervision pipe never closes. It self-exits so no test
-    // process waits on it forever.
+    // exit, but the supervision pipe never closes. It acknowledges readiness
+    // by dropping its pid (outside the consumer tree) so the test can gate its
+    // abort on real liveness and reap it afterwards.
+    const pidFile = process.env.TURNHELM_LINGER_PID_FILE || path.join(process.cwd(), "linger.pid");
     require("node:child_process").spawn(process.execPath,
-      ["-e", "setInterval(() => {}, 3600); setTimeout(() => process.exit(0), 4000)"], {
-      detached: true, stdio: ["ignore", "inherit", "inherit"]
+      ["-e", "require('node:fs').writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 3600);",
+        pidFile], {
+      detached: true, stdio: ["ignore", "inherit", "inherit"],
+      // This lingerer is SIGKILLed by the test after the fact, so it must not
+      // carry coverage instrumentation (an own undefined blocks reinsertion).
+      env: { ...process.env, NODE_V8_COVERAGE: undefined }
     }).unref();
   }
   if (mode === "symlink-summary") {
@@ -945,6 +1055,8 @@ type CraftedCase = {
   reservation?: readonly ("laya" | "jev")[];
   jevEnabled?: boolean;
   jevTransport?: { mode: "direct" } | { mode: "http-connect"; proxyUrl: string };
+  withSchema?: boolean;
+  deadlineMs?: number;
 };
 
 const readEvidence = async (runRoot: string): Promise<Record<string, unknown>[]> =>
@@ -1019,17 +1131,26 @@ const buildRun = async (
       await writeFile(join(root, ".turnhelm", "routes.jsonl"), entry.journalSeed.join("\n") + "\n", { mode: 0o644 });
     }
     const info = await stat(root);
+    const schemaBytes = entry.withSchema === true ? Buffer.from(STDOUT_JSON_SCHEMA_TEXT, "utf8") : undefined;
+    if (schemaBytes !== undefined) {
+      await writeFile(join(root, "output-schema.json"), schemaBytes, { mode: 0o644 });
+    }
     manifestCases.push({
       id: entry.id, kind: entry.kind, root: await realpath(root),
       identity: { dev: info.dev, ino: info.ino },
       task, taskHash: sha256hex(taskBytes), taskBytes: taskBytes.length,
       config,
+      deadlineMs: entry.deadlineMs ?? 240_000,
       inputHashes: {
         "AGENTS.md": sha256hex(await readFile(join(root, "AGENTS.md"))),
         ".agents/skills/turnhelm-routing/SKILL.md": sha256hex(await readFile(join(root, ".agents", "skills", "turnhelm-routing", "SKILL.md"))),
         ".agents/skills/turnhelm-routing/agents/openai.yaml": sha256hex(await readFile(join(root, ".agents", "skills", "turnhelm-routing", "agents", "openai.yaml"))),
-        "input.json": sha256hex(input)
+        "input.json": sha256hex(input),
+        ...(schemaBytes !== undefined ? { "output-schema.json": sha256hex(schemaBytes) } : {})
       },
+      ...(schemaBytes !== undefined
+        ? { outputSchema: { relative: "output-schema.json", sha256: sha256hex(schemaBytes) } }
+        : {}),
       allowedChanges: entry.kind === "worker-write" ? ["out/summary.json"] : [],
       oracle: entry.kind === "worker-write"
         ? { kind: "summary-file", expected: { count: 4, sum: 17 } }
@@ -1213,6 +1334,187 @@ test("suite counts are reserved before each attempt", async t => {
   }
 });
 
+test("a per-case timeout is unjudged and the roster continues", { timeout: 120_000 }, async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  // The first case hangs past its own 5s deadline (the roster floor); the
+  // second answers. DL-1: the expired deadline is an unjudged per-case
+  // outcome behind the cleanup and settled-tree gates, never a stop.
+  const run = await buildRun(t, "laya", classifier.url, [
+    { id: "times-out", kind: "worker-readonly", deadlineMs: 5000 },
+    { id: "passes-anyway", kind: "worker-readonly" }
+  ]);
+  const invocations = join(run.runRoot, "fake-worker-invocations.log");
+  const code = await executeAcceptance(run.manifestPath, run.sha256,
+    { env: workerEnv(fakeBin, "hang-first", invocations) });
+  assert.equal(code, 4, "a complete roster with one timed-out case exits four");
+  assert.equal(await countInvocations(invocations), 2, "both workers actually spawn");
+  const evidence = await readEvidence(run.runRoot);
+  const timed = evidence.find(line => line.phase === "verified" && line.caseId === "times-out");
+  assert.equal(timed?.verdict, "timeout");
+  assert.equal(timed?.policy, "not-applicable");
+  assert.ok(!Object.hasOwn(timed ?? {}, "oracleInput"), "nothing was judged, so no oracle input is retained");
+  assert.equal(evidence.find(line => line.phase === "verified" && line.caseId === "passes-anyway")?.verdict,
+    "pass", "the next case still reserves and grades");
+  assert.ok(!evidence.some(line => line.phase === "stopped"), "a timeout outcome never stops the roster");
+  assert.deepEqual(evidence.at(-1),
+    { phase: "completed", outcome: "fail", cases: 2, failed: 0, timedOut: 1 },
+    "the completed counts reconcile the unjudged timeout exactly");
+});
+
+type LifecycleView = Readonly<{ events: readonly { tMs: number; kind: string }[]; overflow: boolean }>;
+const lifecycleOf = (line: unknown): LifecycleView | undefined =>
+  (line as { workerLifecycle?: LifecycleView } | undefined)?.workerLifecycle;
+
+test("a failed worker case retains its lifecycle projection", { timeout: 120_000 }, async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  const run = await buildRun(t, "laya", classifier.url, [{ id: "fails-rated", kind: "worker-readonly" }]);
+  await executeAcceptance(run.manifestPath, run.sha256, { env: workerEnv(fakeBin, "rate-fail") });
+  const observed = (await readEvidence(run.runRoot)).find(line => line.phase === "observed" && line.caseId === "fails-rated");
+  const lifecycle = lifecycleOf(observed);
+  assert.ok(lifecycle !== undefined, "the failed worker's bounded timeline is retained");
+  const kinds = lifecycle.events.map(event => event.kind);
+  assert.equal(kinds[0], "spawned", "the receipt's timeline begins at the worker spawn");
+  assert.equal(kinds.at(-1), "settle", "the receipt's timeline ends at settlement");
+  assert.equal(lifecycle.overflow, false);
+  const failure = lifecycle.events.find(event => event.kind === "failure");
+  assert.ok(failure !== undefined, "the timeline keeps the failure milestone");
+  assert.equal((failure as { detail?: { class?: string } }).detail?.class, "rate-limit",
+    "the retained timeline carries the observed failure class from the frozen taxonomy");
+  assert.ok(lifecycle.events.every(event => typeof event.tMs === "number"
+    && (Object.keys(event).length === 2 || (Object.keys(event).length === 3 && typeof (event as { detail?: unknown }).detail === "object"))),
+    "the retained timeline is content-free: tMs, kind, and at most a fixed-vocabulary detail");
+});
+
+test("an oversized CLI-owned journal never stops a clean case", { timeout: 120_000 }, async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  // The worker bloats .turnhelm/lifecycle.jsonl past the tree read bound; the
+  // journal is CLI-owned and append-only with no size contract, so a clean
+  // case must complete — the projection degrades, the tree walk must not.
+  const run = await buildRun(t, "laya", classifier.url, [{ id: "passes-anyway", kind: "worker-readonly" }]);
+  const code = await executeAcceptance(run.manifestPath, run.sha256, { env: workerEnv(fakeBin, "fat-journal") });
+  assert.equal(code, 0, "a fat journal is evidence degradation, never a drift stop");
+  const evidence = await readEvidence(run.runRoot);
+  assert.equal(evidence.find(line => line.phase === "verified" && line.caseId === "passes-anyway")?.verdict,
+    "pass", "the case still reserves and grades");
+});
+
+test("a receiptless killed CLI stops the roster with its journal timeline retained", { timeout: 120_000 }, async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  // The first case's worker mutinies: at its 5s deadline the CLI begins the
+  // owned shutdown ladder and SIGINTs the worker, which SIGKILLs the CLI —
+  // no receipt can exist. Spec §3.4 adopts custom-round's three gates
+  // (receipt, cleanup, settled tree): a receiptless timeout stops all
+  // further spend; its crash evidence stays on the observation.
+  const run = await buildRun(t, "laya", classifier.url, [
+    { id: "times-out", kind: "worker-readonly", deadlineMs: 5000 },
+    { id: "passes-anyway", kind: "worker-readonly" }
+  ]);
+  const invocations = join(run.runRoot, "fake-worker-invocations.log");
+  const code = await executeAcceptance(run.manifestPath, run.sha256,
+    { env: workerEnv(fakeBin, "mutiny-first", invocations) });
+  assert.equal(code, 1, "a timeout without exactly one CLI receipt is a stop, never a continuation");
+  assert.equal(await countInvocations(invocations), 1, "only the first worker spawns: the roster halts");
+  const evidence = await readEvidence(run.runRoot);
+  const observed = evidence.find(line => line.phase === "observed" && line.caseId === "times-out");
+  assert.equal(observed?.exitCode, null, "the CLI died to a signal, so no exit code exists");
+  const lifecycle = lifecycleOf(observed);
+  assert.ok(lifecycle !== undefined, "the killed CLI's journal timeline is retained by pid");
+  const kinds = lifecycle.events.map(event => event.kind);
+  assert.ok(kinds.includes("spawned"), "the journal timeline retains the worker spawn");
+  assert.ok(!kinds.includes("settle"), "a hard kill never settles");
+  assert.equal(evidence.at(-1)?.phase, "stopped", "the round stops on the receipt gate");
+  assert.equal(evidence.at(-1)?.caseId, "times-out");
+  assert.equal(evidence.at(-1)?.reason, "receipt");
+  assert.equal(evidence.find(line => line.phase === "reserved" && line.caseId === "passes-anyway"), undefined,
+    "no later case is reserved after the stop");
+});
+
+test("a reported failure killed before receipt keeps its class on the retained timeline", { timeout: 120_000 }, async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  // The worker first reports a rate-limited failure — the CLI observes the
+  // class and journals it — then hangs until the deadline, and kills the CLI
+  // from inside the shutdown ladder. No receipt exists; the journal timeline
+  // must still carry the observed failure class.
+  const run = await buildRun(t, "laya", classifier.url, [
+    { id: "dies-failing", kind: "worker-readonly", deadlineMs: 5000 }
+  ]);
+  const invocations = join(run.runRoot, "fake-worker-invocations.log");
+  const code = await executeAcceptance(run.manifestPath, run.sha256,
+    { env: workerEnv(fakeBin, "mutiny-fail-first", invocations) });
+  assert.equal(code, 1, "the receiptless kill stops the round");
+  const evidence = await readEvidence(run.runRoot);
+  const observed = evidence.find(line => line.phase === "observed" && line.caseId === "dies-failing");
+  const lifecycle = lifecycleOf(observed);
+  assert.ok(lifecycle !== undefined, "the killed CLI's journal timeline is retained by pid");
+  const failure = lifecycle.events.find(event => event.kind === "failure");
+  assert.ok(failure !== undefined, "the reported failure milestone survives the kill");
+  assert.equal((failure as { detail?: { class?: string } }).detail?.class, "rate-limit",
+    "the observed failure class rides the retained crash evidence");
+  const kinds = lifecycle.events.map(event => event.kind);
+  assert.ok(kinds.includes("spawned"), "the journal timeline retains the worker spawn");
+  assert.ok(!kinds.includes("settle"), "a hard kill never settles");
+  assert.equal(evidence.at(-1)?.reason, "receipt", "the round stops on the receipt gate");
+});
+
+test("hostile lifecycle detail values degrade, never retain prose", async () => {
+  const CANARY = "raw-prose-canary-trust-me";
+  const projected = projectWorkerLifecycle({
+    overflow: false,
+    events: [
+      { tMs: 0, kind: "spawned", detail: { pid: 4242 } },
+      { tMs: 1, kind: "failure", detail: { class: CANARY } },
+      { tMs: 2, kind: "failure", detail: { class: "rate-limit" } },
+      { tMs: 3, kind: "close", detail: { signal: "SIGBOMB" } },
+      { tMs: 4, kind: "event", detail: { eventKind: "message" } },
+      { tMs: 5, kind: "event", detail: { eventKind: CANARY } },
+      { tMs: 6, kind: "settle", detail: { status: "completed" } },
+      { tMs: 7, kind: "spawned", detail: { pid: -3 } },
+      { tMs: 8, kind: "close", detail: { exitCode: null } },
+      { tMs: 9, kind: "settle", detail: { status: CANARY } }
+    ]
+  });
+  assert.ok(projected !== undefined, "the envelope itself is sound");
+  const byKey = new Map(projected.events.map(event => [event.kind + ":" + event.tMs, event]));
+  assert.deepEqual(byKey.get("spawned:0")?.detail, { pid: 4242 }, "a valid pid detail is retained");
+  assert.deepEqual(byKey.get("failure:2")?.detail, { class: "rate-limit" }, "a frozen-vocabulary class is retained");
+  assert.deepEqual(byKey.get("event:4")?.detail, { eventKind: "message" }, "a worker event kind is retained");
+  assert.deepEqual(byKey.get("settle:6")?.detail, { status: "completed" }, "a settlement status is retained");
+  assert.deepEqual(byKey.get("close:8")?.detail, { exitCode: null }, "a null exit code is retained");
+  for (const key of ["failure:1", "close:3", "event:5", "spawned:7", "settle:9"]) {
+    assert.ok(byKey.get(key) !== undefined, key + " keeps its entry");
+    assert.equal(byKey.get(key)?.detail, undefined, key + " drops its out-of-vocabulary detail");
+  }
+  assert.ok(!JSON.stringify(projected).includes(CANARY), "no prose reaches the retained evidence");
+});
+
+test("hostile journal detail values degrade the same way", async t => {
+  const CANARY = "journal-prose-canary-trust-me";
+  const directory = await mkdtemp(join(tmpdir(), "turnhelm-lifecycle-detail-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await mkdir(join(directory, ".turnhelm"));
+  const line = (event: Record<string, unknown>): string => JSON.stringify({ type: "turnhelm.worker-lifecycle", pid: 4242, ...event });
+  await writeFile(join(directory, ".turnhelm", "lifecycle.jsonl"), [
+    line({ tMs: 0, kind: "failure", detail: { class: "auth" } }),
+    line({ tMs: 1, kind: "failure", detail: { class: CANARY } }),
+    line({ tMs: 2, kind: "spawned", detail: { pid: 4242 } }),
+    line({ tMs: 3, kind: "spawned", detail: { pid: Number.MAX_SAFE_INTEGER * 2 } })
+  ].join("\n") + "\n");
+  const rebuilt = await readWorkerLifecycleJournal(directory, 4242);
+  assert.ok(rebuilt !== undefined, "the journal rebuilds");
+  const byKey = new Map(rebuilt.events.map(event => [event.kind + ":" + event.tMs, event]));
+  assert.deepEqual(byKey.get("failure:0")?.detail, { class: "auth" }, "a frozen-vocabulary class is retained");
+  assert.deepEqual(byKey.get("spawned:2")?.detail, { pid: 4242 }, "a valid pid detail is retained");
+  assert.equal(byKey.get("failure:1")?.detail, undefined, "prose in a class degrades to no detail");
+  assert.ok(byKey.get("failure:1") !== undefined, "the entry itself survives");
+  assert.equal(byKey.get("spawned:3")?.detail, undefined, "an unsafe pid degrades to no detail");
+  assert.ok(!JSON.stringify(rebuilt).includes(CANARY), "no prose reaches the rebuilt evidence");
+});
+
 test("first real failure stops remaining cases", async t => {
   const classifier = await startClassifierFixture(t);
   const fakeBin = await writeFakeCodex(t);
@@ -1316,7 +1618,7 @@ test("malformed missing oversized and invalid utf8 outputs are finite", async t 
       assert.equal(code, 4, mode + " fails only the oracle and completes the roster");
       assert.deepEqual(evidence.map(line => line.phase), ["prepared", "reserved", "observed", "verified", "completed"]);
       assert.equal(evidence[3].verdict, "fail", mode + " fails verification");
-      assert.deepEqual(evidence.at(-1), { phase: "completed", outcome: "fail", cases: 1, failed: 1 });
+      assert.deepEqual(evidence.at(-1), { phase: "completed", outcome: "fail", cases: 1, failed: 1, timedOut: 0 });
     } else {
       assert.equal(code, 1, mode + " is an integrity stop");
       assert.deepEqual(evidence.map(line => line.phase), ["prepared", "reserved", "observed", "verified", "stopped"]);
@@ -1714,7 +2016,7 @@ test("oracle-only failures continue the roster to a failed completion", async t 
   assert.ok(mixedEvidence.find(line => line.phase === "verified" && line.verdict === "fail")?.oracleInput,
     "the continued failure record carries its oracle input");
   assert.ok(!mixedEvidence.some(line => line.phase === "stopped"));
-  assert.deepEqual(mixedEvidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 1 });
+  assert.deepEqual(mixedEvidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 1, timedOut: 0 });
 
   // An all-pass roster commits the same protocol with zero failures.
   const clean = await buildRun(t, "laya", classifier.url, [
@@ -1725,7 +2027,7 @@ test("oracle-only failures continue the roster to a failed completion", async t 
     { env: workerEnv(fakeBin, "ok-readonly") }), 0);
   const cleanEvidence = await readEvidence(clean.runRoot);
   assert.ok(!cleanEvidence.some(line => line.phase === "stopped"));
-  assert.deepEqual(cleanEvidence.at(-1), { phase: "completed", outcome: "pass", cases: 2, failed: 0 });
+  assert.deepEqual(cleanEvidence.at(-1), { phase: "completed", outcome: "pass", cases: 2, failed: 0, timedOut: 0 });
 
   // Two oracle failures reconcile to failed: 2 — the count is the roster's
   // actual failures, not a marker.
@@ -1740,7 +2042,7 @@ test("oracle-only failures continue the roster to a failed completion", async t 
     ["fail", "fail"]);
   assert.ok(doubleEvidence.filter(line => line.phase === "verified")
     .every(line => line.oracleInput), "every continued failure retains its input");
-  assert.deepEqual(doubleEvidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 2 });
+  assert.deepEqual(doubleEvidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 2, timedOut: 0 });
 });
 
 test("an absent summary fails its oracle and continues the write roster", async t => {
@@ -1770,7 +2072,7 @@ test("an absent summary fails its oracle and continues the write roster", async 
   assert.equal((absent?.checks as Record<string, unknown>).oracle, false);
   assert.equal((evidence.find(line => line.phase === "verified" && line.caseId === "correct-write")
     ?.checks as Record<string, unknown>).oracle, true);
-  assert.deepEqual(evidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 1 });
+  assert.deepEqual(evidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 1, timedOut: 0 });
 
   // A claim that refuses before the loop spends nothing: drifted frozen bytes
   // stop the run at the claim with zero recorded worker invocations.
@@ -1838,9 +2140,9 @@ test("the completed record family is strict per suite kind", async t => {
   const run = await claimAcceptance(prepared.manifestPath, prepared.sha256);
   t.after(() => run.handle.close());
 
-  // The worker shape: exactly outcome/cases/failed with reconciling counts.
+  // The worker shape: exactly outcome/cases/failed/timedOut with reconciling counts.
   const workerShape = (over: Record<string, unknown>): Record<string, unknown> =>
-    ({ outcome: "fail", cases: 2, failed: 1, ...over });
+    ({ outcome: "fail", cases: 2, failed: 1, timedOut: 1, ...over });
   for (const bad of [
     workerShape({ extra: 1 }),
     workerShape({ outcome: "excellent" }),
@@ -1848,9 +2150,11 @@ test("the completed record family is strict per suite kind", async t => {
     workerShape({ cases: 1.5 }),
     workerShape({ failed: 2 ** 53 }),
     workerShape({ failed: 3 }),
-    workerShape({ outcome: "fail", failed: 0 }),
+    workerShape({ timedOut: 3 }),
+    workerShape({ outcome: "fail", failed: 0, timedOut: 0 }),
     workerShape({ outcome: "pass", failed: 1 }),
-    workerShape({ policyMatches: 1 })
+    workerShape({ policyMatches: 1 }),
+    { outcome: "fail", cases: 2, failed: 1 }
   ]) {
     await assert.rejects(() => appendEvidence(run, {
       phase: "completed", ...bad
@@ -1858,14 +2162,14 @@ test("the completed record family is strict per suite kind", async t => {
   }
 
   // Legal worker records round-trip exactly.
-  await appendEvidence(run, { phase: "completed", outcome: "fail", cases: 2, failed: 2 } as unknown as SafeEvidence);
-  await appendEvidence(run, { phase: "completed", outcome: "pass", cases: 1, failed: 0 } as unknown as SafeEvidence);
+  await appendEvidence(run, { phase: "completed", outcome: "fail", cases: 2, failed: 2, timedOut: 0 } as unknown as SafeEvidence);
+  await appendEvidence(run, { phase: "completed", outcome: "pass", cases: 1, failed: 0, timedOut: 0 } as unknown as SafeEvidence);
   const completed = (await readFile(run.evidencePath, "utf8")).trim().split("\n")
     .map(line => JSON.parse(line) as Record<string, unknown>)
     .filter(line => line.phase === "completed");
   assert.deepEqual(completed, [
-    { phase: "completed", outcome: "fail", cases: 2, failed: 2 },
-    { phase: "completed", outcome: "pass", cases: 1, failed: 0 }
+    { phase: "completed", outcome: "fail", cases: 2, failed: 2, timedOut: 0 },
+    { phase: "completed", outcome: "pass", cases: 1, failed: 0, timedOut: 0 }
   ]);
 
   // The calibration rules stay untouched: a short calibration roster and a
@@ -1942,7 +2246,7 @@ test("worker and calibration cases have different pass criteria", async t => {
   assert.equal(workerVerified.verdict, "fail");
   assert.equal((workerVerified.checks as Record<string, unknown>)["oracle"], false,
     "the worker failure is caught by the stdout oracle");
-  assert.deepEqual(workerBadEvidence.at(-1), { phase: "completed", outcome: "fail", cases: 1, failed: 1 });
+  assert.deepEqual(workerBadEvidence.at(-1), { phase: "completed", outcome: "fail", cases: 1, failed: 1, timedOut: 0 });
 
   // A full calibration roster whose every selection stays inside its frozen
   // band passes on routing facts alone: no receipts, no worker artifacts.
@@ -2042,7 +2346,7 @@ test("RR01 whole payload and exact keys", async t => {
   assert.ok(evidence.findIndex(x => x.phase === "observed") < evidence.findIndex(x => x.phase === "verified"),
     "the observation is durable before the verdict");
   assert.ok(!evidence.some(line => line.phase === "stopped"));
-  assert.deepEqual(evidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 2 });
+  assert.deepEqual(evidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 2, timedOut: 0 });
 
   // Every other malformed stdout payload fails on the oracle check itself.
   // (answer-suffix — payload plus one prose line — now passes as the
@@ -2081,6 +2385,29 @@ test("RR01 whole payload and exact keys", async t => {
   const looseWrite = await runOf("summary-loose", "worker-write", "wr-loose");
   assert.equal(looseWrite.code, 0);
 });
+
+test("the acceptance worker CLI passes --output-schema for stdout-json cases and not for summary-file cases",
+  { timeout: 90_000 }, async t => {
+    const classifier = await startClassifierFixture(t);
+    const fakeBin = await writeFakeCodex(t);
+    const readonlyRun = await buildRun(t, "laya", classifier.url, [
+      { id: "ro-schema", kind: "worker-readonly", withSchema: true }
+    ]);
+    const readonlyArgv = join(readonlyRun.runRoot, "argv.json");
+    const readonlyCode = await executeAcceptance(readonlyRun.manifestPath, readonlyRun.sha256,
+      { env: { ...workerEnv(fakeBin, "ok-readonly"), TURNHELM_TEST_ARGV_FILE: readonlyArgv } });
+    assert.equal(readonlyCode, 0, "the schema-carrying stdout-json case still passes");
+    const writeRun = await buildRun(t, "laya", classifier.url, [{ id: "wr-plain", kind: "worker-write" }]);
+    const writeArgv = join(writeRun.runRoot, "argv.json");
+    const writeCode = await executeAcceptance(writeRun.manifestPath, writeRun.sha256,
+      { env: { ...workerEnv(fakeBin, "ok-write"), TURNHELM_TEST_ARGV_FILE: writeArgv } });
+    assert.equal(writeCode, 0, "the schema-less summary-file case still passes");
+    const readonlyRecorded = JSON.parse(await readFile(readonlyArgv, "utf8")) as { argv: string[]; outputSchema: string | null };
+    assert.ok(readonlyRecorded.argv.includes("--output-schema"), "the stdout-json case forwards the flag");
+    assert.equal(readonlyRecorded.outputSchema, STDOUT_JSON_SCHEMA_TEXT, "the staged bytes are the frozen schema's bytes");
+    const writeRecorded = JSON.parse(await readFile(writeArgv, "utf8")) as { argv: string[]; outputSchema: string | null };
+    assert.ok(!writeRecorded.argv.includes("--output-schema"), "the summary-file case forwards no flag");
+  });
 
 test("the stdout oracle accepts the adjudicated payload-plus-prose envelope and nothing wider", async t => {
   const classifier = await startClassifierFixture(t);
@@ -2268,9 +2595,21 @@ test("a lingering descendant stops the round as cleanup-unverified", async t => 
     { id: "linger-one", kind: "worker-readonly" },
     { id: "linger-two", kind: "worker-readonly" }
   ]);
+  const pidFile = join(run.runRoot, "linger.pid");
   const stopping = executeAcceptance(run.manifestPath, run.sha256,
-    { env: workerEnv(fakeBin, "spawn-linger"), signal: controller.signal, termGraceMs: 400, postTermMs: 400 });
-  await new Promise(resolve => setTimeout(resolve, 700));
+    { env: { ...workerEnv(fakeBin, "spawn-linger"), TURNHELM_LINGER_PID_FILE: pidFile },
+      signal: controller.signal, termGraceMs: 400, postTermMs: 400 });
+  // AF-3: the abort is gated on the lingerer's own readiness ack, not a fixed
+  // delay that can fire before the descendant ever spawned.
+  let lingerPid = 0;
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline && lingerPid === 0) {
+    const recorded = Number(await readFile(pidFile, "utf8").catch(() => ""));
+    if (Number.isInteger(recorded) && recorded > 0) lingerPid = recorded;
+    else await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.ok(lingerPid > 0, "the lingerer acknowledged readiness before the abort");
+  t.after(() => { try { process.kill(lingerPid, "SIGKILL"); } catch { /* already gone */ } });
   controller.abort();
   assert.equal(await stopping, 130, "the operator's signal intent stands");
   const evidence = await readEvidence(run.runRoot);
@@ -2285,14 +2624,26 @@ test("a second interrupt re-raises the default disposition", { timeout: 8000 }, 
   const classifier = await startClassifierFixture(t);
   const fakeBin = await writeFakeCodex(t);
   const run = await buildRun(t, "laya", classifier.url, [{ id: "linger-entry", kind: "worker-readonly" }]);
+  const pidFile = join(run.runRoot, "linger.pid");
   const entry = spawn(process.execPath,
     [ENTRY_PATH, "--execute", run.manifestPath, "--approve", run.sha256],
-    { env: workerEnv(fakeBin, "spawn-linger"), stdio: ["ignore", "ignore", "pipe"] });
+    { env: { ...workerEnv(fakeBin, "spawn-linger"), TURNHELM_LINGER_PID_FILE: pidFile },
+      stdio: ["ignore", "ignore", "pipe"] });
   t.after(() => entry.kill("SIGKILL"));
   const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => {
     entry.on("close", (code, signal) => resolve({ code, signal }));
   });
-  await new Promise(resolve => setTimeout(resolve, 700));
+  // AF-3: the first interrupt is gated on the lingerer's readiness ack, not a
+  // fixed delay that can fire before the descendant ever spawned.
+  let lingerPid = 0;
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline && lingerPid === 0) {
+    const recorded = Number(await readFile(pidFile, "utf8").catch(() => ""));
+    if (Number.isInteger(recorded) && recorded > 0) lingerPid = recorded;
+    else await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.ok(lingerPid > 0, "the lingerer acknowledged readiness before the interrupt");
+  t.after(() => { try { process.kill(lingerPid, "SIGKILL"); } catch { /* already gone */ } });
   entry.kill("SIGINT");
   await new Promise(resolve => setTimeout(resolve, 350));
   entry.kill("SIGINT");
@@ -3331,7 +3682,7 @@ test("RR04 protocol and policy are independent", async t => {
   assert.deepEqual(workerEvidence.filter(line => line.phase === "reserved").map(line => line.caseId),
     ["worker-one", "worker-two"], "an oracle failure continues the worker roster");
   assert.ok(workerEvidence.every(line => line.policy === undefined || line.policy === "not-applicable"));
-  assert.deepEqual(workerEvidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 2 });
+  assert.deepEqual(workerEvidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 2, timedOut: 0 });
 
   // The journal gate rejects illegal policy/outcome/counter shapes and keeps
   // raw canary fields off disk; a legal completed record round-trips exactly.
@@ -3594,7 +3945,7 @@ test("RR05 terminal boundary is fail closed", async t => {
   const workerCloseEvidence = await readEvidence(workerClose.runRoot);
   assert.equal(workerCloseEvidence.at(-1)?.reason, "evidence-io");
   assert.deepEqual(workerCloseEvidence.find(line => line.phase === "completed"),
-    { phase: "completed", outcome: "pass", cases: 1, failed: 0 },
+    { phase: "completed", outcome: "pass", cases: 1, failed: 0, timedOut: 0 },
     "the worker completed fact precedes the close");
 
   // An abort discovered after the worker close is carried by the exit code
@@ -4232,7 +4583,7 @@ test("singleton fallback binds its frozen 503 fixture", async t => {
   const checks = verified.checks as Record<string, unknown>;
   assert.equal(checks["transport-policy"], true, "the specialized fallback case verifies its frozen transport policy");
   assert.ok(!("laya-first" in checks), "the singleton fallback has no laya-first requirement");
-  assert.deepEqual(evidence.at(-1), { phase: "completed", outcome: "pass", cases: 1, failed: 0 });
+  assert.deepEqual(evidence.at(-1), { phase: "completed", outcome: "pass", cases: 1, failed: 0, timedOut: 0 });
   assert.equal(proxy.connects.length, 1, "exactly one CONNECT through the owned proxy");
   assert.equal(proxy.connects[0].target, "api.typesafe.ai:443", "the CONNECT target is the fixed Jev origin");
   assert.equal(proxy.connects[0].authorization, undefined, "Origin authorization never appears in CONNECT");

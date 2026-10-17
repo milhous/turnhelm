@@ -14,6 +14,7 @@ import { promisify } from "node:util";
 import { parseProjectConfig, PROFILE_IDS, type ProfileId, type ProjectConfig } from "../src/config.js";
 import { FAILURE_PHRASINGS, type FailureClass } from "../src/codex-events.js";
 import { initProject } from "../src/init.js";
+import { validateOutputSchemaBytes } from "../src/output-schema.js";
 import { envelopePayload } from "../src/payload.js";
 import { readProjectFile } from "../src/project.js";
 import { routeTask } from "../src/route.js";
@@ -40,11 +41,23 @@ export type AcceptanceCase = Readonly<{
   taskHash: string;
   taskBytes: number;
   config: ProjectConfig;
+  deadlineMs: number;
   inputHashes: Readonly<Record<string, string>>;
   allowedChanges: readonly string[];
   oracle: AcceptanceOracle;
+  outputSchema?: Readonly<{ relative: string; sha256: string }>;
   reservation: Readonly<{ worker: number; backends: readonly AcceptanceBackend[] }>;
 }>;
+
+// SC-1 (spec §3.1): the frozen output schema for stdout-json cases — exact
+// bytes, validated through the same input-boundary check the CLI runs before
+// they are written into the consumer root and hashed with the other inputs.
+const STDOUT_JSON_SCHEMA = Buffer.from(
+  '{"type":"object","required":["count","sum"],'
+  + '"properties":{"count":{"type":"number"},"sum":{"type":"number"}},"additionalProperties":false}',
+  "utf8"
+);
+const OUTPUT_SCHEMA_RELATIVE = "output-schema.json";
 
 export type AcceptanceManifest = Readonly<{
   version: 2;
@@ -63,7 +76,7 @@ export type AcceptanceManifest = Readonly<{
 }>;
 
 export type StoppedReason =
-  | "drift" | "output-limit" | "evidence-io" | "signal" | "timeout"
+  | "drift" | "output-limit" | "evidence-io" | "signal" | "receipt"
   | "worker-failure" | "verdict" | "cleanup-unverified" | "unknown";
 
 export type OracleInputEvidence =
@@ -87,6 +100,15 @@ export type WorkerFailureEvidence = Readonly<{
 // decode to settlement. An observation, never a liveness or stall claim.
 export type WorkerProgressEvidence = Readonly<{ events: number; lastEventAgeMs?: number }>;
 
+// The bounded lifecycle projection (spec §3.2 EV-1): the content-free worker
+// timeline, retained only where it explains a bad outcome — a failed worker or
+// an expired deadline. tMs and kind only; no detail ever rides.
+export type WorkerLifecycleDetail = Readonly<Record<string, string | number | null>>;
+export type WorkerLifecycleEvidence = Readonly<{
+  events: readonly Readonly<{ tMs: number; kind: string; detail?: WorkerLifecycleDetail }>[];
+  overflow: boolean;
+}>;
+
 // Bounded transport-policy evidence (spec §7): application policy replayed
 // from the CLI's routing attempts, never a networking or exit attestation.
 export type AttemptTransportEvidence =
@@ -96,10 +118,10 @@ export type AttemptTransportEvidence =
 export type SafeEvidence =
   | Readonly<{ phase: "prepared"; suite: LiveSuite; manifestSha256: string; startedAt: string }>
   | Readonly<{ phase: "reserved"; caseId: string; worker: number; backends: readonly AcceptanceBackend[] }>
-  | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number; attemptTransports?: AttemptTransportEvidence; workerUsage?: WorkerUsageEvidence; workerFailure?: WorkerFailureEvidence; workerProgress?: WorkerProgressEvidence }>
-  | Readonly<{ phase: "verified"; caseId: string; verdict: "pass" | "fail"; policy: "match" | "mismatch" | "not-applicable"; checks: Readonly<Record<string, boolean>>; oracleInput?: OracleInputEvidence }>
+  | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number; attemptTransports?: AttemptTransportEvidence; workerUsage?: WorkerUsageEvidence; workerFailure?: WorkerFailureEvidence; workerProgress?: WorkerProgressEvidence; workerLifecycle?: WorkerLifecycleEvidence }>
+  | Readonly<{ phase: "verified"; caseId: string; verdict: "pass" | "fail" | "timeout"; policy: "match" | "mismatch" | "not-applicable"; checks: Readonly<Record<string, boolean>>; oracleInput?: OracleInputEvidence }>
   | Readonly<{ phase: "completed"; outcome: "pass" | "policy-mismatch"; cases: number; policyMatches: number; policyMismatches: number }>
-  | Readonly<{ phase: "completed"; outcome: "pass" | "fail"; cases: number; failed: number }>
+  | Readonly<{ phase: "completed"; outcome: "pass" | "fail"; cases: number; failed: number; timedOut: number }>
   | Readonly<{ phase: "stopped"; caseId: string | null; reason: StoppedReason }>;
 
 export type ClaimedRun = Readonly<{
@@ -242,7 +264,10 @@ const parseManifest = (value: unknown): AcceptanceManifest => {
   const seen = new Set<string>();
   const cases = value.cases.map(raw => {
     if (!isRecord(raw)) throw fail("case must be an object");
-    expectKeys(raw, ["allowedChanges", "config", "id", "identity", "inputHashes", "kind", "oracle", "reservation", "root", "task", "taskBytes", "taskHash"], "case");
+    // outputSchema is the one optional case key; every other key stays exact.
+    const caseKeys = ["allowedChanges", "config", "deadlineMs", "id", "identity", "inputHashes", "kind", "oracle", "reservation", "root", "task", "taskBytes", "taskHash"];
+    if (raw.outputSchema !== undefined) caseKeys.push("outputSchema");
+    expectKeys(raw, caseKeys, "case");
     const id = expectString(raw.id, "case id");
     if (seen.has(id)) throw fail("case id " + JSON.stringify(id) + " is duplicated");
     seen.add(id);
@@ -253,6 +278,14 @@ const parseManifest = (value: unknown): AcceptanceManifest => {
     if (isCalibration && kind !== "classifier-only") throw fail("calibration suites must not carry worker cases");
     if (!isCalibration && kind === "classifier-only") throw fail("worker suites must not carry classifier-only cases");
     const config = parseProjectConfig(raw.config);
+
+    // DL-1: the per-case deadline is frozen with the case and bounded like the
+    // roster's own budget: an absent or out-of-bounds value refuses the claim.
+    if (typeof raw.deadlineMs !== "number" || !Number.isInteger(raw.deadlineMs)
+      || raw.deadlineMs < 5000 || raw.deadlineMs > 3600000) {
+      throw fail("case deadlineMs must be an integer between 5000 and 3600000");
+    }
+    const deadlineMs = raw.deadlineMs;
 
     if (typeof raw.root !== "string") throw fail("case root must be a string");
     const root = raw.root;
@@ -277,18 +310,35 @@ const parseManifest = (value: unknown): AcceptanceManifest => {
     if (raw.taskHash !== sha256hex(Buffer.from(task, "utf8"))) throw fail("case taskHash must match the task text");
     const taskHash: string = raw.taskHash;
 
+    // SC-1: a schema-bearing case freezes its schema as a path+hash entry tied
+    // to its own inputHashes record; the shape check is bounded and the
+    // stdout-json-only rule is enforced once the oracle is parsed below.
+    let outputSchema: AcceptanceCase["outputSchema"];
+    if (raw.outputSchema !== undefined) {
+      if (!isRecord(raw.outputSchema)) throw fail("case outputSchema must be an object");
+      expectKeys(raw.outputSchema, ["relative", "sha256"], "case outputSchema");
+      const relative = expectString(raw.outputSchema.relative, "case outputSchema relative");
+      if (!isHex(raw.outputSchema.sha256, 64)) throw fail("case outputSchema sha256 is malformed");
+      outputSchema = { relative, sha256: raw.outputSchema.sha256 };
+    }
     if (!isRecord(raw.inputHashes)) throw fail("case inputHashes must be an object");
     const inputHashes: Record<string, string> = {};
     if (kind === "classifier-only") {
       if (Object.keys(raw.inputHashes).length !== 0) throw fail("classifier-only case must not hash inputs");
     } else {
+      const expectedFiles = outputSchema === undefined
+        ? [...WORKER_FROZEN_FILES]
+        : [...WORKER_FROZEN_FILES, outputSchema.relative];
       const keys = Object.keys(raw.inputHashes);
-      if (keys.length !== WORKER_FROZEN_FILES.length || !WORKER_FROZEN_FILES.every(file => keys.includes(file))) {
+      if (keys.length !== expectedFiles.length || !expectedFiles.every(file => keys.includes(file))) {
         throw fail("worker case inputHashes must cover exactly the frozen case files");
       }
-      for (const file of WORKER_FROZEN_FILES) {
+      for (const file of expectedFiles) {
         if (!isHex(raw.inputHashes[file], 64)) throw fail("worker case " + file + " hash is malformed");
         inputHashes[file] = raw.inputHashes[file] as string;
+      }
+      if (outputSchema !== undefined && inputHashes[outputSchema.relative] !== outputSchema.sha256) {
+        throw fail("case outputSchema must hash-match its inputHashes entry");
       }
     }
 
@@ -333,6 +383,10 @@ const parseManifest = (value: unknown): AcceptanceManifest => {
       };
     }
 
+    if (outputSchema !== undefined && (kind !== "worker-readonly" || oracle.kind !== "stdout-json")) {
+      throw fail("case outputSchema belongs only to worker-readonly stdout-json cases");
+    }
+
     if (!isRecord(raw.reservation)) throw fail("case reservation must be an object");
     expectKeys(raw.reservation, ["worker", "backends"], "case reservation");
     const reservedWorker = expectCount(raw.reservation.worker, "case reservation worker");
@@ -353,7 +407,11 @@ const parseManifest = (value: unknown): AcceptanceManifest => {
     if (config.backends.laya.enabled && !backends.includes("laya")) throw fail("case reservation must cover the enabled laya backend");
     if (config.backends.jev.enabled && !backends.includes("jev")) throw fail("case reservation must cover the enabled jev backend");
 
-    return { id, kind, root, identity, task, taskHash, taskBytes, config, inputHashes, allowedChanges: wanted, oracle, reservation: { worker: reservedWorker, backends } };
+    return {
+      id, kind, root, identity, task, taskHash, taskBytes, config, deadlineMs, inputHashes, allowedChanges: wanted, oracle,
+      ...(outputSchema !== undefined ? { outputSchema } : {}),
+      reservation: { worker: reservedWorker, backends }
+    };
   });
 
   if (caps.worker !== cases.reduce((total, item) => total + item.reservation.worker, 0)
@@ -687,6 +745,19 @@ export async function prepareAcceptance(
     const task = kind === "worker-write" ? corpus.workerWriteTask : corpus.workerReadonlyTask;
     const taskBytes = Buffer.from(task, "utf8");
     if (taskBytes.length > MAX_TASK_BYTES) throw new Error("consumer task exceeds the transport bound");
+    // SC-1: every stdout-json case carries the fixed output schema, validated
+    // through the shared boundary check before it is written, then frozen by
+    // relative path and hash with the other inputs. Write cases keep their
+    // summary-file contract and freeze no schema.
+    let outputSchema: AcceptanceCase["outputSchema"];
+    if (kind === "worker-readonly") {
+      const schema = validateOutputSchemaBytes(STDOUT_JSON_SCHEMA);
+      if ("error" in schema) throw new Error("prepare could not validate the frozen output schema: " + schema.error);
+      await writeFile(join(root, OUTPUT_SCHEMA_RELATIVE), STDOUT_JSON_SCHEMA, { mode: 0o644 });
+      outputSchema = { relative: OUTPUT_SCHEMA_RELATIVE, sha256: sha256hex(STDOUT_JSON_SCHEMA) };
+    }
+    const inputHashes = await frozenFileHashes(root);
+    if (outputSchema !== undefined) inputHashes[outputSchema.relative] = outputSchema.sha256;
     return {
       id,
       kind,
@@ -696,11 +767,13 @@ export async function prepareAcceptance(
       taskHash: sha256hex(taskBytes),
       taskBytes: taskBytes.length,
       config,
-      inputHashes: await frozenFileHashes(root),
+      deadlineMs: CASE_TIMEOUT_MS,
+      inputHashes,
       allowedChanges: kind === "worker-write" ? ["out/summary.json"] : [],
       oracle: kind === "worker-write"
         ? { kind: "summary-file", expected }
         : { kind: "stdout-json", expected },
+      ...(outputSchema !== undefined ? { outputSchema } : {}),
       reservation: { worker: 1, backends }
     };
   };
@@ -717,6 +790,7 @@ export async function prepareAcceptance(
       taskHash: sha256hex(taskBytes),
       taskBytes: taskBytes.length,
       config,
+      deadlineMs: CASE_TIMEOUT_MS,
       inputHashes: {},
       allowedChanges: [],
       oracle: {
@@ -1032,6 +1106,129 @@ const projectWorkerProgress = (value: unknown): WorkerProgressEvidence | undefin
   return projection;
 };
 
+// The recorder's frozen kind taxonomy, hand-copied like FAILURE_SIGNALS: a
+// kind outside it is not lifecycle evidence and drops the projection.
+const LIFECYCLE_KINDS: ReadonlySet<string> = new Set(["spawned", "stdin-delivered", "event", "completion", "failure",
+  "abort", "shutdown-term", "shutdown-kill", "shutdown-discharged", "stdout-end", "close", "settle"]);
+
+// The recorder's frozen detail vocabulary, same hand-copied discipline as the
+// kinds — and every value is validated against the vocabulary it came from:
+// the failure-taxonomy classes plus the four transport causes, the worker
+// event kinds, the settlement statuses, the death signals, and the recorder's
+// own number shapes. A hostile or corrupt value degrades the detail (never
+// the entry), so prose cannot ride a key the recorder never wrote.
+const LIFECYCLE_DETAIL_KEYS: ReadonlySet<string> =
+  new Set(["eventKind", "pid", "exitCode", "signal", "status", "class"]);
+const LIFECYCLE_CLASS_VALUES: ReadonlySet<string> = new Set([
+  "stream-disconnected", "rate-limit", "usage-limit", "timeout", "auth", "overloaded", "unknown",
+  "spawn", "stdin", "protocol", "output"
+]);
+const LIFECYCLE_EVENT_KIND_VALUES: ReadonlySet<string> =
+  new Set(["message", "completed", "failed", "diagnostic", "ignored"]);
+const LIFECYCLE_STATUS_VALUES: ReadonlySet<string> = new Set(["completed", "failed", "cancelled"]);
+const LIFECYCLE_SIGNAL_VALUES: ReadonlySet<string> = new Set(["SIGINT", "SIGTERM", "SIGKILL"]);
+
+const projectLifecycleDetail = (value: unknown): WorkerLifecycleDetail | undefined => {
+  if (!isRecord(value)) return undefined;
+  const detail: Record<string, string | number | null> = {};
+  for (const key of Object.keys(value)) {
+    if (!LIFECYCLE_DETAIL_KEYS.has(key)) {
+      throw evidenceReject("workerLifecycle detail must not contain unknown field " + JSON.stringify(key));
+    }
+    const raw = value[key];
+    if (key === "pid") {
+      if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw <= 0) return undefined;
+      detail.pid = raw;
+    } else if (key === "exitCode") {
+      if (raw !== null && (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 0)) return undefined;
+      detail.exitCode = raw;
+    } else if (key === "signal") {
+      if (typeof raw !== "string" || !LIFECYCLE_SIGNAL_VALUES.has(raw)) return undefined;
+      detail.signal = raw;
+    } else if (key === "status") {
+      if (typeof raw !== "string" || !LIFECYCLE_STATUS_VALUES.has(raw)) return undefined;
+      detail.status = raw;
+    } else if (key === "eventKind") {
+      if (typeof raw !== "string" || !LIFECYCLE_EVENT_KIND_VALUES.has(raw)) return undefined;
+      detail.eventKind = raw;
+    } else {
+      if (typeof raw !== "string" || !LIFECYCLE_CLASS_VALUES.has(raw)) return undefined;
+      detail.class = raw;
+    }
+  }
+  return detail;
+};
+
+// All-or-nothing like workerFailure: an unknown key inside a present
+// projection rejects; a malformed envelope or entry drops the whole
+// projection. Entry detail is retained only from the fixed vocabulary above —
+// the observed failure class survives, raw worker content never enters.
+// Truncation to the recorder's own ring bound reports itself.
+export const projectWorkerLifecycle = (value: unknown): WorkerLifecycleEvidence | undefined => {
+  if (!isRecord(value)) return undefined;
+  for (const key of Object.keys(value)) {
+    if (key !== "events" && key !== "overflow") {
+      throw evidenceReject("workerLifecycle must not contain unknown field " + JSON.stringify(key));
+    }
+  }
+  if (typeof value.overflow !== "boolean" || !Array.isArray(value.events)) return undefined;
+  const events: { tMs: number; kind: string; detail?: WorkerLifecycleDetail }[] = [];
+  for (const entry of value.events) {
+    if (!isRecord(entry)) return undefined;
+    for (const key of Object.keys(entry)) {
+      if (key !== "tMs" && key !== "kind" && key !== "detail") {
+        throw evidenceReject("workerLifecycle entry must not contain unknown field " + JSON.stringify(key));
+      }
+    }
+    if (typeof entry.tMs !== "number" || !Number.isSafeInteger(entry.tMs) || entry.tMs < 0) return undefined;
+    if (typeof entry.kind !== "string" || !LIFECYCLE_KINDS.has(entry.kind)) return undefined;
+    const detail = entry.detail === undefined ? undefined : projectLifecycleDetail(entry.detail);
+    events.push(detail === undefined ? { tMs: entry.tMs, kind: entry.kind } : { tMs: entry.tMs, kind: entry.kind, detail });
+  }
+  return { events: events.slice(-64), overflow: value.overflow || events.length > 64 };
+};
+
+// EV-1 fallback: a CLI killed before it could receipt leaves only its
+// append-only lifecycle journal under the consumer root. The timeline is
+// rebuilt content-free from that journal, filtered by the supervised CLI's
+// pid, bounded by the same read cap and ring as the receipt projection. A
+// missing, oversized, or malformed journal, or no events for the pid, keeps
+// the projection absent — nothing is fabricated.
+// 1 MiB read ceiling: a journal past it is treated as missing — the projection
+// degrades to absent rather than reading unbounded CLI-owned bytes.
+const LIFECYCLE_JOURNAL_CAP_BYTES = 1 << 20;
+export const readWorkerLifecycleJournal = async (root: string, pid: number | null): Promise<WorkerLifecycleEvidence | undefined> => {
+  if (pid === null) return undefined;
+  const journalPath = join(root, ".turnhelm", "lifecycle.jsonl");
+  const info = await stat(journalPath).catch(() => null);
+  if (info === null || !info.isFile() || info.size > LIFECYCLE_JOURNAL_CAP_BYTES) return undefined;
+  const raw = await readFile(journalPath).catch(() => null);
+  if (raw === null) return undefined;
+  const events: { tMs: number; kind: string; detail?: WorkerLifecycleDetail }[] = [];
+  for (const line of raw.toString("utf8").split("\n")) {
+    if (line === "") continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      return undefined;
+    }
+    if (!isRecord(parsed) || parsed.type !== "turnhelm.worker-lifecycle" || parsed.pid !== pid) continue;
+    if (typeof parsed.tMs !== "number" || !Number.isSafeInteger(parsed.tMs) || parsed.tMs < 0
+      || typeof parsed.kind !== "string" || !LIFECYCLE_KINDS.has(parsed.kind)) {
+      return undefined;
+    }
+    const detail = parsed.detail === undefined ? undefined : projectLifecycleDetail(parsed.detail);
+    events.push(detail === undefined ? { tMs: parsed.tMs, kind: parsed.kind } : { tMs: parsed.tMs, kind: parsed.kind, detail });
+  }
+  if (events.length === 0) return undefined;
+  // The journal's line order is append-racy (the CLI's appends are
+  // fire-and-forget), so the timeline is ordered by each event's own tMs —
+  // never by file order.
+  events.sort((a, b) => a.tMs - b.tMs);
+  return { events: events.slice(-64), overflow: events.length > 64 };
+};
+
 // Pure, bounded transport-policy projection (spec §7), shared by both
 // harnesses: at most two unique backends in a Laya-then-Jev subsequence.
 // Missing, non-array, invalid-enum, duplicate, reversed, oversized, or
@@ -1080,6 +1277,7 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
     case "observed": {
       const workerFailure = raw.workerFailure === undefined ? undefined : projectWorkerFailure(raw.workerFailure);
       const workerProgress = raw.workerProgress === undefined ? undefined : projectWorkerProgress(raw.workerProgress);
+      const workerLifecycle = raw.workerLifecycle === undefined ? undefined : projectWorkerLifecycle(raw.workerLifecycle);
       return {
         phase: "observed",
         caseId: evidenceString(raw.caseId) ?? "",
@@ -1092,7 +1290,8 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
         ...(raw.attemptTransports !== undefined ? { attemptTransports: projectAttemptTransports(raw.attemptTransports) } : {}),
         ...(raw.workerUsage !== undefined ? { workerUsage: projectWorkerUsage(raw.workerUsage) } : {}),
         ...(workerFailure !== undefined ? { workerFailure } : {}),
-        ...(workerProgress !== undefined ? { workerProgress } : {})
+        ...(workerProgress !== undefined ? { workerProgress } : {}),
+        ...(workerLifecycle !== undefined ? { workerLifecycle } : {})
       };
     }
     case "verified": {
@@ -1131,7 +1330,7 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
       }
       return {
         phase: "verified", caseId: evidenceString(raw.caseId) ?? "",
-        verdict: raw.verdict === "pass" ? "pass" : "fail", policy, checks,
+        verdict: raw.verdict === "pass" ? "pass" : raw.verdict === "timeout" ? "timeout" : "fail", policy, checks,
         ...(oracleInput !== undefined ? { oracleInput } : {})
       };
     }
@@ -1142,21 +1341,25 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
       // worker record reports failure counts, calibration policy counts.
       if (Object.hasOwn(raw, "failed")) {
         for (const key of Object.keys(raw)) {
-          if (key !== "phase" && key !== "outcome" && key !== "cases" && key !== "failed") {
+          if (key !== "phase" && key !== "outcome" && key !== "cases" && key !== "failed" && key !== "timedOut") {
             throw evidenceReject("completed record must not contain unknown field " + JSON.stringify(key));
           }
         }
         const outcome = raw.outcome;
         if (outcome !== "pass" && outcome !== "fail") throw evidenceReject("completed outcome is unknown");
-        const counts = [raw.cases, raw.failed];
+        const counts = [raw.cases, raw.failed, raw.timedOut];
         if (!counts.every(value => typeof value === "number" && Number.isSafeInteger(value) && value >= 0)) {
           throw evidenceReject("completed counts must be non-negative safe integers");
         }
-        const [cases, failed] = counts as [number, number];
-        if (failed > cases) throw evidenceReject("completed failures must not exceed the roster");
-        if (outcome === "pass" && failed !== 0) throw evidenceReject("a completed pass must report no failures");
-        if (outcome === "fail" && failed === 0) throw evidenceReject("a completed fail must report a failure");
-        return { phase: "completed", outcome, cases, failed };
+        const [cases, failed, timedOut] = counts as [number, number, number];
+        if (failed + timedOut > cases) throw evidenceReject("completed failures must not exceed the roster");
+        if (outcome === "pass" && (failed !== 0 || timedOut !== 0)) {
+          throw evidenceReject("a completed pass must report no failures or timeouts");
+        }
+        if (outcome === "fail" && failed === 0 && timedOut === 0) {
+          throw evidenceReject("a completed fail must report a failure or timeout");
+        }
+        return { phase: "completed", outcome, cases, failed, timedOut };
       }
       for (const key of Object.keys(raw)) {
         if (key !== "phase" && key !== "outcome" && key !== "cases" && key !== "policyMatches" && key !== "policyMismatches") {
@@ -1182,7 +1385,7 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
     case "stopped": {
       const reason = raw.reason;
       const bounded: StoppedReason = reason === "drift" || reason === "output-limit" || reason === "evidence-io"
-        || reason === "signal" || reason === "timeout" || reason === "worker-failure" || reason === "verdict"
+        || reason === "signal" || reason === "receipt" || reason === "worker-failure" || reason === "verdict"
         || reason === "cleanup-unverified" || reason === "unknown"
         ? reason : "unknown";
       return { phase: "stopped", caseId: evidenceString(raw.caseId), reason: bounded };
@@ -1228,6 +1431,7 @@ const decodeBounded = (data: Buffer): string | null => {
 export type CliSupervision = Readonly<{
   exitCode: number | null;
   signal: NodeJS.Signals | null;
+  pid: number | null;
   durationMs: number;
   stdout: Buffer;
   stderr: Buffer;
@@ -1244,14 +1448,14 @@ export type CliSupervision = Readonly<{
 export function superviseCli(
   file: string,
   args: readonly string[],
-  options: Readonly<{ env: NodeJS.ProcessEnv; cwd?: string; signal?: AbortSignal; timeoutMs?: number; termGraceMs?: number; postTermMs?: number }>
+  options: Readonly<{ env: NodeJS.ProcessEnv; cwd?: string; signal?: AbortSignal; timeoutMs: number; termGraceMs?: number; postTermMs?: number }>
 ): Promise<CliSupervision> {
   return new Promise(resolve => {
     if (options.signal?.aborted) {
       // The operator aborted before the invocation: nothing is spawned, so
       // no spend can happen and there is nothing to clean up.
       resolve({
-        exitCode: null, signal: null, durationMs: 0,
+        exitCode: null, signal: null, pid: null, durationMs: 0,
         stdout: Buffer.alloc(0), stderr: Buffer.alloc(0),
         outputOverflow: false, timedOut: false, aborted: true,
         termSent: false, cliClosed: false
@@ -1268,6 +1472,7 @@ export function superviseCli(
     const state = {
       exitCode: null as number | null,
       signal: null as NodeJS.Signals | null,
+      pid: (child.pid ?? null) as number | null,
       stdout: [] as Buffer[],
       stderr: [] as Buffer[],
       outputOverflow: false,
@@ -1297,6 +1502,7 @@ export function superviseCli(
       resolve({
         exitCode: state.exitCode,
         signal: state.signal,
+        pid: state.pid,
         durationMs: Math.round(performance.now() - started),
         stdout: Buffer.concat(state.stdout),
         stderr: Buffer.concat(state.stderr),
@@ -1359,7 +1565,7 @@ export function superviseCli(
       state.signal = signal;
       finish(true);
     });
-    timeoutTimer = setTimeout(() => halt("timeout"), options.timeoutMs ?? CASE_TIMEOUT_MS);
+    timeoutTimer = setTimeout(() => halt("timeout"), options.timeoutMs);
     if (options.signal !== undefined) {
       if (options.signal.aborted) halt("abort");
       else {
@@ -1426,6 +1632,12 @@ const hashTree = async (root: string): Promise<Map<string, string> | null> => {
       if (entry.isDirectory()) {
         if (!(await walk(join(root, relative), relative + "/"))) return false;
       } else if (entry.isFile()) {
+        // The CLI-owned append-only journals are excluded from the walk
+        // entirely: they grow without a size contract of their own, so an
+        // oversize journal must degrade its evidence projection, never fail a
+        // clean case's tree walk. A worker write to them is covered by the
+        // CLI-owned-root allowance.
+        if (relative === ".turnhelm/routes.jsonl" || relative === ".turnhelm/lifecycle.jsonl") continue;
         // Size is checked via stat before the read: an oversize (or racing)
         // file must never be loaded whole just to be rejected. The residual
         // stat→read race matches the journal cap's, both fail closed.
@@ -1444,8 +1656,9 @@ const hashTree = async (root: string): Promise<Map<string, string> | null> => {
   return (await walk(root, "")) ? files : null;
 };
 
-// Only paths the frozen write scope (and the journal) admit may differ between
-// the before/after trees, in either direction: edits, creations, deletions.
+// Only paths the frozen write scope admits may differ between the before/after
+// trees, in either direction: edits, creations, deletions. The CLI-owned
+// journals never appear here — hashTree excludes them from the walk.
 const treeDiffClean = (
   before: Map<string, string> | null,
   after: Map<string, string> | null,
@@ -1453,7 +1666,6 @@ const treeDiffClean = (
 ): boolean => {
   if (before === null || after === null) return false;
   for (const path of new Set([...before.keys(), ...after.keys()])) {
-    if (path === ".turnhelm/routes.jsonl") continue;
     if (before.get(path) === after.get(path)) continue;
     if (!allowed.some(scope => path === scope || path.startsWith(scope + "/"))) return false;
   }
@@ -1470,6 +1682,23 @@ const lastJsonLine = (text: string): Record<string, unknown> | null => {
   } catch {
     return null;
   }
+};
+
+// DL-1 (spec §3.4): custom-round's continuation sits behind a receipt-count
+// gate — exactly one CLI receipt. Counted from the supervised CLI's captured
+// stderr; unparseable lines are never receipts.
+const countReceiptLines = (text: string): number => {
+  let count = 0;
+  for (const line of text.split("\n")) {
+    if (line.trim() === "") continue;
+    try {
+      const parsed: unknown = JSON.parse(line);
+      if (isRecord(parsed) && parsed.type === "turnhelm.receipt") count += 1;
+    } catch {
+      // Not JSON, not a receipt.
+    }
+  }
+  return count;
 };
 
 // The whole payload is parsed once: exactly the two expected own keys with
@@ -1643,6 +1872,7 @@ export async function executeAcceptance(
       let policyMatches = 0;
       let policyMismatches = 0;
       let failedCases = 0;
+      let timedOutCases = 0;
       for (const item of run.manifest.cases) {
         if (abort?.aborted) {
           await appendEvidence(run, { phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
@@ -1689,6 +1919,7 @@ export async function executeAcceptance(
         let oracleInput: OracleInputEvidence | undefined;
         let stopReason: StoppedReason | null = null;
         let stopExitCode = 1;
+        let timedOutcome = false;
 
         if (item.kind === "classifier-only") {
           const startedAt = performance.now();
@@ -1737,9 +1968,13 @@ export async function executeAcceptance(
           }
           const supervision = await superviseCli(
             process.execPath,
-            [CLI_PATH, "run", "--project", item.root,
-              ...(item.kind === "worker-write" ? ["--write"] : []), "--", item.task],
-            { env: caseEnv, timeoutMs: CASE_TIMEOUT_MS, signal: abort, termGraceMs: options?.termGraceMs, postTermMs: options?.postTermMs }
+            [CLI_PATH, "run", "--project", item.root, "--lifecycle",
+              ...(item.kind === "worker-write" ? ["--write"] : []),
+              // SC-1: the frozen schema rides the CLI flag from the consumer
+              // root; the CLI's input boundary re-validates and stages it.
+              ...(item.outputSchema !== undefined ? ["--output-schema", join(item.root, item.outputSchema.relative)] : []),
+              "--", item.task],
+            { env: caseEnv, timeoutMs: item.deadlineMs, signal: abort, termGraceMs: options?.termGraceMs, postTermMs: options?.postTermMs }
           );
 
           // A journal past the read bound is not a usable receipt: the bytes
@@ -1773,6 +2008,7 @@ export async function executeAcceptance(
           const rootInfo = await stat(item.root).catch(() => null);
           const rootMatches = rootInfo !== null && rootInfo.dev === item.identity.dev && rootInfo.ino === item.identity.ino;
           const receiptFrame = lastJsonLine(decodeBounded(supervision.stderr) ?? "");
+          const receiptCount = countReceiptLines(decodeBounded(supervision.stderr) ?? "");
           // The receipt's worker object is extracted before the observation is
           // built: usage must be projected from the same durable observation,
           // not from a second read taken after fallible verification.
@@ -1799,6 +2035,16 @@ export async function executeAcceptance(
               ...(worker.lastEventAgeMs !== undefined ? { lastEventAgeMs: worker.lastEventAgeMs } : {})
             })
             : undefined;
+          // EV-1: the worker timeline is retained exactly where it explains a
+          // bad outcome — a failed worker or an expired deadline. The receipt's
+          // own projection is preferred; a CLI that died before receipting is
+          // rebuilt from its append-only journal, filtered by the supervised
+          // CLI's pid.
+          const workerLifecycle = worker?.status === "failed" || supervision.timedOut
+            ? worker?.lifecycle !== undefined
+              ? projectWorkerLifecycle(worker.lifecycle)
+              : await readWorkerLifecycleJournal(item.root, supervision.pid)
+            : undefined;
           const claimedRoot = receiptFrame !== null && typeof receiptFrame.root === "string" ? receiptFrame.root : null;
           const rootOk = claimedRoot !== null && await realpath(claimedRoot).catch(() => "") === item.root;
           observation = {
@@ -1810,7 +2056,8 @@ export async function executeAcceptance(
             attemptTransports: projectAttemptTransports(receiptLine?.attempts),
             workerUsage: projectWorkerUsage(worker?.usage),
             ...(workerFailure !== undefined ? { workerFailure } : {}),
-            ...(workerProgress !== undefined ? { workerProgress } : {})
+            ...(workerProgress !== undefined ? { workerProgress } : {}),
+            ...(workerLifecycle !== undefined ? { workerLifecycle } : {})
           };
 
           // The observation is persisted before any fallible verification read
@@ -1828,10 +2075,38 @@ export async function executeAcceptance(
             stopReason = "cleanup-unverified";
             stopExitCode = supervision.aborted ? 130 : 1;
             checks = {};
-          } else if (supervision.outputOverflow || supervision.timedOut || supervision.aborted) {
-            stopReason = supervision.outputOverflow ? "output-limit" : supervision.timedOut ? "timeout" : "signal";
-            stopExitCode = stopReason === "signal" ? 130 : 1;
+          } else if (supervision.outputOverflow) {
+            stopReason = "output-limit";
+            stopExitCode = 1;
             checks = {};
+          } else if (supervision.aborted) {
+            // The operator's abort outranks a deadline that expired in the
+            // same window: a cancelled run stops, never records an outcome.
+            stopReason = "signal";
+            stopExitCode = 130;
+            checks = {};
+          } else if (supervision.timedOut) {
+            // DL-1 (spec §3.4): an expired per-case deadline is an unjudged,
+            // continuable outcome only behind custom-round's three gates —
+            // cleanup (the cliClosed branch above), exactly one CLI receipt,
+            // and the settled tree. A receiptless timeout is a killed CLI
+            // whose worker's fate is unobservable: stop all further spend.
+            // The crash evidence is already retained on the observation.
+            if (receiptCount !== 1) {
+              stopReason = "receipt";
+              stopExitCode = 1;
+              checks = {};
+            } else {
+              const treeClean = treeDiffClean(treeBefore, await hashTree(item.root), item.allowedChanges);
+              if (!rootMatches || !treeClean) {
+                stopReason = "drift";
+                stopExitCode = 1;
+                checks = {};
+              } else {
+                timedOutcome = true;
+                checks = {};
+              }
+            }
           } else {
             try {
               const frozenPair = profileId !== "unknown" ? item.config.profiles[profileId as keyof typeof item.config.profiles] : undefined;
@@ -1910,7 +2185,7 @@ export async function executeAcceptance(
           await appendEvidence(run, { phase: "stopped", caseId: item.id, reason: stopReason }).catch(() => {});
           return stopExitCode;
         }
-        const verdict = Object.values(checks).every(Boolean) ? "pass" : "fail";
+        const verdict = timedOutcome ? "timeout" : Object.values(checks).every(Boolean) ? "pass" : "fail";
         if (item.kind === "classifier-only") {
           // The engineering verdict is judged first and independently: only a
           // completed route can claim a band, so a legal-but-out-of-band
@@ -1929,6 +2204,7 @@ export async function executeAcceptance(
         }
         if (isCalibration && policy === "match") policyMatches += 1;
         if (isCalibration && policy === "mismatch") policyMismatches += 1;
+        if (timedOutcome) timedOutCases += 1;
         if (verdict === "fail") {
           // Integrity dominates: a case whose every check is true except the
           // oracle failed on task output alone, so it is continuable — the
@@ -1968,8 +2244,8 @@ export async function executeAcceptance(
             policyMatches, policyMismatches
           }
           : {
-            phase: "completed", outcome: failedCases === 0 ? "pass" : "fail",
-            cases: run.manifest.cases.length, failed: failedCases
+            phase: "completed", outcome: failedCases === 0 && timedOutCases === 0 ? "pass" : "fail",
+            cases: run.manifest.cases.length, failed: failedCases, timedOut: timedOutCases
           });
       } catch {
         return await stopTerminal("evidence-io", 1);
@@ -1991,7 +2267,7 @@ export async function executeAcceptance(
       // The FD is closed: a stop discovered now is reported, never appended.
       if (abort?.aborted) return 130;
       if (isCalibration) return calibrationOutcome === "pass" ? 0 : 3;
-      return failedCases === 0 ? 0 : 4;
+      return failedCases === 0 && timedOutCases === 0 ? 0 : 4;
     } finally {
       if (fixtureServer !== null) {
         for (const socket of fixtureConnections) socket.destroy();
