@@ -544,7 +544,7 @@ test("a roster contract that cannot load is refused at prepare, not frozen", asy
 // stallMs holds the FIRST execution's turn open so a signal or timeout test
 // can land mid-case (a roster's later cases run the fake unstalled), and a
 // rebuildRoot swaps the case root for a byte-identical rebuild mid-run.
-const fakeCodexBody = (options: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string; rebuildRoot?: boolean; recordArgv?: string }> = {}): string => `
+const fakeCodexBody = (options: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string; rebuildRoot?: boolean; recordArgv?: string; rebindFile?: { path: string; bytes: string } }> = {}): string => `
 const argv = process.argv.slice(2);
 if (argv[0] === "--version") { process.stdout.write("codex-cli 0.160.2\\n"); process.exit(0); }
 if (argv[0] === "exec" && argv[1] === "--help") { process.stdout.write("--json\\n--ephemeral\\n--sandbox <MODE>\\n-\\n--ignore-user-config\\n--ignore-rules\\n--output-schema <FILE>\\n"); process.exit(0); }
@@ -579,6 +579,11 @@ process.stdin.on("end", () => {
 `
     : "") + (options.extraWrite !== undefined
     ? `  fs.writeFileSync(path.join(process.cwd(), ${JSON.stringify(options.extraWrite)}), "unauthorized outside allowedChanges\\n");\n`
+    : "") + (options.rebindFile !== undefined
+    ? `  // OR-1: a mid-run rebind of a frozen oracle input — new bytes over the
+  // frozen path while the worker executes, exactly the window between the
+  // pre-reservation identity gate and the grading-time bracket.
+  fs.writeFileSync(${JSON.stringify(options.rebindFile.path)}, ${JSON.stringify(options.rebindFile.bytes)});\n`
     : "") + (options.rebuildRoot === true
     ? `  // Swap the case root for a byte-identical rebuild: the staging directory
   // is allocated while the original still exists, so the replacement inode
@@ -642,6 +647,7 @@ type ExecuteCaseSpec = {
   contractDir?: string;
   allowedChanges?: readonly string[];
   outputSchemaText?: string;
+  hooks?: readonly { name: string; source: string }[];
 };
 
 const scratchExecuteRound = async (
@@ -651,7 +657,7 @@ const scratchExecuteRound = async (
   options?: Readonly<{
     caps?: { classifierRequests: number; workerExecutions: number };
     choice?: string;
-    codex?: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string; rebuildRoot?: boolean; recordArgv?: string }>;
+    codex?: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string; rebuildRoot?: boolean; recordArgv?: string; rebindFile?: { path: string; bytes: string } }>;
     poisonJournal?: boolean;
     journalAttempts?: unknown;
     baselineFiles?: readonly string[];
@@ -695,7 +701,12 @@ const scratchExecuteRound = async (
   const invocations = join(bin, "invocations");
   const gitEnv = join(base, "git-env.txt");
   const workerEnv = join(bin, "worker-env.json");
-  await executableFixture(join(bin, "codex"), fakeCodexBody(options?.codex), "node");
+  // The rebindFile knob carries a $BASE placeholder: only here is the
+  // scratch base knowable before the fake body is frozen.
+  const codexOptions = options?.codex === undefined ? undefined
+    : options.codex.rebindFile === undefined ? options.codex
+    : { ...options.codex, rebindFile: { ...options.codex.rebindFile, path: options.codex.rebindFile.path.replace("$BASE", base) } };
+  await executableFixture(join(bin, "codex"), fakeCodexBody(codexOptions), "node");
   await executableFixture(join(bin, "git"),
     `/usr/bin/env > '${gitEnv}'\nif [ "$1" = "-C" ]; then echo true; exit 0; fi\nexit 64\n`, "shell");
   const taskText = "Sum the ledger rows and print the JSON result.";
@@ -732,15 +743,22 @@ const scratchExecuteRound = async (
       outputSchema = join(base, spec.id + "-output-schema.json");
       await writeFile(outputSchema, spec.outputSchemaText);
     }
+    const hooks: string[] = [];
+    for (const hook of spec.hooks ?? []) {
+      const hookPath = join(base, hook.name);
+      await writeFile(hookPath, hook.source);
+      hooks.push(hookPath);
+    }
+    const frozenFiles = spec.kind === "worker-write"
+      ? (spec.transport === "stdin-file" ? { contract, taskFile } : { contract })
+      : (spec.transport === "stdin-file" ? { taskFile } : {});
     cases.push({
       id: spec.id, kind: spec.kind, scope: spec.id + " scope", task: taskText,
       transport: spec.transport, root, deadlineMs: spec.deadlineMs ?? DEFAULT_CASE_DEADLINE_MS,
       allowedChanges: spec.allowedChanges ?? [...(spec.kind === "worker-write" ? ["ledger.json"] : []), "worker-task.txt"],
       allowedProfiles: ["fast", "balanced"],
       grading: spec.grading,
-      files: spec.kind === "worker-write"
-        ? (spec.transport === "stdin-file" ? { contract, taskFile } : { contract })
-        : (spec.transport === "stdin-file" ? { taskFile } : {}),
+      files: hooks.length > 0 ? { ...frozenFiles, hooks } : frozenFiles,
       ...(outputSchema !== undefined ? { outputSchema } : {})
     });
   }
@@ -894,6 +912,33 @@ test("an oracle root rebind with identical contents stops as oracle-identity",
     const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
     assert.deepEqual(ledger.at(-1), { phase: "stopped", caseId: "case-a", reason: "oracle-identity" });
     assert.ok(!ledger.some(r => r.phase === "reserved"), "identity gates before any reservation");
+  });
+
+test("a frozen hook rebound during the worker run stops as oracle-identity at grading",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-write", transport: "arg", contractDir: "oracle",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}'],
+        hooks: [{ name: "case-a-hook.mjs", source: "export const factor = 1;\n" }]
+      }
+    ], {}, {
+      codex: { rebindFile: { path: "$BASE/case-a-hook.mjs", bytes: "export const factor = 2;\n" } }
+    });
+    // OR-1: the rebind lands in the window between the pre-reservation
+    // identity gate (which every frozen file passes) and the sandboxed check —
+    // only a grading-time bracket over every consumed input can catch it.
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 1, "a rebound oracle helper is a structural refusal at grading");
+    assert.equal((await readFile(round.invocations, "utf8")).length, 1, "the worker did run before the rebind was caught");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    // The worker completed cleanly, so its own receipt projection rides the
+    // stop record; the pin is the stop itself.
+    assert.equal(ledger.at(-1)?.phase, "stopped");
+    assert.equal(ledger.at(-1)?.caseId, "case-a");
+    assert.equal(ledger.at(-1)?.reason, "oracle-identity");
   });
 
 test("a copied manifest outside the evidence root is refused without a claim",

@@ -1233,11 +1233,18 @@ async function runGatedRound(
     // ordinary case failure (spec §3.2(2)).
     if (passed && item.kind === "worker-write") {
       const contractEntry = item.files.find(file => file.role === "contract");
-      // OR-1: identity brackets the sandboxed check — the frozen contract must
-      // be the same filesystem object when the check starts and again before
-      // its outcome is accepted; a rebind in that window spends trust in an
+      // OR-1: identity brackets the sandboxed check over every consumed input
+      // the round froze — contract, task file, and hooks alike. Each must be
+      // the same filesystem object when the check starts and again before its
+      // outcome is accepted; a rebind in that window spends trust in an
       // oracle the round never froze.
-      if (contractEntry === undefined || !(await fileIdentityMatches(contractEntry))) {
+      const oracleFilesMatch = async (): Promise<boolean> => {
+        for (const file of item.files) {
+          if (!(await fileIdentityMatches(file))) return false;
+        }
+        return true;
+      };
+      if (contractEntry === undefined || !(await oracleFilesMatch())) {
         await appendEvidence({
           phase: "stopped", caseId: item.id, reason: "oracle-identity",
           ...(workerFailure !== undefined ? { workerFailure } : {})
@@ -1260,7 +1267,7 @@ async function runGatedRound(
       } finally {
         await rm(runtimeDir, { recursive: true, force: true });
       }
-      if (!(await fileIdentityMatches(contractEntry))) {
+      if (!(await oracleFilesMatch())) {
         await appendEvidence({
           phase: "stopped", caseId: item.id, reason: "oracle-identity",
           ...(workerFailure !== undefined ? { workerFailure } : {})
