@@ -86,7 +86,7 @@ evidence of successful routing or access to the selected Codex model.
 
 Reuse an already healthy service; do not start a duplicate. If none is running
 and startup is authorized, this foreground reference is for an **already
-installed** Laya 0.3.22 serve-capable virtual environment with cached
+installed** Laya 0.4.8 serve-capable virtual environment with cached
 `typed-decisions` weights:
 
 ```bash

@@ -45,7 +45,7 @@ Obtain request/data authorization before `--probe`; it is not an offline check.
 
 ## Existing local Laya
 
-If Laya 0.3.22 serve dependencies and `typed-decisions` weights are already
+If Laya 0.4.8 serve dependencies and `typed-decisions` weights are already
 installed/cached, use its venv Python, not a possibly stale console shebang:
 
 ```bash
