@@ -41,6 +41,7 @@ export type AcceptanceCase = Readonly<{
   taskHash: string;
   taskBytes: number;
   config: ProjectConfig;
+  deadlineMs: number;
   inputHashes: Readonly<Record<string, string>>;
   allowedChanges: readonly string[];
   oracle: AcceptanceOracle;
@@ -75,7 +76,7 @@ export type AcceptanceManifest = Readonly<{
 }>;
 
 export type StoppedReason =
-  | "drift" | "output-limit" | "evidence-io" | "signal" | "timeout"
+  | "drift" | "output-limit" | "evidence-io" | "signal"
   | "worker-failure" | "verdict" | "cleanup-unverified" | "unknown";
 
 export type OracleInputEvidence =
@@ -109,9 +110,9 @@ export type SafeEvidence =
   | Readonly<{ phase: "prepared"; suite: LiveSuite; manifestSha256: string; startedAt: string }>
   | Readonly<{ phase: "reserved"; caseId: string; worker: number; backends: readonly AcceptanceBackend[] }>
   | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number; attemptTransports?: AttemptTransportEvidence; workerUsage?: WorkerUsageEvidence; workerFailure?: WorkerFailureEvidence; workerProgress?: WorkerProgressEvidence }>
-  | Readonly<{ phase: "verified"; caseId: string; verdict: "pass" | "fail"; policy: "match" | "mismatch" | "not-applicable"; checks: Readonly<Record<string, boolean>>; oracleInput?: OracleInputEvidence }>
+  | Readonly<{ phase: "verified"; caseId: string; verdict: "pass" | "fail" | "timeout"; policy: "match" | "mismatch" | "not-applicable"; checks: Readonly<Record<string, boolean>>; oracleInput?: OracleInputEvidence }>
   | Readonly<{ phase: "completed"; outcome: "pass" | "policy-mismatch"; cases: number; policyMatches: number; policyMismatches: number }>
-  | Readonly<{ phase: "completed"; outcome: "pass" | "fail"; cases: number; failed: number }>
+  | Readonly<{ phase: "completed"; outcome: "pass" | "fail"; cases: number; failed: number; timedOut: number }>
   | Readonly<{ phase: "stopped"; caseId: string | null; reason: StoppedReason }>;
 
 export type ClaimedRun = Readonly<{
@@ -255,7 +256,7 @@ const parseManifest = (value: unknown): AcceptanceManifest => {
   const cases = value.cases.map(raw => {
     if (!isRecord(raw)) throw fail("case must be an object");
     // outputSchema is the one optional case key; every other key stays exact.
-    const caseKeys = ["allowedChanges", "config", "id", "identity", "inputHashes", "kind", "oracle", "reservation", "root", "task", "taskBytes", "taskHash"];
+    const caseKeys = ["allowedChanges", "config", "deadlineMs", "id", "identity", "inputHashes", "kind", "oracle", "reservation", "root", "task", "taskBytes", "taskHash"];
     if (raw.outputSchema !== undefined) caseKeys.push("outputSchema");
     expectKeys(raw, caseKeys, "case");
     const id = expectString(raw.id, "case id");
@@ -268,6 +269,14 @@ const parseManifest = (value: unknown): AcceptanceManifest => {
     if (isCalibration && kind !== "classifier-only") throw fail("calibration suites must not carry worker cases");
     if (!isCalibration && kind === "classifier-only") throw fail("worker suites must not carry classifier-only cases");
     const config = parseProjectConfig(raw.config);
+
+    // DL-1: the per-case deadline is frozen with the case and bounded like the
+    // roster's own budget: an absent or out-of-bounds value refuses the claim.
+    if (typeof raw.deadlineMs !== "number" || !Number.isInteger(raw.deadlineMs)
+      || raw.deadlineMs < 5000 || raw.deadlineMs > 3600000) {
+      throw fail("case deadlineMs must be an integer between 5000 and 3600000");
+    }
+    const deadlineMs = raw.deadlineMs;
 
     if (typeof raw.root !== "string") throw fail("case root must be a string");
     const root = raw.root;
@@ -390,7 +399,7 @@ const parseManifest = (value: unknown): AcceptanceManifest => {
     if (config.backends.jev.enabled && !backends.includes("jev")) throw fail("case reservation must cover the enabled jev backend");
 
     return {
-      id, kind, root, identity, task, taskHash, taskBytes, config, inputHashes, allowedChanges: wanted, oracle,
+      id, kind, root, identity, task, taskHash, taskBytes, config, deadlineMs, inputHashes, allowedChanges: wanted, oracle,
       ...(outputSchema !== undefined ? { outputSchema } : {}),
       reservation: { worker: reservedWorker, backends }
     };
@@ -749,6 +758,7 @@ export async function prepareAcceptance(
       taskHash: sha256hex(taskBytes),
       taskBytes: taskBytes.length,
       config,
+      deadlineMs: CASE_TIMEOUT_MS,
       inputHashes,
       allowedChanges: kind === "worker-write" ? ["out/summary.json"] : [],
       oracle: kind === "worker-write"
@@ -771,6 +781,7 @@ export async function prepareAcceptance(
       taskHash: sha256hex(taskBytes),
       taskBytes: taskBytes.length,
       config,
+      deadlineMs: CASE_TIMEOUT_MS,
       inputHashes: {},
       allowedChanges: [],
       oracle: {
@@ -1185,7 +1196,7 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
       }
       return {
         phase: "verified", caseId: evidenceString(raw.caseId) ?? "",
-        verdict: raw.verdict === "pass" ? "pass" : "fail", policy, checks,
+        verdict: raw.verdict === "pass" ? "pass" : raw.verdict === "timeout" ? "timeout" : "fail", policy, checks,
         ...(oracleInput !== undefined ? { oracleInput } : {})
       };
     }
@@ -1196,21 +1207,25 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
       // worker record reports failure counts, calibration policy counts.
       if (Object.hasOwn(raw, "failed")) {
         for (const key of Object.keys(raw)) {
-          if (key !== "phase" && key !== "outcome" && key !== "cases" && key !== "failed") {
+          if (key !== "phase" && key !== "outcome" && key !== "cases" && key !== "failed" && key !== "timedOut") {
             throw evidenceReject("completed record must not contain unknown field " + JSON.stringify(key));
           }
         }
         const outcome = raw.outcome;
         if (outcome !== "pass" && outcome !== "fail") throw evidenceReject("completed outcome is unknown");
-        const counts = [raw.cases, raw.failed];
+        const counts = [raw.cases, raw.failed, raw.timedOut];
         if (!counts.every(value => typeof value === "number" && Number.isSafeInteger(value) && value >= 0)) {
           throw evidenceReject("completed counts must be non-negative safe integers");
         }
-        const [cases, failed] = counts as [number, number];
-        if (failed > cases) throw evidenceReject("completed failures must not exceed the roster");
-        if (outcome === "pass" && failed !== 0) throw evidenceReject("a completed pass must report no failures");
-        if (outcome === "fail" && failed === 0) throw evidenceReject("a completed fail must report a failure");
-        return { phase: "completed", outcome, cases, failed };
+        const [cases, failed, timedOut] = counts as [number, number, number];
+        if (failed + timedOut > cases) throw evidenceReject("completed failures must not exceed the roster");
+        if (outcome === "pass" && (failed !== 0 || timedOut !== 0)) {
+          throw evidenceReject("a completed pass must report no failures or timeouts");
+        }
+        if (outcome === "fail" && failed === 0 && timedOut === 0) {
+          throw evidenceReject("a completed fail must report a failure or timeout");
+        }
+        return { phase: "completed", outcome, cases, failed, timedOut };
       }
       for (const key of Object.keys(raw)) {
         if (key !== "phase" && key !== "outcome" && key !== "cases" && key !== "policyMatches" && key !== "policyMismatches") {
@@ -1236,7 +1251,7 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
     case "stopped": {
       const reason = raw.reason;
       const bounded: StoppedReason = reason === "drift" || reason === "output-limit" || reason === "evidence-io"
-        || reason === "signal" || reason === "timeout" || reason === "worker-failure" || reason === "verdict"
+        || reason === "signal" || reason === "worker-failure" || reason === "verdict"
         || reason === "cleanup-unverified" || reason === "unknown"
         ? reason : "unknown";
       return { phase: "stopped", caseId: evidenceString(raw.caseId), reason: bounded };
@@ -1697,6 +1712,7 @@ export async function executeAcceptance(
       let policyMatches = 0;
       let policyMismatches = 0;
       let failedCases = 0;
+      let timedOutCases = 0;
       for (const item of run.manifest.cases) {
         if (abort?.aborted) {
           await appendEvidence(run, { phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
@@ -1743,6 +1759,7 @@ export async function executeAcceptance(
         let oracleInput: OracleInputEvidence | undefined;
         let stopReason: StoppedReason | null = null;
         let stopExitCode = 1;
+        let timedOutcome = false;
 
         if (item.kind === "classifier-only") {
           const startedAt = performance.now();
@@ -1797,7 +1814,7 @@ export async function executeAcceptance(
               // root; the CLI's input boundary re-validates and stages it.
               ...(item.outputSchema !== undefined ? ["--output-schema", join(item.root, item.outputSchema.relative)] : []),
               "--", item.task],
-            { env: caseEnv, timeoutMs: CASE_TIMEOUT_MS, signal: abort, termGraceMs: options?.termGraceMs, postTermMs: options?.postTermMs }
+            { env: caseEnv, timeoutMs: item.deadlineMs, signal: abort, termGraceMs: options?.termGraceMs, postTermMs: options?.postTermMs }
           );
 
           // A journal past the read bound is not a usable receipt: the bytes
@@ -1886,10 +1903,30 @@ export async function executeAcceptance(
             stopReason = "cleanup-unverified";
             stopExitCode = supervision.aborted ? 130 : 1;
             checks = {};
-          } else if (supervision.outputOverflow || supervision.timedOut || supervision.aborted) {
-            stopReason = supervision.outputOverflow ? "output-limit" : supervision.timedOut ? "timeout" : "signal";
-            stopExitCode = stopReason === "signal" ? 130 : 1;
+          } else if (supervision.outputOverflow) {
+            stopReason = "output-limit";
+            stopExitCode = 1;
             checks = {};
+          } else if (supervision.aborted) {
+            // The operator's abort outranks a deadline that expired in the
+            // same window: a cancelled run stops, never records an outcome.
+            stopReason = "signal";
+            stopExitCode = 130;
+            checks = {};
+          } else if (supervision.timedOut) {
+            // DL-1: an expired per-case deadline is an unjudged, continuable
+            // outcome behind the settled-tree gate. The CLI closed cleanly, so
+            // the remaining gate is identity plus the tree: a clean tree
+            // records the timeout and the roster continues; drift stops.
+            const treeClean = treeDiffClean(treeBefore, await hashTree(item.root), item.allowedChanges);
+            if (!rootMatches || !treeClean) {
+              stopReason = "drift";
+              stopExitCode = 1;
+              checks = {};
+            } else {
+              timedOutcome = true;
+              checks = {};
+            }
           } else {
             try {
               const frozenPair = profileId !== "unknown" ? item.config.profiles[profileId as keyof typeof item.config.profiles] : undefined;
@@ -1968,7 +2005,7 @@ export async function executeAcceptance(
           await appendEvidence(run, { phase: "stopped", caseId: item.id, reason: stopReason }).catch(() => {});
           return stopExitCode;
         }
-        const verdict = Object.values(checks).every(Boolean) ? "pass" : "fail";
+        const verdict = timedOutcome ? "timeout" : Object.values(checks).every(Boolean) ? "pass" : "fail";
         if (item.kind === "classifier-only") {
           // The engineering verdict is judged first and independently: only a
           // completed route can claim a band, so a legal-but-out-of-band
@@ -1987,6 +2024,7 @@ export async function executeAcceptance(
         }
         if (isCalibration && policy === "match") policyMatches += 1;
         if (isCalibration && policy === "mismatch") policyMismatches += 1;
+        if (timedOutcome) timedOutCases += 1;
         if (verdict === "fail") {
           // Integrity dominates: a case whose every check is true except the
           // oracle failed on task output alone, so it is continuable — the
@@ -2026,8 +2064,8 @@ export async function executeAcceptance(
             policyMatches, policyMismatches
           }
           : {
-            phase: "completed", outcome: failedCases === 0 ? "pass" : "fail",
-            cases: run.manifest.cases.length, failed: failedCases
+            phase: "completed", outcome: failedCases === 0 && timedOutCases === 0 ? "pass" : "fail",
+            cases: run.manifest.cases.length, failed: failedCases, timedOut: timedOutCases
           });
       } catch {
         return await stopTerminal("evidence-io", 1);
@@ -2049,7 +2087,7 @@ export async function executeAcceptance(
       // The FD is closed: a stop discovered now is reported, never appended.
       if (abort?.aborted) return 130;
       if (isCalibration) return calibrationOutcome === "pass" ? 0 : 3;
-      return failedCases === 0 ? 0 : 4;
+      return failedCases === 0 && timedOutCases === 0 ? 0 : 4;
     } finally {
       if (fixtureServer !== null) {
         for (const socket of fixtureConnections) socket.destroy();

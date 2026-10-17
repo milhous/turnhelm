@@ -548,8 +548,8 @@ test("prepare is offline and freezes independent consumers", async t => {
   for (const item of laya.cases) {
     assert.deepEqual(Object.keys(item).sort(),
       item.kind === "worker-readonly"
-        ? ["allowedChanges", "config", "id", "identity", "inputHashes", "kind", "oracle", "outputSchema", "reservation", "root", "task", "taskBytes", "taskHash"]
-        : ["allowedChanges", "config", "id", "identity", "inputHashes", "kind", "oracle", "reservation", "root", "task", "taskBytes", "taskHash"]);
+        ? ["allowedChanges", "config", "deadlineMs", "id", "identity", "inputHashes", "kind", "oracle", "outputSchema", "reservation", "root", "task", "taskBytes", "taskHash"]
+        : ["allowedChanges", "config", "deadlineMs", "id", "identity", "inputHashes", "kind", "oracle", "reservation", "root", "task", "taskBytes", "taskHash"]);
     assert.ok(item.taskBytes <= 8192, item.id + " task fits the transport bound");
     const taskBytes = Buffer.from(item.task, "utf8");
     assert.equal(item.taskBytes, taskBytes.length);
@@ -796,6 +796,15 @@ process.stdin.on("end", () => {
     process.exit(9);
   }
   if (mode === "hang") { setInterval(() => {}, 3600); return; }
+  if (mode === "hang-first") {
+    // DL-1: only the first worker invocation stalls; later cases answer. The
+    // invocation log above already counted this spawn, so a single line means
+    // this is the first.
+    const log = process.env.TURNHELM_TEST_INVOCATIONS;
+    const prior = log !== undefined && fs.existsSync(log)
+      ? fs.readFileSync(log, "utf8").split("\\n").filter(line => line !== "").length : 0;
+    if (prior <= 1) { setInterval(() => {}, 3600); return; }
+  }
   if (mode === "emit-then-hang") {
     // One decoded event, then a gate file once it has flushed, then idle: the
     // caller aborts after the gate, cancelling a run that already decoded.
@@ -992,6 +1001,7 @@ type CraftedCase = {
   jevEnabled?: boolean;
   jevTransport?: { mode: "direct" } | { mode: "http-connect"; proxyUrl: string };
   withSchema?: boolean;
+  deadlineMs?: number;
 };
 
 const readEvidence = async (runRoot: string): Promise<Record<string, unknown>[]> =>
@@ -1075,6 +1085,7 @@ const buildRun = async (
       identity: { dev: info.dev, ino: info.ino },
       task, taskHash: sha256hex(taskBytes), taskBytes: taskBytes.length,
       config,
+      deadlineMs: entry.deadlineMs ?? 240_000,
       inputHashes: {
         "AGENTS.md": sha256hex(await readFile(join(root, "AGENTS.md"))),
         ".agents/skills/turnhelm-routing/SKILL.md": sha256hex(await readFile(join(root, ".agents", "skills", "turnhelm-routing", "SKILL.md"))),
@@ -1268,6 +1279,34 @@ test("suite counts are reserved before each attempt", async t => {
   }
 });
 
+test("a per-case timeout is unjudged and the roster continues", { timeout: 120_000 }, async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  // The first case hangs past its own 5s deadline (the roster floor); the
+  // second answers. DL-1: the expired deadline is an unjudged per-case
+  // outcome behind the cleanup and settled-tree gates, never a stop.
+  const run = await buildRun(t, "laya", classifier.url, [
+    { id: "times-out", kind: "worker-readonly", deadlineMs: 5000 },
+    { id: "passes-anyway", kind: "worker-readonly" }
+  ]);
+  const invocations = join(run.runRoot, "fake-worker-invocations.log");
+  const code = await executeAcceptance(run.manifestPath, run.sha256,
+    { env: workerEnv(fakeBin, "hang-first", invocations) });
+  assert.equal(code, 4, "a complete roster with one timed-out case exits four");
+  assert.equal(await countInvocations(invocations), 2, "both workers actually spawn");
+  const evidence = await readEvidence(run.runRoot);
+  const timed = evidence.find(line => line.phase === "verified" && line.caseId === "times-out");
+  assert.equal(timed?.verdict, "timeout");
+  assert.equal(timed?.policy, "not-applicable");
+  assert.ok(!Object.hasOwn(timed ?? {}, "oracleInput"), "nothing was judged, so no oracle input is retained");
+  assert.equal(evidence.find(line => line.phase === "verified" && line.caseId === "passes-anyway")?.verdict,
+    "pass", "the next case still reserves and grades");
+  assert.ok(!evidence.some(line => line.phase === "stopped"), "a timeout outcome never stops the roster");
+  assert.deepEqual(evidence.at(-1),
+    { phase: "completed", outcome: "fail", cases: 2, failed: 0, timedOut: 1 },
+    "the completed counts reconcile the unjudged timeout exactly");
+});
+
 test("first real failure stops remaining cases", async t => {
   const classifier = await startClassifierFixture(t);
   const fakeBin = await writeFakeCodex(t);
@@ -1371,7 +1410,7 @@ test("malformed missing oversized and invalid utf8 outputs are finite", async t 
       assert.equal(code, 4, mode + " fails only the oracle and completes the roster");
       assert.deepEqual(evidence.map(line => line.phase), ["prepared", "reserved", "observed", "verified", "completed"]);
       assert.equal(evidence[3].verdict, "fail", mode + " fails verification");
-      assert.deepEqual(evidence.at(-1), { phase: "completed", outcome: "fail", cases: 1, failed: 1 });
+      assert.deepEqual(evidence.at(-1), { phase: "completed", outcome: "fail", cases: 1, failed: 1, timedOut: 0 });
     } else {
       assert.equal(code, 1, mode + " is an integrity stop");
       assert.deepEqual(evidence.map(line => line.phase), ["prepared", "reserved", "observed", "verified", "stopped"]);
@@ -1769,7 +1808,7 @@ test("oracle-only failures continue the roster to a failed completion", async t 
   assert.ok(mixedEvidence.find(line => line.phase === "verified" && line.verdict === "fail")?.oracleInput,
     "the continued failure record carries its oracle input");
   assert.ok(!mixedEvidence.some(line => line.phase === "stopped"));
-  assert.deepEqual(mixedEvidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 1 });
+  assert.deepEqual(mixedEvidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 1, timedOut: 0 });
 
   // An all-pass roster commits the same protocol with zero failures.
   const clean = await buildRun(t, "laya", classifier.url, [
@@ -1780,7 +1819,7 @@ test("oracle-only failures continue the roster to a failed completion", async t 
     { env: workerEnv(fakeBin, "ok-readonly") }), 0);
   const cleanEvidence = await readEvidence(clean.runRoot);
   assert.ok(!cleanEvidence.some(line => line.phase === "stopped"));
-  assert.deepEqual(cleanEvidence.at(-1), { phase: "completed", outcome: "pass", cases: 2, failed: 0 });
+  assert.deepEqual(cleanEvidence.at(-1), { phase: "completed", outcome: "pass", cases: 2, failed: 0, timedOut: 0 });
 
   // Two oracle failures reconcile to failed: 2 — the count is the roster's
   // actual failures, not a marker.
@@ -1795,7 +1834,7 @@ test("oracle-only failures continue the roster to a failed completion", async t 
     ["fail", "fail"]);
   assert.ok(doubleEvidence.filter(line => line.phase === "verified")
     .every(line => line.oracleInput), "every continued failure retains its input");
-  assert.deepEqual(doubleEvidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 2 });
+  assert.deepEqual(doubleEvidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 2, timedOut: 0 });
 });
 
 test("an absent summary fails its oracle and continues the write roster", async t => {
@@ -1825,7 +1864,7 @@ test("an absent summary fails its oracle and continues the write roster", async 
   assert.equal((absent?.checks as Record<string, unknown>).oracle, false);
   assert.equal((evidence.find(line => line.phase === "verified" && line.caseId === "correct-write")
     ?.checks as Record<string, unknown>).oracle, true);
-  assert.deepEqual(evidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 1 });
+  assert.deepEqual(evidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 1, timedOut: 0 });
 
   // A claim that refuses before the loop spends nothing: drifted frozen bytes
   // stop the run at the claim with zero recorded worker invocations.
@@ -1893,9 +1932,9 @@ test("the completed record family is strict per suite kind", async t => {
   const run = await claimAcceptance(prepared.manifestPath, prepared.sha256);
   t.after(() => run.handle.close());
 
-  // The worker shape: exactly outcome/cases/failed with reconciling counts.
+  // The worker shape: exactly outcome/cases/failed/timedOut with reconciling counts.
   const workerShape = (over: Record<string, unknown>): Record<string, unknown> =>
-    ({ outcome: "fail", cases: 2, failed: 1, ...over });
+    ({ outcome: "fail", cases: 2, failed: 1, timedOut: 1, ...over });
   for (const bad of [
     workerShape({ extra: 1 }),
     workerShape({ outcome: "excellent" }),
@@ -1903,9 +1942,11 @@ test("the completed record family is strict per suite kind", async t => {
     workerShape({ cases: 1.5 }),
     workerShape({ failed: 2 ** 53 }),
     workerShape({ failed: 3 }),
-    workerShape({ outcome: "fail", failed: 0 }),
+    workerShape({ timedOut: 3 }),
+    workerShape({ outcome: "fail", failed: 0, timedOut: 0 }),
     workerShape({ outcome: "pass", failed: 1 }),
-    workerShape({ policyMatches: 1 })
+    workerShape({ policyMatches: 1 }),
+    { outcome: "fail", cases: 2, failed: 1 }
   ]) {
     await assert.rejects(() => appendEvidence(run, {
       phase: "completed", ...bad
@@ -1913,14 +1954,14 @@ test("the completed record family is strict per suite kind", async t => {
   }
 
   // Legal worker records round-trip exactly.
-  await appendEvidence(run, { phase: "completed", outcome: "fail", cases: 2, failed: 2 } as unknown as SafeEvidence);
-  await appendEvidence(run, { phase: "completed", outcome: "pass", cases: 1, failed: 0 } as unknown as SafeEvidence);
+  await appendEvidence(run, { phase: "completed", outcome: "fail", cases: 2, failed: 2, timedOut: 0 } as unknown as SafeEvidence);
+  await appendEvidence(run, { phase: "completed", outcome: "pass", cases: 1, failed: 0, timedOut: 0 } as unknown as SafeEvidence);
   const completed = (await readFile(run.evidencePath, "utf8")).trim().split("\n")
     .map(line => JSON.parse(line) as Record<string, unknown>)
     .filter(line => line.phase === "completed");
   assert.deepEqual(completed, [
-    { phase: "completed", outcome: "fail", cases: 2, failed: 2 },
-    { phase: "completed", outcome: "pass", cases: 1, failed: 0 }
+    { phase: "completed", outcome: "fail", cases: 2, failed: 2, timedOut: 0 },
+    { phase: "completed", outcome: "pass", cases: 1, failed: 0, timedOut: 0 }
   ]);
 
   // The calibration rules stay untouched: a short calibration roster and a
@@ -1997,7 +2038,7 @@ test("worker and calibration cases have different pass criteria", async t => {
   assert.equal(workerVerified.verdict, "fail");
   assert.equal((workerVerified.checks as Record<string, unknown>)["oracle"], false,
     "the worker failure is caught by the stdout oracle");
-  assert.deepEqual(workerBadEvidence.at(-1), { phase: "completed", outcome: "fail", cases: 1, failed: 1 });
+  assert.deepEqual(workerBadEvidence.at(-1), { phase: "completed", outcome: "fail", cases: 1, failed: 1, timedOut: 0 });
 
   // A full calibration roster whose every selection stays inside its frozen
   // band passes on routing facts alone: no receipts, no worker artifacts.
@@ -2097,7 +2138,7 @@ test("RR01 whole payload and exact keys", async t => {
   assert.ok(evidence.findIndex(x => x.phase === "observed") < evidence.findIndex(x => x.phase === "verified"),
     "the observation is durable before the verdict");
   assert.ok(!evidence.some(line => line.phase === "stopped"));
-  assert.deepEqual(evidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 2 });
+  assert.deepEqual(evidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 2, timedOut: 0 });
 
   // Every other malformed stdout payload fails on the oracle check itself.
   // (answer-suffix — payload plus one prose line — now passes as the
@@ -3409,7 +3450,7 @@ test("RR04 protocol and policy are independent", async t => {
   assert.deepEqual(workerEvidence.filter(line => line.phase === "reserved").map(line => line.caseId),
     ["worker-one", "worker-two"], "an oracle failure continues the worker roster");
   assert.ok(workerEvidence.every(line => line.policy === undefined || line.policy === "not-applicable"));
-  assert.deepEqual(workerEvidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 2 });
+  assert.deepEqual(workerEvidence.at(-1), { phase: "completed", outcome: "fail", cases: 2, failed: 2, timedOut: 0 });
 
   // The journal gate rejects illegal policy/outcome/counter shapes and keeps
   // raw canary fields off disk; a legal completed record round-trips exactly.
@@ -3672,7 +3713,7 @@ test("RR05 terminal boundary is fail closed", async t => {
   const workerCloseEvidence = await readEvidence(workerClose.runRoot);
   assert.equal(workerCloseEvidence.at(-1)?.reason, "evidence-io");
   assert.deepEqual(workerCloseEvidence.find(line => line.phase === "completed"),
-    { phase: "completed", outcome: "pass", cases: 1, failed: 0 },
+    { phase: "completed", outcome: "pass", cases: 1, failed: 0, timedOut: 0 },
     "the worker completed fact precedes the close");
 
   // An abort discovered after the worker close is carried by the exit code
@@ -4310,7 +4351,7 @@ test("singleton fallback binds its frozen 503 fixture", async t => {
   const checks = verified.checks as Record<string, unknown>;
   assert.equal(checks["transport-policy"], true, "the specialized fallback case verifies its frozen transport policy");
   assert.ok(!("laya-first" in checks), "the singleton fallback has no laya-first requirement");
-  assert.deepEqual(evidence.at(-1), { phase: "completed", outcome: "pass", cases: 1, failed: 0 });
+  assert.deepEqual(evidence.at(-1), { phase: "completed", outcome: "pass", cases: 1, failed: 0, timedOut: 0 });
   assert.equal(proxy.connects.length, 1, "exactly one CONNECT through the owned proxy");
   assert.equal(proxy.connects[0].target, "api.typesafe.ai:443", "the CONNECT target is the fixed Jev origin");
   assert.equal(proxy.connects[0].authorization, undefined, "Origin authorization never appears in CONNECT");
