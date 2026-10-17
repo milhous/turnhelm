@@ -1112,10 +1112,21 @@ const LIFECYCLE_KINDS: ReadonlySet<string> = new Set(["spawned", "stdin-delivere
   "abort", "shutdown-term", "shutdown-kill", "shutdown-discharged", "stdout-end", "close", "settle"]);
 
 // The recorder's frozen detail vocabulary, same hand-copied discipline as the
-// kinds: every value is a fixed-vocabulary string or a number the recorder
-// itself produced — content-free by construction.
+// kinds — and every value is validated against the vocabulary it came from:
+// the failure-taxonomy classes plus the four transport causes, the worker
+// event kinds, the settlement statuses, the death signals, and the recorder's
+// own number shapes. A hostile or corrupt value degrades the detail (never
+// the entry), so prose cannot ride a key the recorder never wrote.
 const LIFECYCLE_DETAIL_KEYS: ReadonlySet<string> =
   new Set(["eventKind", "pid", "exitCode", "signal", "status", "class"]);
+const LIFECYCLE_CLASS_VALUES: ReadonlySet<string> = new Set([
+  "stream-disconnected", "rate-limit", "usage-limit", "timeout", "auth", "overloaded", "unknown",
+  "spawn", "stdin", "protocol", "output"
+]);
+const LIFECYCLE_EVENT_KIND_VALUES: ReadonlySet<string> =
+  new Set(["message", "completed", "failed", "diagnostic", "ignored"]);
+const LIFECYCLE_STATUS_VALUES: ReadonlySet<string> = new Set(["completed", "failed", "cancelled"]);
+const LIFECYCLE_SIGNAL_VALUES: ReadonlySet<string> = new Set(["SIGINT", "SIGTERM", "SIGKILL"]);
 
 const projectLifecycleDetail = (value: unknown): WorkerLifecycleDetail | undefined => {
   if (!isRecord(value)) return undefined;
@@ -1125,8 +1136,25 @@ const projectLifecycleDetail = (value: unknown): WorkerLifecycleDetail | undefin
       throw evidenceReject("workerLifecycle detail must not contain unknown field " + JSON.stringify(key));
     }
     const raw = value[key];
-    if (typeof raw === "string" || typeof raw === "number" || raw === null) detail[key] = raw;
-    else return undefined; // a malformed optional field drops only itself
+    if (key === "pid") {
+      if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw <= 0) return undefined;
+      detail.pid = raw;
+    } else if (key === "exitCode") {
+      if (raw !== null && (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 0)) return undefined;
+      detail.exitCode = raw;
+    } else if (key === "signal") {
+      if (typeof raw !== "string" || !LIFECYCLE_SIGNAL_VALUES.has(raw)) return undefined;
+      detail.signal = raw;
+    } else if (key === "status") {
+      if (typeof raw !== "string" || !LIFECYCLE_STATUS_VALUES.has(raw)) return undefined;
+      detail.status = raw;
+    } else if (key === "eventKind") {
+      if (typeof raw !== "string" || !LIFECYCLE_EVENT_KIND_VALUES.has(raw)) return undefined;
+      detail.eventKind = raw;
+    } else {
+      if (typeof raw !== "string" || !LIFECYCLE_CLASS_VALUES.has(raw)) return undefined;
+      detail.class = raw;
+    }
   }
   return detail;
 };
@@ -1136,7 +1164,7 @@ const projectLifecycleDetail = (value: unknown): WorkerLifecycleDetail | undefin
 // projection. Entry detail is retained only from the fixed vocabulary above —
 // the observed failure class survives, raw worker content never enters.
 // Truncation to the recorder's own ring bound reports itself.
-const projectWorkerLifecycle = (value: unknown): WorkerLifecycleEvidence | undefined => {
+export const projectWorkerLifecycle = (value: unknown): WorkerLifecycleEvidence | undefined => {
   if (!isRecord(value)) return undefined;
   for (const key of Object.keys(value)) {
     if (key !== "events" && key !== "overflow") {
@@ -1167,7 +1195,7 @@ const projectWorkerLifecycle = (value: unknown): WorkerLifecycleEvidence | undef
 // missing, oversized, or malformed journal, or no events for the pid, keeps
 // the projection absent — nothing is fabricated.
 const LIFECYCLE_JOURNAL_CAP_BYTES = 1 << 20;
-const readWorkerLifecycleJournal = async (root: string, pid: number | null): Promise<WorkerLifecycleEvidence | undefined> => {
+export const readWorkerLifecycleJournal = async (root: string, pid: number | null): Promise<WorkerLifecycleEvidence | undefined> => {
   if (pid === null) return undefined;
   const journalPath = join(root, ".turnhelm", "lifecycle.jsonl");
   const info = await stat(journalPath).catch(() => null);

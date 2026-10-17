@@ -17,7 +17,7 @@ import { parseProjectConfig } from "../src/config.js";
 import { readProjectFile } from "../src/project.js";
 import {
   appendEvidence, claimAcceptance, envelopePayload, executeAcceptance, findOnPath, oracleSandboxPolicy,
-  prepareAcceptance, projectAttemptTransports, superviseCli,
+  prepareAcceptance, projectAttemptTransports, projectWorkerLifecycle, readWorkerLifecycleJournal, superviseCli,
   type AcceptanceManifest, type AttemptTransportEvidence, type ClaimedRun, type SafeEvidence
 } from "./live-acceptance.js";
 
@@ -1459,6 +1459,60 @@ test("a reported failure killed before receipt keeps its class on the retained t
   assert.ok(kinds.includes("spawned"), "the journal timeline retains the worker spawn");
   assert.ok(!kinds.includes("settle"), "a hard kill never settles");
   assert.equal(evidence.at(-1)?.reason, "receipt", "the round stops on the receipt gate");
+});
+
+test("hostile lifecycle detail values degrade, never retain prose", async () => {
+  const CANARY = "raw-prose-canary-trust-me";
+  const projected = projectWorkerLifecycle({
+    overflow: false,
+    events: [
+      { tMs: 0, kind: "spawned", detail: { pid: 4242 } },
+      { tMs: 1, kind: "failure", detail: { class: CANARY } },
+      { tMs: 2, kind: "failure", detail: { class: "rate-limit" } },
+      { tMs: 3, kind: "close", detail: { signal: "SIGBOMB" } },
+      { tMs: 4, kind: "event", detail: { eventKind: "message" } },
+      { tMs: 5, kind: "event", detail: { eventKind: CANARY } },
+      { tMs: 6, kind: "settle", detail: { status: "completed" } },
+      { tMs: 7, kind: "spawned", detail: { pid: -3 } },
+      { tMs: 8, kind: "close", detail: { exitCode: null } },
+      { tMs: 9, kind: "settle", detail: { status: CANARY } }
+    ]
+  });
+  assert.ok(projected !== undefined, "the envelope itself is sound");
+  const byKey = new Map(projected.events.map(event => [event.kind + ":" + event.tMs, event]));
+  assert.deepEqual(byKey.get("spawned:0")?.detail, { pid: 4242 }, "a valid pid detail is retained");
+  assert.deepEqual(byKey.get("failure:2")?.detail, { class: "rate-limit" }, "a frozen-vocabulary class is retained");
+  assert.deepEqual(byKey.get("event:4")?.detail, { eventKind: "message" }, "a worker event kind is retained");
+  assert.deepEqual(byKey.get("settle:6")?.detail, { status: "completed" }, "a settlement status is retained");
+  assert.deepEqual(byKey.get("close:8")?.detail, { exitCode: null }, "a null exit code is retained");
+  for (const key of ["failure:1", "close:3", "event:5", "spawned:7", "settle:9"]) {
+    assert.ok(byKey.get(key) !== undefined, key + " keeps its entry");
+    assert.equal(byKey.get(key)?.detail, undefined, key + " drops its out-of-vocabulary detail");
+  }
+  assert.ok(!JSON.stringify(projected).includes(CANARY), "no prose reaches the retained evidence");
+});
+
+test("hostile journal detail values degrade the same way", async t => {
+  const CANARY = "journal-prose-canary-trust-me";
+  const directory = await mkdtemp(join(tmpdir(), "turnhelm-lifecycle-detail-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await mkdir(join(directory, ".turnhelm"));
+  const line = (event: Record<string, unknown>): string => JSON.stringify({ type: "turnhelm.worker-lifecycle", pid: 4242, ...event });
+  await writeFile(join(directory, ".turnhelm", "lifecycle.jsonl"), [
+    line({ tMs: 0, kind: "failure", detail: { class: "auth" } }),
+    line({ tMs: 1, kind: "failure", detail: { class: CANARY } }),
+    line({ tMs: 2, kind: "spawned", detail: { pid: 4242 } }),
+    line({ tMs: 3, kind: "spawned", detail: { pid: Number.MAX_SAFE_INTEGER * 2 } })
+  ].join("\n") + "\n");
+  const rebuilt = await readWorkerLifecycleJournal(directory, 4242);
+  assert.ok(rebuilt !== undefined, "the journal rebuilds");
+  const byKey = new Map(rebuilt.events.map(event => [event.kind + ":" + event.tMs, event]));
+  assert.deepEqual(byKey.get("failure:0")?.detail, { class: "auth" }, "a frozen-vocabulary class is retained");
+  assert.deepEqual(byKey.get("spawned:2")?.detail, { pid: 4242 }, "a valid pid detail is retained");
+  assert.equal(byKey.get("failure:1")?.detail, undefined, "prose in a class degrades to no detail");
+  assert.ok(byKey.get("failure:1") !== undefined, "the entry itself survives");
+  assert.equal(byKey.get("spawned:3")?.detail, undefined, "an unsafe pid degrades to no detail");
+  assert.ok(!JSON.stringify(rebuilt).includes(CANARY), "no prose reaches the rebuilt evidence");
 });
 
 test("first real failure stops remaining cases", async t => {

@@ -321,9 +321,10 @@ canonical-path re-check and a re-hash against the case's allowedChanges —
 graded or timed out: a same-content root replacement stops `root-identity`,
 and a write outside the allowance stops `tree-drift`, even when the output
 graded fine. The same identity rule binds the frozen inputs: every
-roster-referenced file — including a case's `outputSchema` and contract
-sources — re-verifies dev/ino plus bytes at the pre-spend gate and around the
-sandboxed contract check, so a byte-identical rebind of an oracle or contract
+roster-referenced file — including a case's `outputSchema` — re-verifies
+dev/ino plus bytes at the pre-spend gate, and the oracle's consumed inputs
+(contract, task file, hooks) re-verify again around the sandboxed contract
+check, so a byte-identical rebind of an oracle or contract
 file stops `oracle-identity` before any spend, while a mutated or missing
 file stops `case-files`. A timeout is an unjudged per-case outcome, not a stop
 (`outcome:"timeout"`): no oracle grading and no contract check, and after the
