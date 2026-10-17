@@ -441,11 +441,12 @@ test("prepare freezes a valid roster schema into the manifest", async t => {
   });
   await prepareRound(rosterPath, { sandboxExecPath: fake });
   const manifest = JSON.parse(await readFile(join(scratch.evidenceRoot, "custom-round-manifest.json"), "utf8")) as {
-    cases: [{ outputSchema?: { path: string; sha256: string } }, Record<string, unknown>];
+    cases: [{ outputSchema?: { path: string; sha256: string; dev: number; ino: number } }, Record<string, unknown>];
   };
+  const schemaStat = await stat(schemaPath);
   assert.deepEqual(manifest.cases[0].outputSchema,
-    { path: schemaPath, sha256: sha256hex(await readFile(schemaPath)) },
-    "the schema freezes as a path+hash entry in its case");
+    { path: schemaPath, sha256: sha256hex(await readFile(schemaPath)), dev: schemaStat.dev, ino: schemaStat.ino },
+    "the schema freezes as a path+hash+identity entry in its case");
   assert.equal("outputSchema" in manifest.cases[1], false, "a schema-less case freezes no entry");
 });
 
@@ -613,6 +614,7 @@ type ExecuteCaseSpec = {
   grading: Record<string, unknown>;
   outputLines: readonly string[];
   contractSource?: string;
+  contractDir?: string;
   allowedChanges?: readonly string[];
   outputSchemaText?: string;
 };
@@ -696,7 +698,8 @@ const scratchExecuteRound = async (
         JSON.stringify({ taskSha256: sha256hex(taskText), backend: "laya", profileId: "balanced",
           attempts: options.journalAttempts }) + "\n");
     }
-    const contract = join(base, spec.id + "-contract.mjs");
+    const contract = join(spec.contractDir === undefined ? base : join(base, spec.contractDir), spec.id + "-contract.mjs");
+    await mkdir(dirname(contract), { recursive: true });
     await writeFile(contract,
       spec.contractSource ?? "import assert from \"node:assert/strict\";\nassert.equal(1 + 1, 2);\n");
     let outputSchema: string | undefined;
@@ -836,6 +839,36 @@ test("a same-path replaced root is refused at the identity gate before any launc
       "zero journals written");
     const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
     assert.deepEqual(ledger.at(-1), { phase: "stopped", caseId: "case-a", reason: "root-identity" });
+  });
+
+test("an oracle root rebind with identical contents stops as oracle-identity",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-write", transport: "arg", contractDir: "oracle",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ]);
+    // OR-1: the rebinding oracle keeps its pathname and its bytes — only the
+    // directory's and the file's identity change. The replacement directory is
+    // allocated before the original is freed, mirroring the root-identity test,
+    // so a recycled inode can never mask the rebind.
+    const oracleDir = join(round.base, "oracle");
+    const contractPath = join(oracleDir, "case-a-contract.mjs");
+    const contractBytes = await readFile(contractPath);
+    const replacement = join(round.base, "oracle-replacement");
+    await mkdir(replacement);
+    await writeFile(join(replacement, "case-a-contract.mjs"), contractBytes);
+    await rm(oracleDir, { recursive: true, force: true });
+    await rename(replacement, oracleDir);
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 1, "a rebound oracle file is a structural refusal");
+    await assert.rejects(readFile(round.invocations), { code: "ENOENT" }, "zero worker invocations");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    assert.deepEqual(ledger.at(-1), { phase: "stopped", caseId: "case-a", reason: "oracle-identity" });
+    assert.ok(!ledger.some(r => r.phase === "reserved"), "identity gates before any reservation");
   });
 
 test("a copied manifest outside the evidence root is refused without a claim",

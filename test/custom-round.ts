@@ -573,9 +573,10 @@ export async function prepareRound(
       rosterFail("case " + JSON.stringify(item.id)
         + " root tree cannot be frozen (oversize, unreadable, or non-regular file)");
     }
-    const files: { role: string; path: string; sha256: string }[] = [];
+    const files: { role: string; path: string; sha256: string; dev: number; ino: number }[] = [];
     const addFile = async (role: string, path: string): Promise<void> => {
-      files.push({ role, path, sha256: sha256hex(await readFile(path)) });
+      const info = await stat(path);
+      files.push({ role, path, sha256: sha256hex(await readFile(path)), dev: info.dev, ino: info.ino });
     };
     if (item.files.contract !== undefined) await addFile("contract", item.files.contract);
     if (item.files.taskFile !== undefined) await addFile("taskFile", item.files.taskFile);
@@ -600,6 +601,12 @@ export async function prepareRound(
         await rm(runtimeDir, { recursive: true, force: true });
       }
     }
+    let outputSchema: { path: string; sha256: string; dev: number; ino: number } | undefined;
+    if (item.outputSchema !== undefined) {
+      const schemaInfo = await stat(item.outputSchema);
+      outputSchema = { path: item.outputSchema, sha256: sha256hex(await readFile(item.outputSchema)),
+        dev: schemaInfo.dev, ino: schemaInfo.ino };
+    }
     cases.push({
       id: item.id,
       kind: item.kind,
@@ -612,9 +619,7 @@ export async function prepareRound(
       grading: item.grading,
       tree: Object.fromEntries(tree),
       files,
-      outputSchema: item.outputSchema === undefined
-        ? undefined
-        : { path: item.outputSchema, sha256: sha256hex(await readFile(item.outputSchema)) }
+      outputSchema
     });
   }
   const manifest = {
@@ -649,8 +654,8 @@ type RoundCase = {
   allowedProfiles: string[];
   grading: { mode: string; expected: unknown };
   tree: Record<string, string>;
-  files: { role: string; path: string; sha256: string }[];
-  outputSchema?: { path: string; sha256: string };
+  files: { role: string; path: string; sha256: string; dev: number; ino: number }[];
+  outputSchema?: { path: string; sha256: string; dev: number; ino: number };
 };
 
 type RoundManifest = {
@@ -692,13 +697,17 @@ const parseRoundManifest = (bytes: Buffer): RoundManifest | null => {
         || typeof item.root?.canonical !== "string"
         || !Number.isInteger(item.root?.dev) || !Number.isInteger(item.root?.ino)
         || typeof item.grading?.mode !== "string" || !Array.isArray(item.files)
+        || !item.files.every((file: { path?: unknown; sha256?: unknown; dev?: unknown; ino?: unknown }) =>
+          typeof file?.path === "string" && typeof file?.sha256 === "string"
+          && Number.isInteger(file?.dev) && Number.isInteger(file?.ino))
         || !Array.isArray(item.allowedChanges) || item.allowedChanges.some(v => typeof v !== "string")
         || !Array.isArray(item.allowedProfiles) || item.allowedProfiles.length === 0
         || item.allowedProfiles.some(v => typeof v !== "string")
         || typeof item.tree !== "object" || item.tree === null || Array.isArray(item.tree)
         || !Object.values(item.tree).every(v => typeof v === "string")
         || (item.outputSchema !== undefined
-          && (typeof item.outputSchema?.path !== "string" || typeof item.outputSchema?.sha256 !== "string"))) return null;
+          && (typeof item.outputSchema?.path !== "string" || typeof item.outputSchema?.sha256 !== "string"
+            || !Number.isInteger(item.outputSchema?.dev) || !Number.isInteger(item.outputSchema?.ino)))) return null;
     }
     return value;
   } catch {
@@ -985,6 +994,18 @@ const rootIdentityMatches = async (
     && await realpath(root.canonical).catch(() => "") === root.canonical;
 };
 
+// OR-1 (spec §3.3): a roster-referenced oracle file is its filesystem
+// identity, not its pathname or bytes — dev/ino beside the frozen hash, so a
+// same-path byte-identical replacement never passes once identity is frozen.
+const fileIdentityMatches = async (
+  frozen: Readonly<{ path: string; sha256: string; dev: number; ino: number }>
+): Promise<boolean> => {
+  const info = await stat(frozen.path).catch(() => null);
+  if (info === null || info.dev !== frozen.dev || info.ino !== frozen.ino) return false;
+  const bytes = await readFile(frozen.path).catch(() => null);
+  return bytes !== null && sha256hex(bytes) === frozen.sha256;
+};
+
 async function runGatedRound(
   manifestPath: string,
   approvedSha256: string,
@@ -1058,9 +1079,18 @@ async function runGatedRound(
       stopReason = "root-identity";
     } else {
       for (const file of item.files) {
+        const info = await stat(file.path).catch(() => null);
+        if (info === null) {
+          stopReason = "case-files";
+          break;
+        }
         const fileBytes = await readFile(file.path).catch(() => null);
         if (fileBytes === null || sha256hex(fileBytes) !== file.sha256) {
           stopReason = "case-files";
+          break;
+        }
+        if (info.dev !== file.dev || info.ino !== file.ino) {
+          stopReason = "oracle-identity";
           break;
         }
       }
@@ -1068,8 +1098,11 @@ async function runGatedRound(
       if ((item.transport === "stdin-file" && !hasRole("taskFile"))
         || (item.kind === "worker-write" && !hasRole("contract"))) stopReason = "case-files";
       if (stopReason === null && item.outputSchema !== undefined) {
-        const schemaBytes = await readFile(item.outputSchema.path).catch(() => null);
-        if (schemaBytes === null || sha256hex(schemaBytes) !== item.outputSchema.sha256) stopReason = "case-files";
+        const schema = item.outputSchema;
+        const info = await stat(schema.path).catch(() => null);
+        const schemaBytes = info === null ? null : await readFile(schema.path).catch(() => null);
+        if (info === null || schemaBytes === null || sha256hex(schemaBytes) !== schema.sha256) stopReason = "case-files";
+        else if (info.dev !== schema.dev || info.ino !== schema.ino) stopReason = "oracle-identity";
       }
       const launchTree = await hashTree(item.root.canonical);
       if (launchTree === null || treeChangedOutside(frozenTree, launchTree, []) !== null) {
@@ -1184,6 +1217,17 @@ async function runGatedRound(
     // ordinary case failure (spec §3.2(2)).
     if (passed && item.kind === "worker-write") {
       const contractEntry = item.files.find(file => file.role === "contract");
+      // OR-1: identity brackets the sandboxed check — the frozen contract must
+      // be the same filesystem object when the check starts and again before
+      // its outcome is accepted; a rebind in that window spends trust in an
+      // oracle the round never froze.
+      if (contractEntry === undefined || !(await fileIdentityMatches(contractEntry))) {
+        await appendEvidence({
+          phase: "stopped", caseId: item.id, reason: "oracle-identity",
+          ...(workerFailure !== undefined ? { workerFailure } : {})
+        }).catch(() => {});
+        return 1;
+      }
       const runtimeDir = await mkdtemp(join(tmpdir(), "turnhelm-round-check-"));
       let contract: CheckOutcome;
       try {
@@ -1199,6 +1243,13 @@ async function runGatedRound(
         });
       } finally {
         await rm(runtimeDir, { recursive: true, force: true });
+      }
+      if (!(await fileIdentityMatches(contractEntry))) {
+        await appendEvidence({
+          phase: "stopped", caseId: item.id, reason: "oracle-identity",
+          ...(workerFailure !== undefined ? { workerFailure } : {})
+        }).catch(() => {});
+        return 1;
       }
       // A signal that lands mid-contract settles the round through the signal
       // ladder, never as a contract infrastructure stop.
