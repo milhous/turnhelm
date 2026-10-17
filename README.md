@@ -669,7 +669,16 @@ worker receipt's `lastEventAgeMs` is pinned positive through a post-drain
 settlement gap. Roster authoring rule: an oracle whose verdict depends on
 ordering, ties, or direction — sort order, first-match, prefix direction —
 must state the direction it judges and include one worked example with tied
-inputs, so a mis-graded tie is caught by the roster itself; sealed oracles
+inputs, so a mis-graded tie is caught by the roster itself; a task whose
+oracle verdict depends on when an effect must happen — a synchronous throw
+versus a deferred rejection, a same-turn identity window for promises or
+handles, state visible before versus after settlement,
+retry-after-settlement semantics — must state the timing policy it judges
+and include one worked call-order example exercising the ambiguous boundary
+(for a fetch that throws synchronously: whether the immediately following
+same-key call must return the identical promise, and whether rejection is
+deferred to a microtask), with the task text imposing exactly the policy the
+oracle judges; sealed oracles
 and recorded grades are never edited after the fact — a defective oracle is
 retired and replaced, not rewritten.
 
