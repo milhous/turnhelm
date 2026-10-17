@@ -25,7 +25,7 @@ const CHECK_IDS = [
 const CODEX_SCRIPT = `#!/bin/sh
 if [ "$1" = "--version" ]; then printf 'codex-cli 0.160.1\\n'; exit 0; fi
 if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
-  printf 'usage: codex exec\\n  --json\\n  --ephemeral\\n  --sandbox <MODE>\\n  -  read from stdin\\n'
+  printf 'usage: codex exec\\n  --json\\n  --ephemeral\\n  --sandbox <MODE>\\n  -  read from stdin\\n  --ignore-user-config\\n  --ignore-rules\\n  --output-schema <FILE>\\n'
   exit 0
 fi
 exit 64

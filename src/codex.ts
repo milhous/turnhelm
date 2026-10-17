@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
-import { join } from "node:path";
+import { accessSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { decodeWorkerEvent, MAX_EVENT_BYTES, type FailureClass, type WorkerEvent, type WorkerUsage } from "./codex-events.js";
 import { classifyPayload, type PayloadMode } from "./payload.js";
 import type { TaskDecision } from "./route.js";
@@ -21,6 +23,10 @@ export type WorkerResult = Readonly<{
   // group shutdown (ownedShutdown), never a claim about the child's cause.
   signal?: "SIGINT" | "SIGTERM" | "SIGKILL";
   ownedShutdown: boolean;
+  // WB-4: present iff this run actually executed — the worker ran under a
+  // per-run managed CODEX_HOME destroyed at settlement. An attestation of that
+  // mechanism, never a universal instruction-isolation claim.
+  codexHomeManaged?: true;
   failureClass?: FailureClass;
   errorSha256?: string;
   // PE-1: the emission classifier's bounded, content-free projection, attached
@@ -30,10 +36,17 @@ export type WorkerResult = Readonly<{
   payload?: Readonly<{ mode: PayloadMode; trailerBytes?: number }>;
 }>;
 
-export function buildWorkerArgs(decision: TaskDecision, write: boolean): string[] {
-  return ["exec", "--ephemeral", "--json", "--sandbox", write ? "workspace-write" : "read-only",
+export function buildWorkerArgs(decision: TaskDecision, write: boolean, schemaPath?: string): string[] {
+  return ["exec", "--ephemeral", "--json",
+    // WB-1: instruction-context isolation by argv — the worker starts from the
+    // task alone, never host codex config or discovered rules files.
+    "--ignore-user-config", "--ignore-rules",
+    "--sandbox", write ? "workspace-write" : "read-only",
     "--config", "agents.enabled=false", "--model", decision.profile.model,
-    "--config", `model_reasoning_effort=${JSON.stringify(decision.profile.effort)}`, "-"];
+    "--config", `model_reasoning_effort=${JSON.stringify(decision.profile.effort)}`,
+    // OC-1: the schema path is the staged copy inside the managed home —
+    // present only when validated bytes were supplied, never the caller's path.
+    ...(schemaPath === undefined ? [] : ["--output-schema", schemaPath]), "-"];
 }
 
 export function subprocessEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -56,16 +69,90 @@ export function subprocessEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv
   return copy;
 }
 
-export function workerEnvironment(env: NodeJS.ProcessEnv, root: string): NodeJS.ProcessEnv {
+export function workerEnvironment(env: NodeJS.ProcessEnv, root: string, homeDir: string): NodeJS.ProcessEnv {
   return {
     ...subprocessEnvironment(env),
     TURNHELM_MANAGED_CHILD: "1",
+    // WB-2: the worker's CODEX_HOME is this run's managed home; whatever the
+    // parent carried is overridden and never reaches the child.
+    CODEX_HOME: homeDir,
     // zsh sources $ZDOTDIR/.zshenv even non-interactively, falling back to HOME,
     // which let host startup files re-export stripped keys into worker
     // descendants. Pointing ZDOTDIR at the managed root keeps those files out;
     // a missing startup file there is zsh's skip state.
     ZDOTDIR: join(root, ".turnhelm")
   };
+}
+
+// WB-2: the parent-derived credential source — the parent's CODEX_HOME when
+// set, else ~/.codex/auth.json, resolved absolute so a relative home still
+// links correctly from inside the managed directory. Only its existence is
+// probed here; which credential mode backs it (file, keyring, in-memory) is
+// not inferred.
+function authSourcePath(env: NodeJS.ProcessEnv): string | undefined {
+  const parentHome = env.CODEX_HOME;
+  if (typeof parentHome === "string" && parentHome !== "") return resolve(parentHome, "auth.json");
+  const home = env.HOME;
+  if (typeof home === "string" && home !== "") return resolve(home, ".codex", "auth.json");
+  return undefined;
+}
+
+// WB-2 (review P1-3): pre-spend credential discovery — which source, if any,
+// a worker run could authenticate through: a regular file at the parent-
+// derived source when one exists, else a nonblank OPENAI_API_KEY. Presence is
+// probed, never read: this proves a source exists, never that it works.
+export function discoverWorkerCredential(env: NodeJS.ProcessEnv): "file" | "key" | undefined {
+  const source = authSourcePath(env);
+  if (source !== undefined) {
+    try {
+      if (statSync(source).isFile()) return "file";
+    } catch {
+      // No file at the source; the exported key is the remaining source.
+    }
+  }
+  if (typeof env.OPENAI_API_KEY === "string" && env.OPENAI_API_KEY.trim() !== "") return "key";
+  return undefined;
+}
+
+// WB-2: a fresh per-run home initialized with exactly what this run may see —
+// an auth.json symlink to the parent-derived source when one exists, and the
+// already-validated schema bytes staged as output-schema.json (the native
+// runtime may add its own scratch). Setup is split by failure class: an
+// absent credential source is the credential-free case, but any fault while
+// building the home fails the run closed (the spawn class) with the partial
+// home removed; an inherited home is never a fallback.
+function createWorkerHome(env: NodeJS.ProcessEnv, schemaBytes?: Buffer): string | undefined {
+  let dir: string;
+  try {
+    dir = mkdtempSync(join(tmpdir(), "turnhelm-worker-"));
+  } catch {
+    return undefined;
+  }
+  try {
+    let source = authSourcePath(env);
+    if (source !== undefined) {
+      try {
+        accessSync(source);
+      } catch {
+        // No credential file at the source: the home stays credential-free.
+        source = undefined;
+      }
+    }
+    if (source !== undefined) symlinkSync(source, join(dir, "auth.json"));
+    if (schemaBytes !== undefined) writeFileSync(join(dir, "output-schema.json"), schemaBytes);
+    return dir;
+  } catch {
+    destroyWorkerHome(dir);
+    return undefined;
+  }
+}
+
+// Settlement-scoped teardown: rmSync unlinks the credential symlink rather
+// than following it — the real credential file is never this home's to
+// remove. Best-effort by design; a cleanup failure never rewrites a settled
+// run's outcome.
+function destroyWorkerHome(dir: string): void {
+  try { rmSync(dir, { recursive: true, force: true }); } catch { /* Nothing after settlement may fail the run. */ }
 }
 
 const TERM_GRACE_MS = 1000;
@@ -90,6 +177,7 @@ export function executeWorker(
     executable: string;
     root: string;
     write: boolean;
+    schemaBytes?: Buffer;
     env: NodeJS.ProcessEnv;
     signal?: AbortSignal;
     output: NodeJS.WritableStream;
@@ -100,14 +188,37 @@ export function executeWorker(
   if (options.signal?.aborted) {
     return Promise.resolve({ code: -1, status: "cancelled", durationMs: 0, progressEvents: 0, usageScope: "unverified", ownedShutdown: false });
   }
+  // WB-2: the managed home exists before the child can, or the run never
+  // starts — never under an inherited home.
+  const managedHome = createWorkerHome(options.env, options.schemaBytes);
+  if (managedHome === undefined) {
+    return Promise.resolve({ code: 1, status: "failed", durationMs: Math.round(performance.now() - started),
+      progressEvents: 0, usageScope: "unverified", ownedShutdown: false, error: "spawn", failureClass: "unknown" });
+  }
   return new Promise<WorkerResult>(resolve => {
-    const child = spawn(options.executable, buildWorkerArgs(decision, options.write), {
-      shell: false,
-      cwd: options.root,
-      detached: true,
-      stdio: ["pipe", "pipe", "pipe"],
-      env: workerEnvironment(options.env, options.root)
-    });
+    // The IIFE keeps spawn's stdio-typed overload on the successful path while
+    // converting a synchronous spawn fault to the spawn failure — never a
+    // rejected promise that skips the receipt — with the managed home removed.
+    const child = (() => {
+      try {
+        return spawn(options.executable, buildWorkerArgs(decision, options.write,
+          options.schemaBytes === undefined ? undefined : join(managedHome, "output-schema.json")), {
+          shell: false,
+          cwd: options.root,
+          detached: true,
+          stdio: ["pipe", "pipe", "pipe"],
+          env: workerEnvironment(options.env, options.root, managedHome)
+        });
+      } catch {
+        return undefined;
+      }
+    })();
+    if (child === undefined) {
+      destroyWorkerHome(managedHome);
+      resolve({ code: 1, status: "failed", durationMs: Math.round(performance.now() - started),
+        progressEvents: 0, usageScope: "unverified", ownedShutdown: false, error: "spawn", failureClass: "unknown" });
+      return;
+    }
     const output = options.output;
     const diagnostics = options.diagnostics ?? process.stderr;
     const stdin = child.stdin;
@@ -184,6 +295,9 @@ export function executeWorker(
     const finish = (): void => {
       if (finished) return;
       finished = true;
+      // WB-2: finish is reachable only past the child's close and the owned
+      // group's discharge, so the managed home — and only it — goes now.
+      destroyWorkerHome(managedHome);
       clearFailureDeadline();
       options.signal?.removeEventListener("abort", onAbort);
       // With writes still in flight the listeners stay attached (they detach
@@ -204,8 +318,9 @@ export function executeWorker(
         durationMs: Math.round(performance.now() - started),
         progressEvents,
         usageScope: "unverified"
-      } as { code: number; status: WorkerResult["status"]; durationMs: number; progressEvents: number; usageScope: "unverified"; ownedShutdown: boolean; usage?: WorkerUsage; error?: WorkerResult["error"]; signal?: "SIGINT" | "SIGTERM" | "SIGKILL"; failureClass?: FailureClass; errorSha256?: string; lastEventAgeMs?: number; payload?: WorkerResult["payload"] };
+      } as { code: number; status: WorkerResult["status"]; durationMs: number; progressEvents: number; usageScope: "unverified"; ownedShutdown: boolean; codexHomeManaged?: true; usage?: WorkerUsage; error?: WorkerResult["error"]; signal?: "SIGINT" | "SIGTERM" | "SIGKILL"; failureClass?: FailureClass; errorSha256?: string; lastEventAgeMs?: number; payload?: WorkerResult["payload"] };
       result.ownedShutdown = ownedShutdown;
+      result.codexHomeManaged = true;
       if (lastEventAt !== undefined) result.lastEventAgeMs = Math.round(performance.now() - lastEventAt);
       if (usage) result.usage = usage;
       if (error) result.error = error;

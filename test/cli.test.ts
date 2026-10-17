@@ -3,11 +3,11 @@ import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
@@ -53,6 +53,9 @@ if (argv[0] === "exec" && argv[1] === "--help") {
   console.log("  --ephemeral  discard session state");
   console.log("  --sandbox <MODE>");
   console.log("  -            read the task from stdin");
+  console.log("  --ignore-user-config");
+  console.log("  --ignore-rules");
+  console.log("  --output-schema <FILE>");
   process.exit(0);
 }
 const record = (name, value) => fs.writeFileSync(path.join(__dirname, name), value);
@@ -60,6 +63,15 @@ record("argv.json", JSON.stringify(argv));
 record("cwd.txt", process.cwd());
 record("env.json", JSON.stringify(process.env));
 fs.appendFileSync(path.join(__dirname, "runs"), "1");
+if (process.env.CODEX_HOME !== undefined) {
+  // The managed-home credential link, as the worker itself resolves it.
+  try { record("authlink.txt", fs.readlinkSync(path.join(process.env.CODEX_HOME, "auth.json"))); } catch { /* no link */ }
+}
+const schemaFlag = argv.indexOf("--output-schema");
+if (schemaFlag !== -1) {
+  record("schema-arg.txt", argv[schemaFlag + 1]);
+  record("schema-bytes.json", JSON.stringify(fs.readFileSync(argv[schemaFlag + 1], "utf8")));
+}
 if (process.env.TEST_CODEX_MODE === "hang") {
   // A live worker: signal readiness, then keep the process alive until TERM.
   record("ready", "1");
@@ -104,6 +116,53 @@ http.request = function (...args) {
   request.on("response", () => { process.env.ROOT_SNAPSHOT_TAG = "after"; });
   return request;
 };
+require("node:module").syncBuiltinESMExports();
+`;
+
+// Review-fix fault injection: a --require preload that patches one builtin
+// for the CLI child, selected by TURNHELM_TEST_FAULT. The patch is scoped to
+// the exact production call so earlier legitimate calls (config reads, the
+// preflight `codex exec --help` probe) stay on the real function.
+const FAULT_PRELOAD = `
+const fault = process.env.TURNHELM_TEST_FAULT;
+if (fault === "symlink") {
+  const fs = require("node:fs");
+  fs.symlinkSync = () => { throw Object.assign(new Error("injected"), { code: "EPERM" }); };
+} else if (fault === "staging") {
+  const fs = require("node:fs");
+  const real = fs.writeFileSync;
+  fs.writeFileSync = (...args) => {
+    if (String(args[0]).endsWith("output-schema.json")) {
+      fs.writeFileSync = real;
+      throw Object.assign(new Error("injected"), { code: "ENOSPC" });
+    }
+    return real(...args);
+  };
+} else if (fault === "readsync") {
+  const fs = require("node:fs");
+  const real = fs.readSync;
+  // Scoped to the production 5-arg call (position === null): Node's own
+  // readFileSync loads modules with a 4-arg readSync and must stay real, or
+  // the fault fires during ESM load before the CLI runs.
+  fs.readSync = (fd, buffer, offset, length, position) => {
+    if (typeof fd === "number" && fd > 2 && position === null) {
+      fs.readSync = real;
+      throw Object.assign(new Error("injected"), { code: "EIO" });
+    }
+    return real(fd, buffer, offset, length, position);
+  };
+} else if (fault === "spawn") {
+  const cp = require("node:child_process");
+  const real = cp.spawn;
+  cp.spawn = (...args) => {
+    const argv = args[1] ?? [];
+    if (String(args[0]).endsWith("codex") && argv[0] === "exec" && !argv.includes("--help")) {
+      cp.spawn = real;
+      throw Object.assign(new Error("injected"), { code: "EACCES" });
+    }
+    return real(...args);
+  };
+}
 require("node:module").syncBuiltinESMExports();
 `;
 
@@ -169,6 +228,8 @@ async function fixture(t: TestContext, classifier: Classifier = {}, options: Fix
   const root = await mkdtemp(join(tmpdir(), "turnhelm-cli-root-"));
   const bin = await mkdtemp(join(tmpdir(), "turnhelm-cli-bin-"));
   const codexHome = await mkdtemp(join(tmpdir(), "turnhelm-cli-codexhome-"));
+  // WB-2: every default run carries a discoverable worker credential source.
+  await writeFile(join(codexHome, "auth.json"), '{"token":"fixture"}');
   const requests: Fixture["requests"] = [];
   const server = createServer((request, response) => {
     let body = "";
@@ -271,6 +332,8 @@ const workerRecords = async (f: Fixture): Promise<WorkerRecords> => {
     runs: runs === undefined ? 0 : runs.length
   };
 };
+
+const readWorkerFile = (f: Fixture, name: string): Promise<string> => readFile(join(f.bin, name), "utf8");
 
 const DOCTOR_IDS = [
   "root", "node", "codex", "git", "assets", "config", "backends", "credentials",
@@ -398,7 +461,7 @@ test("run routes once, executes one read-only worker, and emits one accurate rec
   assert.equal(f.requests[0].method, "POST");
   assert.equal((JSON.parse(f.requests[0].body) as { state: string }).state, TASK);
   const records = await workerRecords(f);
-  assert.deepEqual(records.argv, ["exec", "--ephemeral", "--json", "--sandbox", "read-only",
+  assert.deepEqual(records.argv, ["exec", "--ephemeral", "--json", "--ignore-user-config", "--ignore-rules", "--sandbox", "read-only",
     "--config", "agents.enabled=false", "--model", "gpt-6.1-sol", "--config", 'model_reasoning_effort="medium"', "-"]);
   assert.equal(records.cwd, realpathSync(f.root));
   assert.equal(records.task, TASK);
@@ -406,7 +469,10 @@ test("run routes once, executes one read-only worker, and emits one accurate rec
     assert.equal(key in records.env, false, key + " must be stripped from the worker");
   }
   assert.equal(records.env.TURNHELM_MANAGED_CHILD, "1");
-  assert.equal(records.env.CODEX_HOME, f.codexHome);
+  assert.match(records.env.CODEX_HOME, /turnhelm-worker-[^/]+$/,
+    "the worker runs under a fresh managed home");
+  assert.notEqual(records.env.CODEX_HOME, f.codexHome,
+    "the CLI process's own CODEX_HOME never reaches the worker");
   const receipt = parseReceipt(result.stderr);
   assert.equal(receipt.type, "turnhelm.receipt");
   assert.equal(receipt.root, realpathSync(f.root));
@@ -428,6 +494,12 @@ test("run routes once, executes one read-only worker, and emits one accurate rec
   assert.equal(typeof worker.durationMs, "number");
   assert.deepEqual(worker.usage, { input_tokens: 11, output_tokens: 7 });
   assert.deepEqual(worker.payload, { mode: "unstructured" });
+  // WB-4: the executed-worker receipt key set, with the managed-home
+  // attestation, pinned exactly — modulo the voluntary-exit/TERM race that
+  // conditionally adds "signal" (the code pin above allows both outcomes).
+  assert.deepEqual(Object.keys(receipt.worker as object).sort().filter(key => key !== "signal"),
+    ["code", "codexHomeManaged", "durationMs",
+      "lastEventAgeMs", "ownedShutdown", "payload", "progressEvents", "status", "usage"]);
   assert.equal(receipt.classifierUsage, "unreported");
   assert.equal(receipt.wholeRunUsageScope, "unverified");
   assert.equal(JSON.stringify(receipt).includes(TASK), false, "the receipt never carries task text");
@@ -443,12 +515,225 @@ test("a guard-passing Laya usage reaches the receipt as classifierUsage", async 
   assert.deepEqual(receipt.classifierUsage, { input_tokens: 412, state_tokens: 620 });
 });
 
+test("an uncredentialed run is refused before classification", async t => {
+  const f = await fixture(t, { choice: "balanced" });
+  const emptyHome = await mkdtemp(join(tmpdir(), "turnhelm-cli-empty-home-"));
+  t.after(() => rm(emptyHome, { recursive: true, force: true }));
+  const refusal = await f.run(["run", TASK], { input: "", env: { CODEX_HOME: emptyHome } });
+  assert.equal(refusal.code, 1);
+  assert.equal(refusal.stderr, "turnhelm: no worker credential is discoverable; provide a CODEX_HOME auth.json or export OPENAI_API_KEY.\n");
+  assert.ok(!refusal.stderr.includes("turnhelm.receipt"), "no receipt is emitted");
+  assert.equal(f.requests.length, 0, "the classifier is never called");
+  await assert.rejects(readFile(join(f.root, ".turnhelm", "routes.jsonl")), { code: "ENOENT" },
+    "no journal line is appended");
+  // Either source alone unblocks the run: the fixture's auth file…
+  const byFile = await f.run(["run", TASK], { input: "" });
+  assert.equal(byFile.code, 0, byFile.stderr);
+  // …or an exported key against a credential-file-less home.
+  const byKey = await f.run(["run", TASK], { input: "", env: { CODEX_HOME: emptyHome, OPENAI_API_KEY: "TEST_OPENAI_SENTINEL" } });
+  assert.equal(byKey.code, 0, byKey.stderr);
+});
+
+test("run --output-schema stages validated bytes inside the managed home", async t => {
+  const f = await fixture(t, { choice: "balanced" });
+  const schema = JSON.stringify({ type: "object", properties: { selected: { type: "string" } }, marker: "validated" });
+  const schemaPath = join(f.root, "schema.json");
+  await writeFile(schemaPath, schema);
+  const result = await f.run(["run", "--output-schema", schemaPath, TASK], { input: "" });
+  assert.equal(result.code, 0, result.stderr);
+  const records = await workerRecords(f);
+  const flag = records.argv.indexOf("--output-schema");
+  assert.ok(flag !== -1, "the worker argv carries the schema flag");
+  assert.match(records.argv[flag + 1], /turnhelm-worker-[^/]+\/output-schema\.json$/,
+    "the argv points inside the managed home, never at the caller's path");
+  assert.equal(JSON.parse(await readWorkerFile(f, "schema-bytes.json")), schema,
+    "the staged file carries the validated bytes verbatim");
+  const eqForm = await f.run(["run", "--output-schema=" + schemaPath, TASK], { input: "" });
+  assert.equal(eqForm.code, 0, eqForm.stderr);
+  assert.equal(JSON.parse(await readWorkerFile(f, "schema-bytes.json")), schema,
+    "the = form stages the same bytes");
+  const duplicate = await f.run(["run", "--output-schema", schemaPath, "--output-schema", schemaPath, TASK], { input: "" });
+  assert.equal(duplicate.code, 2);
+  assert.ok(duplicate.stderr.startsWith("turnhelm: usage:"), "duplicates are usage errors");
+});
+
+test("an invalid output schema is a fixed usage error before any classification", async t => {
+  const f = await fixture(t, { choice: "balanced" });
+  const real = join(f.root, "real-schema.json");
+  await writeFile(real, '{"type":"object"}');
+  const link = join(f.root, "schema-link.json");
+  await symlink(real, link);
+  const notUtf8 = join(f.root, "bad-utf8.json");
+  await writeFile(notUtf8, Buffer.concat([Buffer.from('{"a":"'), Buffer.from([0xff]), Buffer.from('"}')]));
+  const oversized = join(f.root, "big.json");
+  await writeFile(oversized, '{"pad":"' + "a".repeat(64 * 1024 - 9) + '"}');
+  const cases: { name: string; path: string; line: string }[] = [
+    { name: "missing file", path: join(f.root, "absent.json"),
+      line: "turnhelm: the output schema path is not a readable regular file." },
+    { name: "symlink", path: link,
+      line: "turnhelm: the output schema path is not a readable regular file." },
+    { name: "oversized", path: oversized,
+      line: "turnhelm: the output schema exceeds the 65536-byte limit." },
+    { name: "invalid UTF-8", path: notUtf8,
+      line: "turnhelm: the output schema is not valid UTF-8." },
+    { name: "bare true", path: join(f.root, "true.json"), line: "turnhelm: the output schema must be a single JSON object." }
+  ];
+  await writeFile(join(f.root, "true.json"), "true");
+  await writeFile(join(f.root, "array.json"), "[1,2]");
+  await writeFile(join(f.root, "number.json"), "42");
+  await writeFile(join(f.root, "broken.json"), "{oops");
+  cases.push(
+    { name: "array", path: join(f.root, "array.json"), line: "turnhelm: the output schema must be a single JSON object." },
+    { name: "number", path: join(f.root, "number.json"), line: "turnhelm: the output schema must be a single JSON object." },
+    { name: "invalid JSON", path: join(f.root, "broken.json"), line: "turnhelm: the output schema must be a single JSON object." });
+  for (const invalid of cases) {
+    const result = await f.run(["run", "--output-schema", invalid.path, TASK], { input: "" });
+    assert.equal(result.code, 2, invalid.name + " must be a usage error");
+    assert.equal(result.stderr, invalid.line + "\n", invalid.name + " prints exactly the fixed diagnostic");
+    assert.ok(!result.stderr.includes("turnhelm.receipt"), invalid.name + " emits no receipt");
+    assert.equal(f.requests.length, 0, invalid.name + " never reaches the classifier");
+    await assert.rejects(readFile(join(f.root, ".turnhelm", "routes.jsonl")), { code: "ENOENT" },
+      invalid.name + " appends no journal line");
+  }
+});
+
+for (const mode of ["mutate", "replace", "delete", "symlink-swap"] as const) {
+  test(`the staged schema bytes the worker reads survive caller-file ${mode}`, async t => {
+    const schema = JSON.stringify({ type: "object", properties: { selected: { type: "string" } }, marker: "validated" });
+    let schemaPath = "";
+    const f = await fixture(t, {
+      choice: "balanced",
+      // OC-1 TOCTOU: the tamper fires from the classifier's request hook —
+      // after the CLI validated the file, before the worker exists.
+      onRequest: async () => {
+        if (mode === "mutate") await writeFile(schemaPath, '{"tampered":true}');
+        else if (mode === "replace") { await rm(schemaPath); await writeFile(schemaPath, '{"replaced":true}'); }
+        else if (mode === "delete") await rm(schemaPath);
+        else { await rm(schemaPath); await symlink("/etc/hostname", schemaPath); }
+      }
+    });
+    schemaPath = join(f.root, "schema.json");
+    await writeFile(schemaPath, schema);
+    const result = await f.run(["run", "--output-schema", schemaPath, TASK], { input: "" });
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(JSON.parse(await readWorkerFile(f, "schema-bytes.json")), schema,
+      "the staged bytes remain exactly the validated ones");
+  });
+}
+
+// The review-fix regressions: each pins one boundary fault to its fail-closed
+// shape. Shared helper: write the fault preload and run with it armed.
+const faultEnv = async (f: Fixture, fault: string, extra: NodeJS.ProcessEnv = {}): Promise<NodeJS.ProcessEnv> => {
+  const preload = join(f.bin, "fault.cjs");
+  await writeFile(preload, FAULT_PRELOAD);
+  return { TURNHELM_TEST_FAULT: fault, NODE_OPTIONS: "--require " + preload, ...extra };
+};
+
+test("a credential-symlink setup fault fails the run closed", async t => {
+  const f = await fixture(t, { choice: "balanced" });
+  const result = await f.run(["run", TASK], { input: "", env: await faultEnv(f, "symlink") });
+  assert.equal(result.code, 1, result.stderr);
+  const receipt = parseReceipt(result.stderr);
+  assert.equal((receipt.worker as { status: string }).status, "failed");
+  assert.equal(await workerRecords(f).then(records => records.runs), 0, "no worker may launch without its credential link");
+  assert.equal(f.requests.length, 1, "classification already spent; only the worker is refused");
+});
+
+test("a schema-staging fault fails closed and leaves no managed home", async t => {
+  const f = await fixture(t, { choice: "balanced" });
+  const leakDir = await mkdtemp(join(tmpdir(), "turnhelm-cli-leak-"));
+  t.after(() => rm(leakDir, { recursive: true, force: true }));
+  const schemaPath = join(f.root, "schema.json");
+  await writeFile(schemaPath, '{"type":"object"}');
+  const result = await f.run(["run", "--output-schema", schemaPath, TASK],
+    { input: "", env: await faultEnv(f, "staging", { TMPDIR: leakDir }) });
+  assert.equal(result.code, 1, result.stderr);
+  assert.equal((parseReceipt(result.stderr).worker as { status: string }).status, "failed");
+  assert.equal(await workerRecords(f).then(records => records.runs), 0, "no worker launched");
+  assert.deepEqual(await readdir(leakDir), [], "the partial home is removed, never leaked");
+});
+
+test("a synchronous worker-spawn fault settles as one failed receipt with no home leaked", async t => {
+  const f = await fixture(t, { choice: "balanced" });
+  const leakDir = await mkdtemp(join(tmpdir(), "turnhelm-cli-leak-"));
+  t.after(() => rm(leakDir, { recursive: true, force: true }));
+  const result = await f.run(["run", TASK], { input: "", env: await faultEnv(f, "spawn", { TMPDIR: leakDir }) });
+  assert.equal(result.code, 1, result.stderr);
+  const receipt = parseReceipt(result.stderr);
+  assert.equal((receipt.worker as { status: string }).status, "failed");
+  assert.deepEqual(await readdir(leakDir), [], "the managed home is destroyed on the spawn-fault path");
+});
+
+test("a schema read fault is the fixed usage error, not an internal failure", async t => {
+  const f = await fixture(t, { choice: "balanced" });
+  const schemaPath = join(f.root, "schema.json");
+  await writeFile(schemaPath, '{"type":"object"}');
+  const result = await f.run(["run", "--output-schema", schemaPath, TASK],
+    { input: "", env: await faultEnv(f, "readsync") });
+  assert.equal(result.code, 2, "a descriptor-level read fault keeps the usage-error contract");
+  assert.equal(result.stderr, "turnhelm: the output schema path is not a readable regular file.\n");
+  assert.equal(f.requests.length, 0);
+});
+
+test("a FIFO output schema path is a fixed usage error, never a hang", { timeout: 20_000 }, async t => {
+  const f = await fixture(t, { choice: "balanced" });
+  const fifo = join(f.root, "schema.fifo");
+  const maker = spawn("mkfifo", [fifo]);
+  await new Promise<void>((resolve, reject) => maker.on("close", code => code === 0 ? resolve() : reject(new Error("mkfifo exited " + code))));
+  const child = f.spawn(["run", "--output-schema", fifo, TASK], { input: "" });
+  const outcome = capture(child);
+  // Raw spawn leaves stdin open; readTask waits on it, not the FIFO. Close it
+  // so the watchdog observes only the schema-open behavior.
+  child.stdin?.end("");
+  // A blocking open would wedge the event loop past every signal handler;
+  // the watchdog turns that hang into a visible failure.
+  const watchdog = setTimeout(() => child.kill("SIGKILL"), 10_000);
+  const result = await outcome;
+  clearTimeout(watchdog);
+  assert.equal(result.code, 2, "a FIFO is rejected as a usage error instead of blocking the open");
+  assert.equal(result.stderr, "turnhelm: the output schema path is not a readable regular file.\n");
+  assert.equal(f.requests.length, 0);
+});
+
+test("a credential source that is not a regular file is refused", async t => {
+  const f = await fixture(t);
+  await rm(join(f.codexHome, "auth.json"));
+  await mkdir(join(f.codexHome, "auth.json"));
+  const result = await f.run(["run", TASK], { input: "" });
+  assert.equal(result.code, 1);
+  assert.equal(result.stderr, "turnhelm: no worker credential is discoverable; provide a CODEX_HOME auth.json or export OPENAI_API_KEY.\n");
+  assert.equal(f.requests.length, 0, "the classifier is never called");
+});
+
+test("a whitespace-only API key is not a credential", async t => {
+  const f = await fixture(t, { choice: "balanced" });
+  const emptyHome = await mkdtemp(join(tmpdir(), "turnhelm-cli-empty-home-"));
+  t.after(() => rm(emptyHome, { recursive: true, force: true }));
+  const result = await f.run(["run", TASK], { input: "", env: { CODEX_HOME: emptyHome, OPENAI_API_KEY: "   " } });
+  assert.equal(result.code, 1);
+  assert.equal(result.stderr, "turnhelm: no worker credential is discoverable; provide a CODEX_HOME auth.json or export OPENAI_API_KEY.\n");
+  assert.equal(f.requests.length, 0, "the classifier is never called");
+});
+
+test("a relative CODEX_HOME still links an absolute credential source", async t => {
+  const f = await fixture(t, { choice: "balanced" });
+  await mkdir(join(f.root, "codex-home"));
+  await writeFile(join(f.root, "codex-home", "auth.json"), '{"token":"fixture"}');
+  const result = await f.run(["run", TASK], { input: "", env: { CODEX_HOME: "codex-home" } });
+  assert.equal(result.code, 0, result.stderr);
+  const link = await readWorkerFile(f, "authlink.txt");
+  assert.ok(isAbsolute(link), "the credential symlink target is absolute, got " + JSON.stringify(link));
+  // The child's cwd is the physical path (macOS resolves /var symlinkage),
+  // so the expectation must resolve through it too.
+  assert.equal(link, resolve(realpathSync(f.root), "codex-home", "auth.json"));
+});
+
 test("run --write selects workspace-write", async t => {
   const f = await fixture(t);
   const result = await f.run(["run", "--write", TASK], { input: "" });
   assert.equal(result.code, 0);
   const records = await workerRecords(f);
-  assert.equal(records.argv[4], "workspace-write");
+  assert.ok(records.argv.includes("workspace-write"), "the write sandbox mode is selected");
 });
 
 test("max effort is selected by difficulty alone with no max flag", async t => {
@@ -456,7 +741,7 @@ test("max effort is selected by difficulty alone with no max flag", async t => {
   const result = await f.run(["run", TASK], { input: "" });
   assert.equal(result.code, 0);
   const records = await workerRecords(f);
-  assert.deepEqual(records.argv, ["exec", "--ephemeral", "--json", "--sandbox", "read-only",
+  assert.deepEqual(records.argv, ["exec", "--ephemeral", "--json", "--ignore-user-config", "--ignore-rules", "--sandbox", "read-only",
     "--config", "agents.enabled=false", "--model", "gpt-6-astra", "--config", 'model_reasoning_effort="max"', "-"]);
   const receipt = parseReceipt(result.stderr);
   assert.deepEqual(receipt.selection, { backend: "laya", profileId: "frontier_max", model: "gpt-6-astra", effort: "max" });
@@ -590,6 +875,7 @@ test("a worker terminal failure fails the run despite exit zero", async t => {
     lastEventAgeMs: (receipt.worker as { lastEventAgeMs?: number }).lastEventAgeMs,
     usage: "unreported",
     ownedShutdown: false,
+    codexHomeManaged: true,
     failureClass: "unknown"
   });
 });
@@ -683,7 +969,8 @@ test("a completed run without usage reports it explicitly unreported", async t =
     lastEventAgeMs: (receipt.worker as { lastEventAgeMs?: number }).lastEventAgeMs,
     usage: "unreported",
     payload: { mode: "unstructured" },
-    ownedShutdown: true
+    ownedShutdown: true,
+    codexHomeManaged: true
   });
   assert.ok(code === 0 || (code === 143 && signal === "SIGTERM"),
     "voluntary exit zero or the ladder's TERM, saw " + code + "/" + String(signal));
@@ -700,7 +987,7 @@ test("a completed run settles at the terminal event with an unchanged receipt sh
   const worker = receipt.worker as Record<string, unknown>;
   // The key set is pinned exactly: terminal-event settlement adds no field (TS-7).
   assert.deepEqual(Object.keys(worker).sort(),
-    ["code", "durationMs", "lastEventAgeMs", "ownedShutdown", "payload", "progressEvents", "signal", "status", "usage"]);
+    ["code", "codexHomeManaged", "durationMs", "lastEventAgeMs", "ownedShutdown", "payload", "progressEvents", "signal", "status", "usage"]);
   assert.equal(worker.status, "completed");
   assert.equal(worker.ownedShutdown, true, "the terminal event starts the owned ladder");
   assert.equal(worker.signal, "SIGTERM");
@@ -741,6 +1028,7 @@ for (const [name, expectedCode] of [["SIGINT", 130], ["SIGTERM", 143]] as const)
       usage: "unreported",
       // Cancellation runs the parent-owned ladder; the worker dies by our TERM.
       ownedShutdown: true,
+      codexHomeManaged: true,
       signal: "SIGTERM"
     });
     assert.equal((await workerRecords(f)).runs, 1);

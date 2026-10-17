@@ -86,7 +86,11 @@ least one credential source is discoverable — the auth file at the expected so
 writes through the symlink to the real file; concurrent runs share that file exactly as they share `CODEX_HOME`
 today, so refresh and concurrency semantics are inherited, not newly introduced. Write-through and
 no-second-copy behavior are pinned offline (§4 item 3); live refresh behavior is verified only in a future
-authorized campaign, and the spec claims no more than that.
+authorized campaign, and the spec claims no more than that. *Live observation (2026-10-17):* one real run
+through a symlinked copied credential (evidence root `boundary-live-20261017-100326`) completed with the
+source file byte-identical afterward — no refresh cycle occurred in that run, so write-through remains
+offline-pinned; the mid-run home listing (no-second-copy on a real binary) was not captured and stays
+unobserved, not claimed.
 
 *Lifecycle:* creation failure fails closed with the existing `spawn` failure class — there is no fallback to the
 inherited home. The directory is removed recursively **after settlement discharge** (owned shutdown complete,
@@ -174,7 +178,8 @@ Offline only; zero paid calls (the single §6 review call aside). New/adjusted t
 1. `buildWorkerArgs` unit: exact argv vector includes `--ignore-user-config`, `--ignore-rules`, in position;
    with a schema, `--output-schema` points inside the managed home.
 2. Worker-environment tests: `CODEX_HOME` points at a fresh per-run directory created under `tmpdir()`;
-   the directory contains only the staged schema and (when the source exists) the `auth.json` symlink; an
+   the directory is initialized with only the staged schema and (when the source exists) the `auth.json`
+   symlink (the native runtime may add its own scratch); an
    inherited `CODEX_HOME` value is never forwarded as the worker's `CODEX_HOME`; the directory is gone after
    completed, failed, cancelled, spawn-error, and mid-setup-failure settlements — and only after owned-shutdown
    discharge, never before `closed`.
@@ -227,3 +232,70 @@ Verdict **PROBLEMS** → adjudicated against source; the spec above is the revis
 | 5 | P2 | OC-2 wording wrong: valid JSON of wrong shape classifies `strict`, not `unstructured`; envelope validation ≠ schema validity | Accepted — OC-1/OC-2 rewritten: mode is framing-only, no local validator, §4 item 8 pins the strict-on-wrong-shape regression |
 | 6 | P2 | Cleanup underspecified: races with native termination, symlink-following removal, crash remnants beyond a symlink | Accepted — WB-2 lifecycle: removal after settlement discharge on all paths, `rmSync`-unlinks-symlink pinned, remnant claim corrected to "whatever the native runtime wrote" |
 | 7 | P2 | Argv/empty-dir/help-token tests prove plumbing, not isolation; the ≈1 ms claim is unmeasured | Partially accepted — §4 closing note states exactly what the offline tests do not establish, adds the conditional no-inference introspection check, defers behavioral verification to the next authorized campaign; latency number removed. The reviewer's own answer (d1–d3 "unknown here") confirms full behavioral verification is not achievable in this work |
+
+## 7. Source→mechanism matrix — codex-cli 0.162.1, `--help` text and offline probes only
+
+No inference call was made. Every mechanism below is read off `codex exec --help` / `codex --help`
+(codex-cli 0.162.1) or verified by the offline `codex debug prompt-input` probe noted in row 4;
+nothing is inferred from undocumented behavior.
+
+| # | Instruction/policy source (0.162.1) | Closed by | Residual |
+| --- | --- | --- | --- |
+| 1 | `$CODEX_HOME/config.toml` — user config (model defaults, sandbox/approval policy, `shell_environment_policy`, `mcp_servers`, hooks, features) | Both: `--ignore-user-config` ("Do not load `$CODEX_HOME/config.toml`; auth still uses `CODEX_HOME`") and the empty managed home (no file exists) | none |
+| 2 | `$CODEX_HOME/<name>.config.toml` profile layering (`-p/--profile`) | argv shape: the worker passes no `-p`; a profile layers "on top of the base user config", which is absent | none |
+| 3 | User and project execpolicy `.rules` files | `--ignore-rules` ("Do not load user or project execpolicy `.rules` files") — both scopes named by the flag | none |
+| 4 | Global instructions `AGENTS.md` rooted at `CODEX_HOME` | Empty managed home (no such file). Verified offline both ways with `codex debug prompt-input`: a `CODEX_HOME/AGENTS.md` marker and a cwd `AGENTS.md` marker each render into the model-visible input list | none |
+| 5 | Project `AGENTS.md` in the cwd consumer tree | Not closed — deliberately: the project's instruction channel is the "task plus project docs" the boundary exists to keep | intended channel, not a residual |
+| 6 | Hooks (config-declared) and persisted hook trust (`CODEX_HOME`-rooted; `--dangerously-bypass-hook-trust` exists to bypass it) | Empty managed home: no config declares hooks, and no persisted trust exists to bypass. turnhelm never passes the bypass flag | none |
+| 7 | MCP servers (`[mcp_servers]` in config) | Empty managed home (no config file). `codex mcp` help documents no other source | none |
+| 8 | Session persistence (rollouts; `resume`/`fork`) | `--ephemeral` ("Run without persisting session files to disk") and argv shape (no resume/fork) | none |
+| 9 | Credentials: `$CODEX_HOME/auth.json` / `OPENAI_API_KEY` | Deliberately carried — the symlink (or inherited key) is the managed home's only content besides the staged schema; not an instruction source | inherited semantics (refresh write-through, shared-file concurrency) per §3 WB-2 |
+| 10 | HOME-rooted channels outside `CODEX_HOME`: `$HOME/.agents/skills` discovery, managed/admin hook layers, other shells' startup files, project `AGENTS.override.md` | **Not closed** — the enforced set does not reach them (astra review P1-2) | documented residual; no isolation claim is made over them |
+| 11 | Classifier/hosted keys and shell startup (`LAYA_API_KEY`, `TYPESAFE_API_KEY`, `TURNHELM_ALLOW_HOSTED_JEV`, `BASH_ENV`/`ENV`, `ZDOTDIR` redirect) | turnhelm's own env discipline (pre-existing, outside this spec's additions) | per its own contract |
+| 12 | The codex binary's built-in core instructions | Not configurable — out of scope; isolation governs ambient sources, not the tool itself | n/a |
+
+**§4 closing note, resolved (2026-10-16):** a no-inference introspection command *exists* —
+`codex debug prompt-input` ("Render the model-visible prompt input list as JSON") — but it rejects
+the isolation flags (`error: unexpected argument '--ignore-user-config' found`; `--ignore-rules`
+likewise), so it cannot render the enforced set of a worker argv and no behavioral check for the
+enforced set could be added. Its one offline use here is row 4's confirmation that `AGENTS.md` is a
+live model-visible source. Behavioral verification of enforced set and residuals rides the next
+authorized live campaign, as §4 already states.
+
+**§7 live verification (2026-10-17, codex-cli 0.162.1, evidence root `boundary-live-20261017-100326`):**
+two marker-probe runs through the real CLI and a real worker (both receipts `codexHomeManaged: true`,
+Laya/direct routing). Run 1 — a hostile parent `CODEX_HOME` carrying a poisoned `config.toml` (model pin)
+and an `AGENTS.md` whose mandatory instruction prefixes every reply with marker
+`TURNHELM-BOUNDARY-PROBE-hostile-7c4a91f2`: the marker appears nowhere in the worker's message or
+diagnostics and the instruction was not obeyed — row 4's channel held behaviorally, and a leaked
+`AGENTS.md` channel would have surfaced exactly as this marker. Rows 1–2 and 6–7 were *not* behaviorally
+probed (no profile/hooks/MCP content was planted, and turnhelm itself pins `--model` and
+`--model_reasoning_effort` in the worker argv, so a config model pin is structurally unobservable in the
+output); they share row 4's empty-managed-home mechanism and stand at mechanism level only, not as
+behavioral proof. Run 2 — the same probe with a project `AGENTS.md` marker
+(`…project-5e8b23d7`, row 5's intended channel): the marker appears in the worker's message — the probe is
+not deaf, so run 1's absence is suppression, not blindness. Both runs settled in the normal completed shape
+(`code: 143` + `ownedShutdown: true` + SIGTERM stop ladder after the terminal event).
+
+## 8. Implementation-review record — 2026-10-16 astra re-check of the branch
+
+Second astra review, of the implementation branch `feat/worker-boundary-output-contract` at `2c90b83`
+(Laya/direct selected `gpt-6-astra` / `high`, profile `deep`, routing 854 ms; worker completed in
+493.7 s, `codexHomeManaged: true`; root `/Users/zhangxiao/.local/state/turnhelm/astra-accept-20261016b`).
+Verdict **PROBLEMS** — 8 findings, all adjudicated Important-or-above by effect and fixed in one
+TDD pass (each fix verified by a failing test first, then the full suite):
+
+| # | Pri | Finding (condensed) | Disposition |
+| --- | --- | --- | --- |
+| 1 | P1 | Symlink setup failure did not fail closed (catch conflated missing credential with link-creation fault) | Fixed — setup faults destroy the partial home and refuse the run; `a credential-symlink setup fault fails the run closed` RED→GREEN |
+| 2 | P2 | Partial homes leaked on staging fault and synchronous spawn throw | Fixed — `createWorkerHome` owns cleanup on setup faults, spawn faults settle as one failed receipt; staging/spawn leak tests RED→GREEN |
+| 3 | P2 | FIFO schema path could hang the CLI before `fstat` | Fixed — `O_NONBLOCK` joins `O_NOFOLLOW` at the open; FIFO regression pinned (its watchdog now guards the fixed contract, not the hang) |
+| 4 | P2 | Relative `CODEX_HOME` produced a dangling credential link | Fixed — `authSourcePath` resolves to an absolute caller-frame path; relative-home test pins the absolute target |
+| 5 | P2 | The four TOCTOU regressions observed bytes before tampering (vacuous) | Fixed — tamper moved into the classifier's `onRequest` hook, between validation and spawn; green-on-arrival proven by mutation: a re-read-at-spawn regression fails all four |
+| 6 | P2 | Credential refusal admitted a directory named `auth.json` and whitespace-only keys | Fixed — `statSync` regular-file check and `trim()` on the env key; both refusal tests RED→GREEN |
+| 7 | P2 | `fstat`/`read` faults escaped the fixed usage-error contract (exit 1, not 2) | Fixed — descriptor-level faults keep the fixed wording with the descriptor closed in a `finally`; read-fault test RED→GREEN |
+| 8 | P3 | Docs made categorical boundary claims their own qualifications contradicted; "contains only" omitted native scratch | Fixed — README/SKILL/spec now name the suppressed sources, say the home is *initialized with* the link/schema, and keep the residuals explicit |
+
+Declined-to-judge (reviewer): full suite/build runs and real isolation/credential-refresh/performance
+behavior — the former is covered by this repository's offline suite; the latter remain the deferred
+live-campaign items of §4's closing note, unchanged by this review.

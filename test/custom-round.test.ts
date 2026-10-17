@@ -479,7 +479,7 @@ test("a roster contract that cannot load is refused at prepare, not frozen", asy
 const fakeCodexBody = (options: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string; rebuildRoot?: boolean }> = {}): string => `
 const argv = process.argv.slice(2);
 if (argv[0] === "--version") { process.stdout.write("codex-cli 0.160.2\\n"); process.exit(0); }
-if (argv[0] === "exec" && argv[1] === "--help") { process.stdout.write("--json\\n--ephemeral\\n--sandbox <MODE>\\n-\\n"); process.exit(0); }
+if (argv[0] === "exec" && argv[1] === "--help") { process.stdout.write("--json\\n--ephemeral\\n--sandbox <MODE>\\n-\\n--ignore-user-config\\n--ignore-rules\\n--output-schema <FILE>\\n"); process.exit(0); }
 const fs = require("node:fs");
 const path = require("node:path");
 fs.writeFileSync(path.join(__dirname, "worker-env.json"), JSON.stringify({
@@ -608,6 +608,10 @@ const scratchExecuteRound = async (
   const port = (server.address() as AddressInfo).port;
   const bin = join(base, "bin");
   await mkdir(bin);
+  // WB-2: rounds run through the real CLI, which refuses without a worker
+  // credential source; stage one beside the fake codex.
+  await mkdir(join(base, "codex-home"));
+  await writeFile(join(base, "codex-home", "auth.json"), '{"token":"fixture"}');
   const invocations = join(bin, "invocations");
   const gitEnv = join(base, "git-env.txt");
   const workerEnv = join(bin, "worker-env.json");

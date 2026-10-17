@@ -2,11 +2,11 @@ import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { PROFILE_IDS, type ProfileId, type ProjectConfig } from "../src/config.js";
@@ -89,6 +89,9 @@ type WorkerScenario = {
   trackKills?: boolean;
   settlementGuardMs?: number;
   outerMaxBufferBytes?: number;
+  auth?: boolean;
+  schemaBytes?: string;
+  poisonTmpdir?: boolean;
 };
 
 type Recorded = {
@@ -122,6 +125,7 @@ type Recorded = {
   postSettleKills?: number;
   progressEvents?: number;
   lastEventAgeMs?: number;
+  codexHomeManaged?: boolean;
 };
 
 async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ recorded: Recorded; stdout: string; stderr: string; directory: string }> {
@@ -132,6 +136,15 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
   }
   const root = join(directory, "root");
   await mkdir(root, { recursive: true });
+  // The managed home must land in an owned sandbox (os.tmpdir() re-reads TMPDIR
+  // per call), so lifecycle assertions scope exactly this run's homes; a
+  // poisoned nonexistent TMPDIR is the fail-closed mkdtemp seam.
+  const tmpSandbox = join(directory, "tmp");
+  await mkdir(tmpSandbox, { recursive: true });
+  if (scenario.auth) {
+    await mkdir(join(directory, "codex-home"), { recursive: true });
+    await writeFile(join(directory, "codex-home", "auth.json"), '{"token":"fixture"}');
+  }
   const moduleUrl = new URL("../src/codex.js", import.meta.url).href;
   const resultFile = join(directory, "result.json");
   const blocker = scenario.output !== undefined && scenario.output !== "stdout";
@@ -342,6 +355,7 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
         executable: "codex",
         root: ${JSON.stringify(root)},
         write: ${scenario.write ?? false},
+        ${scenario.schemaBytes !== undefined ? `schemaBytes: Buffer.from(${JSON.stringify(scenario.schemaBytes)}),` : ""}
         env: process.env,
         signal: controller.signal,
         output,
@@ -402,6 +416,7 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
       ...(scenario.parentEnv ?? {}),
       PATH: directory,
       CODEX_HOME: join(directory, "codex-home"),
+      TMPDIR: scenario.poisonTmpdir === true ? join(directory, "tmp-poisoned") : tmpSandbox,
       LAYA_API_KEY: "TEST_LAYA_SENTINEL",
       TYPESAFE_API_KEY: "TEST_JEV_SENTINEL",
       TURNHELM_ALLOW_HOSTED_JEV: "1",
@@ -447,17 +462,25 @@ const waitForExit = async (pid: number): Promise<void> => {
 };
 
 for (const profileId of PROFILE_IDS) {
-  test(`buildWorkerArgs pins ${profileId} model and effort exactly for both sandboxes`, () => {
+  test(`buildWorkerArgs pins ${profileId} model, effort, and isolation flags exactly`, () => {
     const decisionValue = decision(profileId);
     assert.deepEqual(buildWorkerArgs(decisionValue, false), [
-      "exec", "--ephemeral", "--json", "--sandbox", "read-only",
+      "exec", "--ephemeral", "--json", "--ignore-user-config", "--ignore-rules", "--sandbox", "read-only",
       "--config", "agents.enabled=false", "--model", decisionValue.profile.model,
       "--config", `model_reasoning_effort=${JSON.stringify(decisionValue.profile.effort)}`, "-"
     ]);
     assert.deepEqual(buildWorkerArgs(decisionValue, true), [
-      "exec", "--ephemeral", "--json", "--sandbox", "workspace-write",
+      "exec", "--ephemeral", "--json", "--ignore-user-config", "--ignore-rules", "--sandbox", "workspace-write",
       "--config", "agents.enabled=false", "--model", decisionValue.profile.model,
       "--config", `model_reasoning_effort=${JSON.stringify(decisionValue.profile.effort)}`, "-"
+    ]);
+    // WB-1/OC-1: the staged schema path is passed through only on explicit
+    // supply, pointing at the managed home — never the caller's own path.
+    assert.deepEqual(buildWorkerArgs(decisionValue, true, "/managed/output-schema.json"), [
+      "exec", "--ephemeral", "--json", "--ignore-user-config", "--ignore-rules", "--sandbox", "workspace-write",
+      "--config", "agents.enabled=false", "--model", decisionValue.profile.model,
+      "--config", `model_reasoning_effort=${JSON.stringify(decisionValue.profile.effort)}`,
+      "--output-schema", "/managed/output-schema.json", "-"
     ]);
   });
 }
@@ -496,7 +519,7 @@ test("worker children do not inherit coverage instrumentation across the boundar
   try {
     // Negative: across the boundary the child observes nothing (not even "").
     assert.equal(
-      await run(workerEnvironment({ PATH: process.env.PATH ?? "", NODE_V8_COVERAGE: sentinel }, "/consumer/root")),
+      await run(workerEnvironment({ PATH: process.env.PATH ?? "", NODE_V8_COVERAGE: sentinel }, "/consumer/root", "/managed/home")),
       "absent");
     // Positive controls: an explicit own property still forwards; and an env
     // lacking the key — the measured harness spawn shape (CG-AC-02) — still
@@ -511,12 +534,13 @@ test("worker children do not inherit coverage instrumentation across the boundar
 });
 
 test("worker environment additionally marks the managed child", () => {
-  const env = workerEnvironment({ TYPESAFE_API_KEY: "TEST_JEV_SENTINEL", CODEX_HOME: "/tmp/codex" }, "/consumer/root");
+  const env = workerEnvironment({ TYPESAFE_API_KEY: "TEST_JEV_SENTINEL", CODEX_HOME: "/tmp/codex" }, "/consumer/root", "/managed/home");
   assert.equal(env.TURNHELM_MANAGED_CHILD, "1");
   assert.equal(env.ZDOTDIR, join("/consumer/root", ".turnhelm"),
     "the managed child's zsh lookup redirects to the turnhelm-owned root");
   assert.equal(env.TYPESAFE_API_KEY, undefined);
-  assert.equal(env.CODEX_HOME, "/tmp/codex");
+  assert.equal(env.CODEX_HOME, "/managed/home",
+    "the managed home overrides any inherited CODEX_HOME value");
 });
 
 test("fake worker records only safe environment evidence", { timeout: 30_000 }, async t => {
@@ -528,16 +552,17 @@ finish(() => emit({ type: "turn.completed" }));
   });
   assert.equal(recorded.status, "completed");
   assert.equal(JSON.parse(await fakeFile(directory, "parent-canary-present.json")), false);
-  assert.deepEqual(JSON.parse(await fakeFile(directory, "env.json")), {
-    PATH: directory,
-    CODEX_HOME: join(directory, "codex-home"),
-    ZDOTDIR: join(directory, "root", ".turnhelm"),
-    TURNHELM_MANAGED_CHILD: "1",
-    LAYA_API_KEY: false,
-    TYPESAFE_API_KEY: false,
-    TURNHELM_ALLOW_HOSTED_JEV: false,
-    TURNHELM_CONFIG: false
-  });
+  const observedEnv = JSON.parse(await fakeFile(directory, "env.json")) as Record<string, string | boolean>;
+  assert.equal(observedEnv.PATH, directory);
+  assert.equal(observedEnv.ZDOTDIR, join(directory, "root", ".turnhelm"));
+  assert.equal(observedEnv.TURNHELM_MANAGED_CHILD, "1");
+  assert.equal(observedEnv.LAYA_API_KEY, false);
+  assert.equal(observedEnv.TYPESAFE_API_KEY, false);
+  assert.equal(observedEnv.TURNHELM_ALLOW_HOSTED_JEV, false);
+  assert.equal(observedEnv.TURNHELM_CONFIG, false);
+  assert.equal(dirname(String(observedEnv.CODEX_HOME)), join(directory, "tmp"),
+    "CODEX_HOME is a fresh managed home under tmpdir(), never the inherited value");
+  assert.match(basename(String(observedEnv.CODEX_HOME)), /^turnhelm-worker-/);
 });
 
 test("worker descendant zsh never sources host startup files", { timeout: 30_000 }, async t => {
@@ -630,6 +655,7 @@ finish(() => {
     diagFinalLength: 0,
     tailWrites: 0,
     ownedShutdown: true,
+    codexHomeManaged: true,
     payload: { mode: "unstructured" }
   });
   assert.ok(code === 0 || (code === 143 && signal === "SIGTERM"),
@@ -644,10 +670,156 @@ finish(() => {
   assert.equal(env.TYPESAFE_API_KEY, false);
   assert.equal(env.TURNHELM_ALLOW_HOSTED_JEV, false);
   assert.equal(env.TURNHELM_CONFIG, false);
-  assert.equal(env.CODEX_HOME, join(directory, "codex-home"));
+  assert.equal(dirname(String(env.CODEX_HOME)), join(directory, "tmp"),
+    "the worker env carries the managed home, not the inherited one");
   assert.equal(env.PATH, directory);
   assert.ok(stdout.includes("worker result\n"));
   assert.equal(stderr, "");
+});
+
+test("worker executes under a fresh managed CODEX_HOME holding only staged contents", { timeout: 30_000 }, async t => {
+  const schema = JSON.stringify({ type: "object", properties: { selected: { type: "string" } } });
+  const { recorded, directory } = await runWorker(t, {
+    auth: true,
+    schemaBytes: schema,
+    script: `
+finish(() => {
+  fs.writeFileSync(path.join(here, "home-capture.json"), JSON.stringify({
+    home: process.env.CODEX_HOME,
+    listing: fs.readdirSync(process.env.CODEX_HOME).sort(),
+    authTarget: (() => { try { return fs.readlinkSync(path.join(process.env.CODEX_HOME, "auth.json")); } catch { return null; } })(),
+    schemaBytes: fs.readFileSync(path.join(process.env.CODEX_HOME, "output-schema.json"), "utf8")
+  }));
+  emit({ type: "turn.completed" });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(recorded.codexHomeManaged, true);
+  const capture = JSON.parse(await fakeFile(directory, "home-capture.json")) as { home: string; listing: string[]; authTarget: string | null; schemaBytes: string };
+  assert.equal(dirname(capture.home), join(directory, "tmp"), "the managed home is a fresh directory under tmpdir()");
+  assert.match(basename(capture.home), /^turnhelm-worker-/, "the home is a private mkdtemp directory");
+  assert.notEqual(capture.home, join(directory, "codex-home"), "the inherited CODEX_HOME value never reaches the worker");
+  assert.deepEqual(capture.listing, ["auth.json", "output-schema.json"]);
+  assert.equal(capture.authTarget, join(directory, "codex-home", "auth.json"),
+    "the credential is a symlink to the parent-derived source");
+  assert.equal(capture.schemaBytes, schema, "the staged schema carries the validated bytes verbatim");
+});
+
+test("managed CODEX_HOME stays empty without a credential source or staged schema", { timeout: 30_000 }, async t => {
+  const { recorded, directory } = await runWorker(t, {
+    script: `
+finish(() => {
+  fs.writeFileSync(path.join(here, "home-capture.json"), JSON.stringify(fs.readdirSync(process.env.CODEX_HOME).sort()));
+  emit({ type: "turn.completed" });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  const listing = JSON.parse(await fakeFile(directory, "home-capture.json")) as string[];
+  assert.deepEqual(listing, [], "no credential source and no schema stage nothing into the home");
+});
+
+test("the managed CODEX_HOME is destroyed after failed, cancelled, and spawn-error settlements", { timeout: 60_000 }, async t => {
+  const assertHomeRemoved = async (scenario: WorkerScenario): Promise<Recorded> => {
+    const { recorded, directory } = await runWorker(t, scenario);
+    if (scenario.script !== undefined) {
+      const env = JSON.parse(await fakeFile(directory, "env.json")) as { CODEX_HOME?: string };
+      assert.equal(dirname(String(env.CODEX_HOME)), join(directory, "tmp"),
+        "the run must actually have used a managed home before its removal can mean anything");
+    } else {
+      assert.equal(recorded.codexHomeManaged, true, "the spawn path still entered the managed home");
+    }
+    assert.deepEqual(await readdir(join(directory, "tmp")), [],
+      "no managed home survives settlement: " + String(recorded.status));
+    return recorded;
+  };
+  const failed = await assertHomeRemoved({
+    // The leader exits on its own within the failure grace; settlement then
+    // lands at close, exactly like the turn.failed regressions above.
+    script: `
+finish(() => {
+  emit({ type: "turn.failed", message: "upstream overloaded" });
+  setTimeout(() => process.exit(0), 200);
+});
+`
+  });
+  assert.equal(failed.status, "failed");
+  const cancelled = await assertHomeRemoved({
+    gate: "abort-ready",
+    script: `
+finish(() => {
+  emit({ type: "turn.failed", message: "upstream overloaded" });
+  ready();
+  setInterval(() => {}, 500);
+});
+`
+  });
+  assert.equal(cancelled.status, "cancelled");
+  const spawnError = await assertHomeRemoved({});
+  assert.equal(spawnError.status, "failed");
+  assert.equal(spawnError.error, "spawn");
+});
+
+test("managed home removal waits for owned-shutdown discharge, not settlement start", { timeout: 30_000 }, async t => {
+  const { recorded, directory } = await runWorker(t, {
+    script: `
+process.on("SIGTERM", function () {});
+finish(() => {
+  emit({ type: "turn.completed" });
+  setInterval(function () {
+    if (!fs.existsSync(process.env.CODEX_HOME)) {
+      fs.writeFileSync(path.join(here, "home-gone-while-alive.json"), "1");
+      process.exit(0);
+    }
+  }, 20);
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(recorded.ownedShutdown, true, "the stubborn worker is taken by the ladder");
+  const env = JSON.parse(await fakeFile(directory, "env.json")) as { CODEX_HOME?: string };
+  assert.equal(dirname(String(env.CODEX_HOME)), join(directory, "tmp"), "the run used a managed home");
+  // The worker stayed alive through TERM and many poll ticks; removal at
+  // decision time instead of post-discharge would have been observed here.
+  assert.equal(await readFile(join(directory, "home-gone-while-alive.json"), "utf8").catch(() => ""), "",
+    "the home must not vanish while the owned group is still alive");
+  assert.deepEqual(await readdir(join(directory, "tmp")), []);
+});
+
+test("worker home creation failure fails closed as the spawn class", { timeout: 30_000 }, async t => {
+  const { recorded, directory } = await runWorker(t, {
+    poisonTmpdir: true,
+    script: `finish(() => emit({ type: "turn.completed" }));`
+  });
+  assert.equal(recorded.status, "failed");
+  assert.equal(recorded.error, "spawn");
+  assert.equal(recorded.failureClass, "unknown");
+  assert.equal(recorded.ownedShutdown, false);
+  assert.equal(recorded.codexHomeManaged, undefined, "no home was ever established");
+  assert.equal(await readFile(join(directory, "runs"), "utf8").catch(() => ""), "",
+    "the worker never started, let alone ran under an inherited home");
+});
+
+test("credential symlink writes through and removal never touches the source", { timeout: 30_000 }, async t => {
+  const { recorded, directory } = await runWorker(t, {
+    auth: true,
+    script: `
+finish(() => {
+  fs.appendFileSync(path.join(process.env.CODEX_HOME, "auth.json"), "-refreshed");
+  emit({ type: "turn.completed" });
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  const env = JSON.parse(await fakeFile(directory, "env.json")) as { CODEX_HOME?: string };
+  assert.equal(dirname(String(env.CODEX_HOME)), join(directory, "tmp"),
+    "the append went through the managed home's symlink, not the inherited path");
+  // The write landed in the real parent-side credential file, and that file
+  // still reads back after the home's recursive removal: rmSync unlinks the
+  // symlink, never following it to the target.
+  assert.equal(await fakeFile(directory, join("codex-home", "auth.json")), '{"token":"fixture"}-refreshed');
+  assert.deepEqual(await readdir(join(directory, "tmp")), []);
 });
 
 test("stdout carries exactly the final agent message of a completed run", { timeout: 30_000 }, async t => {
@@ -2157,6 +2329,9 @@ test("an end-to-end hostile worker failure yields class-only attribution in the 
   const bin = join(directory, "bin");
   const root = join(directory, "root");
   await mkdir(bin, { recursive: true });
+  await mkdir(join(directory, "codex-home"), { recursive: true });
+  // WB-2: the real CLI refuses an uncredentialed run; this e2e stages one.
+  await writeFile(join(directory, "codex-home", "auth.json"), '{"token":"fixture"}');
   await mkdir(join(root, ".turnhelm"), { recursive: true });
   // One local classify call answers a fixed balanced choice; no real backend.
   const server = createServer((request, response) => {
@@ -2177,7 +2352,7 @@ test("an end-to-end hostile worker failure yields class-only attribution in the 
     `#!${process.execPath}`,
     "const argv = process.argv.slice(2);",
     'if (argv[0] === "--version") { console.log("codex-cli 0.160.2"); process.exit(0); }',
-    'if (argv[0] === "exec" && argv[1] === "--help") { console.log("--json\\n--ephemeral\\n--sandbox <MODE>\\n-"); process.exit(0); }',
+    'if (argv[0] === "exec" && argv[1] === "--help") { console.log("--json\\n--ephemeral\\n--sandbox <MODE>\\n-\\n--ignore-user-config\\n--ignore-rules\\n--output-schema <FILE>"); process.exit(0); }',
     "process.stdin.setEncoding(\"utf8\");",
     "process.stdin.on(\"data\", () => {});",
     "process.stdin.on(\"end\", () => {",
