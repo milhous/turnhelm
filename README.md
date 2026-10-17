@@ -333,7 +333,8 @@ than opened.
   most 64 events (first 8 and last 56 kept, with an `overflow` marker), and
   each event is also appended best-effort to `.turnhelm/lifecycle.jsonl` under
   the project root — the journal outlives a hard kill that prevents the
-  receipt. Journaling never fails or delays the run.
+  receipt. A journaling failure never fails the run; fire-and-forget appends
+  may briefly hold the event loop at exit.
 - **Completion is not verification.** A `completed` worker (exit 0) proves the
   child finished its turn — nothing more. Whether the task was actually done
   is judged by consumer-side gates: the output schema above, oracle and
@@ -710,5 +711,6 @@ contract and receipt, including rejection and fail-closed paths.
 Both diagrams are pinned at `733753e`, whose snapshot includes the
 structured payload emission contract (`src/payload.ts` modes: strict,
 extracted, conflict, unstructured) on top of the earlier
-final-message-only stdout contract; superseded `.archify/` generations
+final-message-only stdout contract, but predates the `--output-schema`
+and `--lifecycle` run flags; superseded `.archify/` generations
 live in git history.
