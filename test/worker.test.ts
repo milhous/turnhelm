@@ -565,6 +565,75 @@ finish(() => emit({ type: "turn.completed" }));
   assert.match(basename(String(observedEnv.CODEX_HOME)), /^turnhelm-worker-/);
 });
 
+test("a surviving descendant keeps the stripped key set and managed marker after leader exit", { timeout: 30_000 }, async t => {
+  // AF-2: an owned home (with its own startup file) means nothing host is
+  // read; the sentinel descendant is node, so the .zshenv is ownership
+  // hygiene, not a leak probe. The descendant outlives the worker and pins
+  // what the process chain carries across the leader's death.
+  const home = await mkdtemp(join(tmpdir(), "turnhelm-sentinel-home-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  await writeFile(join(home, ".zshenv"), "export TURNHELM_TEST_SENTINEL_MARKER=leaked\n");
+  const { recorded, directory } = await runWorker(t, {
+    parentEnv: { HOME: home },
+    script: `
+const KEYS = ["LAYA_API_KEY", "TYPESAFE_API_KEY", "TURNHELM_ALLOW_HOSTED_JEV", "TURNHELM_CONFIG",
+  "BASH_ENV", "ENV", "TURNHELM_MANAGED_CHILD", "CODEX_HOME", "ZDOTDIR"];
+fs.writeFileSync(path.join(here, "leader.json"), JSON.stringify({ pid: process.pid, codexHome: process.env.CODEX_HOME }));
+const descendantSource = [
+  'const fs = require("node:fs");',
+  'const path = require("node:path");',
+  'const dir = ' + JSON.stringify(here) + ';',
+  'const KEYS = ' + JSON.stringify(KEYS) + ';',
+  'const sample = function () {',
+  '  return Object.fromEntries(KEYS.map(function (key) {',
+  '    return [key, Object.hasOwn(process.env, key) ? process.env[key] : null];',
+  '  }));',
+  '};',
+  'const before = sample();',
+  'fs.writeFileSync(path.join(dir, "descendant-ready.json"), JSON.stringify({ pid: process.pid }));',
+  '(function poll() {',
+  '  try { process.kill(process.ppid, 0); setTimeout(poll, 25); }',
+  '  catch (error) { fs.writeFileSync(path.join(dir, "descendant-samples.json"),',
+  '    JSON.stringify({ before: before, after: sample() })); }',
+  '})();',
+  'setInterval(function () {}, 500);'
+].join("\\n");
+fs.writeFileSync(path.join(here, "descendant.js"), descendantSource);
+const descendant = require("node:child_process").spawn(process.execPath, [path.join(here, "descendant.js")],
+  { detached: true, stdio: "ignore" });
+descendant.unref();
+(function waitReady() {
+  if (fs.existsSync(path.join(here, "descendant-ready.json"))) finish(() => emit({ type: "turn.completed" }));
+  else setTimeout(waitReady, 25);
+})();
+`
+  });
+  assert.equal(recorded.status, "completed", "the worker completes normally while the descendant survives");
+  const leader = JSON.parse(await fakeFile(directory, "leader.json")) as { pid: number; codexHome: string };
+  const samplesPath = join(directory, "descendant-samples.json");
+  const deadline = Date.now() + 15_000;
+  let samplesRaw: string | null = null;
+  while (Date.now() < deadline) {
+    samplesRaw = await readFile(samplesPath, "utf8").catch(() => null);
+    if (samplesRaw !== null) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.ok(samplesRaw !== null, "the descendant samples after the leader exits");
+  const descendant = JSON.parse(await fakeFile(directory, "descendant-ready.json")) as { pid: number };
+  const samples = JSON.parse(samplesRaw) as { before: Record<string, string | null>; after: Record<string, string | null> };
+  assert.notEqual(descendant.pid, leader.pid, "the survivor is a separate process");
+  t.after(() => { try { process.kill(descendant.pid, "SIGKILL"); } catch { /* already gone */ } });
+  for (const [name, sample] of [["before", samples.before], ["after", samples.after]] as const) {
+    for (const key of ["LAYA_API_KEY", "TYPESAFE_API_KEY", "TURNHELM_ALLOW_HOSTED_JEV", "TURNHELM_CONFIG", "BASH_ENV", "ENV"]) {
+      assert.equal(sample[key], null, name + " sample: " + key + " stays stripped");
+    }
+    assert.equal(sample.TURNHELM_MANAGED_CHILD, "1", name + " sample: the managed-child marker persists");
+    assert.equal(sample.CODEX_HOME, leader.codexHome, name + " sample: the managed home is the leader's");
+    assert.equal(sample.ZDOTDIR, join(directory, "root", ".turnhelm"),
+      name + " sample: the zsh lookup stays redirected to the turnhelm-owned root");
+  }
+});
+
 test("worker descendant zsh never sources host startup files", { timeout: 30_000 }, async t => {
   // The observed leak path: zsh sources $ZDOTDIR/.zshenv even non-interactively
   // and falls back to HOME, so a worker's zsh descendant re-exported a stripped
