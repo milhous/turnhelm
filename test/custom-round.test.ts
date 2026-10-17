@@ -406,6 +406,49 @@ test("an invalid roster is refused with no manifest written", async t => {
   assert.deepEqual(await readdir(scratch.evidenceRoot), [], "no refusal path leaves manifest artifacts");
 });
 
+test("prepare refuses a roster schema the CLI would reject, before spend", async t => {
+  const scratch = await scratchRoster(t);
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const schemaDir = await mkdtemp(join(tmpdir(), "turnhelm-schema-"));
+  t.after(() => rm(schemaDir, { recursive: true, force: true }).catch(() => {}));
+  const arrayPath = join(schemaDir, "array.json");
+  await writeFile(arrayPath, "[]\n");
+  const bytesPath = join(schemaDir, "invalid-utf8.json");
+  await writeFile(bytesPath, Buffer.from([0xff, 0xfe, 0x7b]));
+  const variants: readonly [string, string, RegExp][] = [
+    ["a JSON array", arrayPath, /the output schema must be a single JSON object/],
+    ["non-UTF-8 bytes", bytesPath, /the output schema is not valid UTF-8/]
+  ];
+  for (const [what, path, wording] of variants) {
+    const rosterPath = scratch.write(roster => {
+      (roster as { cases: [{ outputSchema?: string }] }).cases[0].outputSchema = path;
+    });
+    await assert.rejects(prepareRound(rosterPath, { sandboxExecPath: fake }), wording, what);
+  }
+  assert.deepEqual(await readdir(scratch.evidenceRoot), [], "no refusal path leaves manifest artifacts");
+});
+
+test("prepare freezes a valid roster schema into the manifest", async t => {
+  const scratch = await scratchRoster(t);
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const schemaDir = await mkdtemp(join(tmpdir(), "turnhelm-schema-"));
+  t.after(() => rm(schemaDir, { recursive: true, force: true }).catch(() => {}));
+  const schemaPath = join(schemaDir, "schema.json");
+  const schemaText = '{"type":"object","properties":{"count":{"type":"number"}},"required":["count"]}\n';
+  await writeFile(schemaPath, schemaText);
+  const rosterPath = scratch.write(roster => {
+    (roster as { cases: [{ outputSchema?: string }] }).cases[0].outputSchema = schemaPath;
+  });
+  await prepareRound(rosterPath, { sandboxExecPath: fake });
+  const manifest = JSON.parse(await readFile(join(scratch.evidenceRoot, "custom-round-manifest.json"), "utf8")) as {
+    cases: [{ outputSchema?: { path: string; sha256: string } }, Record<string, unknown>];
+  };
+  assert.deepEqual(manifest.cases[0].outputSchema,
+    { path: schemaPath, sha256: sha256hex(await readFile(schemaPath)) },
+    "the schema freezes as a path+hash entry in its case");
+  assert.equal("outputSchema" in manifest.cases[1], false, "a schema-less case freezes no entry");
+});
+
 test("a preflight whose reference machinery misgrades is refused, not silently frozen", async t => {
   const scratch = await scratchRoster(t);
   const fake = await writeFakeSandboxExec(t, PREPARE_ALL_FAIL);
@@ -476,7 +519,7 @@ test("a roster contract that cannot load is refused at prepare, not frozen", asy
 // stallMs holds the FIRST execution's turn open so a signal or timeout test
 // can land mid-case (a roster's later cases run the fake unstalled), and a
 // rebuildRoot swaps the case root for a byte-identical rebuild mid-run.
-const fakeCodexBody = (options: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string; rebuildRoot?: boolean }> = {}): string => `
+const fakeCodexBody = (options: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string; rebuildRoot?: boolean; recordArgv?: string }> = {}): string => `
 const argv = process.argv.slice(2);
 if (argv[0] === "--version") { process.stdout.write("codex-cli 0.160.2\\n"); process.exit(0); }
 if (argv[0] === "exec" && argv[1] === "--help") { process.stdout.write("--json\\n--ephemeral\\n--sandbox <MODE>\\n-\\n--ignore-user-config\\n--ignore-rules\\n--output-schema <FILE>\\n"); process.exit(0); }
@@ -500,7 +543,16 @@ process.stdin.on("end", () => {
   const firstRun = !fs.existsSync(path.join(__dirname, "invocations"));
   fs.appendFileSync(path.join(__dirname, "invocations"), "1");
   fs.writeFileSync(path.join(process.cwd(), "worker-task.txt"), task);
-` + (options.extraWrite !== undefined
+` + (options.recordArgv !== undefined
+    ? `  {
+    const schemaIndex = argv.indexOf("--output-schema");
+    fs.writeFileSync(path.join(process.cwd(), ${JSON.stringify(options.recordArgv)}), JSON.stringify({
+      argv,
+      outputSchema: schemaIndex === -1 ? null : fs.readFileSync(argv[schemaIndex + 1], "utf8")
+    }));
+  }
+`
+    : "") + (options.extraWrite !== undefined
     ? `  fs.writeFileSync(path.join(process.cwd(), ${JSON.stringify(options.extraWrite)}), "unauthorized outside allowedChanges\\n");\n`
     : "") + (options.rebuildRoot === true
     ? `  // Swap the case root for a byte-identical rebuild: the staging directory
@@ -562,6 +614,7 @@ type ExecuteCaseSpec = {
   outputLines: readonly string[];
   contractSource?: string;
   allowedChanges?: readonly string[];
+  outputSchemaText?: string;
 };
 
 const scratchExecuteRound = async (
@@ -571,7 +624,7 @@ const scratchExecuteRound = async (
   options?: Readonly<{
     caps?: { classifierRequests: number; workerExecutions: number };
     choice?: string;
-    codex?: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string; rebuildRoot?: boolean }>;
+    codex?: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string; rebuildRoot?: boolean; recordArgv?: string }>;
     poisonJournal?: boolean;
     journalAttempts?: unknown;
     baselineFiles?: readonly string[];
@@ -646,6 +699,11 @@ const scratchExecuteRound = async (
     const contract = join(base, spec.id + "-contract.mjs");
     await writeFile(contract,
       spec.contractSource ?? "import assert from \"node:assert/strict\";\nassert.equal(1 + 1, 2);\n");
+    let outputSchema: string | undefined;
+    if (spec.outputSchemaText !== undefined) {
+      outputSchema = join(base, spec.id + "-output-schema.json");
+      await writeFile(outputSchema, spec.outputSchemaText);
+    }
     cases.push({
       id: spec.id, kind: spec.kind, scope: spec.id + " scope", task: taskText,
       transport: spec.transport, root,
@@ -654,7 +712,8 @@ const scratchExecuteRound = async (
       grading: spec.grading,
       files: spec.kind === "worker-write"
         ? (spec.transport === "stdin-file" ? { contract, taskFile } : { contract })
-        : (spec.transport === "stdin-file" ? { taskFile } : {})
+        : (spec.transport === "stdin-file" ? { taskFile } : {}),
+      ...(outputSchema !== undefined ? { outputSchema } : {})
     });
   }
   const rosterPath = join(base, "roster.json");
@@ -724,6 +783,34 @@ test("execute runs both transports, grades both cases, and exits zero with an ev
         "Sum the ledger rows and print the JSON result.", "the task text reaches the worker via " + root);
     }
   });
+
+test("the worker CLI receives --output-schema only for schema cases", { timeout: 90_000 }, async t => {
+  const schemaText = '{"type":"object","properties":{"count":{"type":"number"}},"required":["count"]}\n';
+  const round = await scratchExecuteRound(t, [
+    {
+      id: "case-a", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } },
+      outputLines: ['{"count":3,"sum":6}'], outputSchemaText: schemaText,
+      allowedChanges: ["worker-task.txt", "worker-argv.json"]
+    },
+    {
+      id: "case-b", kind: "worker-readonly", transport: "arg",
+      grading: { mode: "strict-equal", expected: { count: 1, sum: 2 } }, outputLines: ['{"count":1,"sum":2}'],
+      allowedChanges: ["worker-task.txt", "worker-argv.json"]
+    }
+  ], {}, { codex: { recordArgv: "worker-argv.json" } });
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const code = await executeRound(round.manifestPath, round.approvalSha256,
+    { env: round.env, sandboxExecPath: fake });
+  assert.equal(code, 0, "a round whose case carries a schema still grades all-pass");
+  const readArgv = async (root: string): Promise<{ argv: string[]; outputSchema: string | null }> =>
+    JSON.parse(await readFile(join(root, "worker-argv.json"), "utf8"));
+  const withSchema = await readArgv(round.roots[0]);
+  assert.ok(withSchema.argv.includes("--output-schema"), "the schema case's run forwards the flag");
+  assert.equal(withSchema.outputSchema, schemaText, "the staged bytes are the frozen schema's bytes");
+  const withoutSchema = await readArgv(round.roots[1]);
+  assert.ok(!withoutSchema.argv.includes("--output-schema"), "a schema-less case forwards no flag");
+});
 
 test("a same-path replaced root is refused at the identity gate before any launch",
   { timeout: 90_000 }, async t => {

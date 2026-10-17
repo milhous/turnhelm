@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { Readable } from "node:stream";
 import { PROFILE_IDS } from "../src/config.js";
+import { validateOutputSchema } from "../src/output-schema.js";
 import { validateTask } from "../src/task.js";
 import { envelopePayload, oracleSandboxPolicy, projectAttemptTransports, superviseCli } from "./live-acceptance.js";
 
@@ -249,6 +250,7 @@ export type RosterCase = {
   allowedProfiles: string[];
   grading: RosterGrading;
   files: RosterFiles;
+  outputSchema?: string;
 };
 
 export type Roster = {
@@ -399,7 +401,11 @@ const validateRoster = async (rosterPath: string): Promise<Roster> => {
   for (const raw of rawCases) {
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) rosterFail("every roster case must be an object");
     const item = raw as Record<string, unknown>;
-    expectExactKeys(item, ["id", "kind", "scope", "task", "transport", "root", "allowedChanges", "allowedProfiles", "grading", "files"], "case");
+    // outputSchema is the one optional case key: a case either carries it or
+    // omits it, and anything beyond the base set is still refused.
+    const caseKeys = ["id", "kind", "scope", "task", "transport", "root", "allowedChanges", "allowedProfiles", "grading", "files"];
+    if (item.outputSchema !== undefined) caseKeys.push("outputSchema");
+    expectExactKeys(item, caseKeys, "case");
     const id = item.id;
     if (typeof id !== "string" || id === "") rosterFail("case id must be a nonempty string");
     if (seenIds.has(id)) rosterFail("case id " + JSON.stringify(id) + " appears more than once");
@@ -471,6 +477,9 @@ const validateRoster = async (rosterPath: string): Promise<Roster> => {
     }
     if (typeof contract === "string") await isRegularFile(contract, where + " files.contract");
     for (const hook of (hooks as string[] | undefined) ?? []) await isRegularFile(hook, where + " files.hooks entry");
+    if (item.outputSchema !== undefined && typeof item.outputSchema !== "string") {
+      rosterFail(where + " outputSchema must be a string");
+    }
   }
   return roster as unknown as Roster;
 };
@@ -551,6 +560,13 @@ export async function prepareRound(
   const evidenceInfo = await stat(roster.evidenceRoot);
   const cases = [];
   for (const item of roster.cases) {
+    // SC-1: the schema is validated with the same input-boundary check the CLI
+    // runs, so a roster whose schema the CLI would refuse never freezes — no
+    // manifest, no spend. Fixed wording only; schema content never reaches it.
+    if (item.outputSchema !== undefined) {
+      const schema = validateOutputSchema(item.outputSchema);
+      if ("error" in schema) rosterFail("case " + JSON.stringify(item.id) + " outputSchema " + schema.error);
+    }
     const rootInfo = await stat(item.root);
     const tree = await hashTree(item.root);
     if (tree === null) {
@@ -595,7 +611,10 @@ export async function prepareRound(
       allowedProfiles: item.allowedProfiles,
       grading: item.grading,
       tree: Object.fromEntries(tree),
-      files
+      files,
+      outputSchema: item.outputSchema === undefined
+        ? undefined
+        : { path: item.outputSchema, sha256: sha256hex(await readFile(item.outputSchema)) }
     });
   }
   const manifest = {
@@ -631,6 +650,7 @@ type RoundCase = {
   grading: { mode: string; expected: unknown };
   tree: Record<string, string>;
   files: { role: string; path: string; sha256: string }[];
+  outputSchema?: { path: string; sha256: string };
 };
 
 type RoundManifest = {
@@ -676,7 +696,9 @@ const parseRoundManifest = (bytes: Buffer): RoundManifest | null => {
         || !Array.isArray(item.allowedProfiles) || item.allowedProfiles.length === 0
         || item.allowedProfiles.some(v => typeof v !== "string")
         || typeof item.tree !== "object" || item.tree === null || Array.isArray(item.tree)
-        || !Object.values(item.tree).every(v => typeof v === "string")) return null;
+        || !Object.values(item.tree).every(v => typeof v === "string")
+        || (item.outputSchema !== undefined
+          && (typeof item.outputSchema?.path !== "string" || typeof item.outputSchema?.sha256 !== "string"))) return null;
     }
     return value;
   } catch {
@@ -1045,6 +1067,10 @@ async function runGatedRound(
       const hasRole = (role: string): boolean => item.files.some(file => file.role === role);
       if ((item.transport === "stdin-file" && !hasRole("taskFile"))
         || (item.kind === "worker-write" && !hasRole("contract"))) stopReason = "case-files";
+      if (stopReason === null && item.outputSchema !== undefined) {
+        const schemaBytes = await readFile(item.outputSchema.path).catch(() => null);
+        if (schemaBytes === null || sha256hex(schemaBytes) !== item.outputSchema.sha256) stopReason = "case-files";
+      }
       const launchTree = await hashTree(item.root.canonical);
       if (launchTree === null || treeChangedOutside(frozenTree, launchTree, []) !== null) {
         stopReason = "case-files";
@@ -1070,13 +1096,16 @@ async function runGatedRound(
     // file into the CLI's stdin through an exec'ing shell (superviseCli wires
     // the child's stdin to "ignore", so the redirect must happen in-shell).
     const writeArgs = item.kind === "worker-write" ? ["--write"] : [];
+    // SC-1: the schema rides the CLI flag from its frozen path; the CLI's own
+    // input boundary re-validates and stages the bytes into the managed home.
+    const schemaArgs = item.outputSchema === undefined ? [] : ["--output-schema", item.outputSchema.path];
     const taskFileEntry = item.files.find(file => file.role === "taskFile");
     const supervision = item.transport === "arg"
-      ? { file: process.execPath, args: [CLI_PATH, "run", "--project", item.root.canonical, ...writeArgs, "--", item.task] }
+      ? { file: process.execPath, args: [CLI_PATH, "run", "--project", item.root.canonical, ...writeArgs, ...schemaArgs, "--", item.task] }
       : {
           file: "/bin/sh",
           args: ["-c", ["exec", shQuote(process.execPath), shQuote(CLI_PATH), "run",
-            "--project", shQuote(item.root.canonical), ...writeArgs.map(shQuote),
+            "--project", shQuote(item.root.canonical), ...writeArgs.map(shQuote), ...schemaArgs.map(shQuote),
             "<", shQuote(taskFileEntry === undefined ? "" : taskFileEntry.path)].join(" ")]
         };
     // caseTimeoutMs is a test knob; the production budget stays CASE_TIMEOUT_MS.
