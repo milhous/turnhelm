@@ -2,12 +2,12 @@
 
 Date: 2026-10-17. Code baseline: `499367d5f5a69f0dec04f4f849bdc5870edefc6c`.
 
-> Status: written under the user's approval of the recommended diagnostic design. This document is
-> pending written-spec review. Current authority covers this English spec, self-review, document
-> checks, and a local documentation commit only. It does not authorize implementation, an execution
-> plan, paid review, model calls, publication, or service/authentication/proxy changes. All previous
-> campaign authorities are closed. Optimize for long-term benefit, safety, and performance; do not
-> maintain backward compatibility for the changed diagnostic vocabulary.
+> Status: the user requested an independent Astra subagent review, spec revision, and execution plan
+> after reviewing the initial spec. Current authority covers that review and English documentation,
+> local checks and documentation commits, not implementation, native worker/provider test calls,
+> publication, or service/authentication/proxy changes. All previous campaign authorities are closed.
+> The revised spec and plan return to the user before implementation. Optimize for long-term benefit,
+> safety, and performance; do not maintain backward compatibility for the changed diagnostic vocabulary.
 
 ## 1. Problem and evidence boundary
 
@@ -37,6 +37,8 @@ observations, not causal proof that changing a tuple or removing a schema fixes 
 The native JSONL surface includes item lifecycle events and several item kinds, as described in the
 [official non-interactive-mode documentation](https://learn.chatgpt.com/docs/non-interactive-mode).
 This design treats native optional metadata defensively rather than assuming every version emits it.
+The documented category surface is not a verified full schema for `item.updated`, every status, or
+`exit_code`; the optional projection below must tolerate those facts being absent in real runs.
 
 ## 2. Decision and scope
 
@@ -140,47 +142,70 @@ custom-round copy. Extend strict evidence sanitization and journal reconstructio
 
 - New item fields are legal only on `kind: "event"` with `eventKind: "activity"`; `itemKind` and
   `itemPhase` must be present and exact enums. `itemExitCode` is legal only for completed commands.
+  Activity detail may contain only the five declared keys; mixing in process/settlement detail fields is
+  an inconsistent combination, not a second interpretation of those fields.
 - Missing optional fields remain absent. Invalid detail values or inconsistent field combinations
   drop the entire detail, preserving the valid event envelope, as the current projector does for
   malformed values. Unknown keys in a purported projected detail continue to reject evidence; do not
   relax the existing fail-closed ledger boundary. No arbitrary string passes through a known key.
+  Check the complete key set before validating values so rejection cannot depend on insertion order.
 - Preserve valid existing non-activity lifecycle detail fields and their current validation. Do not
   overload process `exitCode` or settlement `status` with native item facts.
 - Apply the same first-eight/last-56 retention to oversized projected timelines and reconstructed
   journals. Preserve an incoming `overflow: true`; set it when truncating. Re-projecting valid evidence
   must be idempotent. Reuse the existing capacity/retention definition rather than a divergent policy.
-- Journal fallback stays bounded by the existing 1 MiB read ceiling, filtered to the supervised CLI
-  pid and ordered by monotonic `tMs`. Equal timestamps do not establish exact native-event order;
-  asynchronous append order is not a causal trace. Missing, oversized, or malformed journals yield no
-  fabricated timeline. Best-effort journaling does not guarantee complete capture.
+- Journal fallback enforces the existing intended 1 MiB ceiling using the existing descriptor-backed
+  `readProjectFile(root, ".turnhelm/lifecycle.jsonl", 1048576)` reader, not `stat` followed by
+  `readFile`. This bounds actual reads and refuses final-leaf symlink/non-regular substitution without
+  blocking on a FIFO. Reuse strict UTF-8 decoding, then the shared detail validation. Catch read,
+  decode, JSON and projection errors at this best-effort boundary and return absent evidence.
+- Filter journal events to the supervised CLI pid and order by monotonic `tMs`. Equal rounded
+  timestamps do not establish exact native-event order; asynchronous append order is not a causal
+  trace. Apply first-eight/last-56 to that approximate ordering, but guarantee settle retention only
+  for the recorder/ordered receipt, not journal reconstruction. Missing, oversized, or malformed
+  journals yield no fabricated timeline. Do not add sequence IDs, tie-breaking state or flush barriers.
+
+Separate strict validation from extraction policy: raw receipt lifecycle extraction in both harnesses
+catches projection rejection and omits the optional timeline rather than escaping the existing stop
+record/priority. The strict evidence-ledger sanitizer still rejects unknown projected keys. Invalid
+diagnostics do not become a new worker/case failure or bypass cleanup, output-cap, receipt or class
+stops. A worker with `status: "not-started"` has no activity timeline or journal fallback.
 
 Standard acceptance already launches worker cases with `--lifecycle`, but retains lifecycle only for
 worker failure or timeout. Remove that outcome filter: retain projectable lifecycle on successful
 controls, completed wrong answers, failed/cancelled workers, and timeout observations. Calibration
 cases without workers still have no worker timeline. Preserve existing receipt-attribution rules.
+In particular, standard acceptance's existing receiptless-timeout journal crash evidence remains
+available; do not import custom-round's exactly-one-receipt restriction into that different path.
 
 Custom-round currently launches without `--lifecycle`. Enable it for both argument and stdin-file task
 transports, without changing task bytes, write/schema flags, or roster/config schemas. Add a top-level
 optional `workerLifecycle` alongside its existing `workerFailure` projection, rather than renaming or
 restructuring that existing field. Retain it for every case outcome (`pass`, `failed`, `timeout`) and
 the existing projectable post-CLI stops (`cleanup-unverified`, `output-cap`, stopping worker classes,
-`tree-drift`, `root-identity`). Projection is independent of the worker's terminal status.
+`tree-drift`, `root-identity`, and the post-CLI pre-/post-contract `oracle-identity` stops that already
+carry `workerFailure`). Projection is independent of the worker's terminal status.
 
 Custom-round attribution still requires exactly one receipt and a projectable worker object; its
 `receipt` stop carries no worker projection and must not be salvaged with journal data. Prefer a valid
-receipt lifecycle. If absent/unprojectable after clean CLI closure with one attributable receipt,
-reuse the shared pid-filtered journal reader as best-effort fallback. Do not read a possibly-live
-CLI's journal for cleanup-unverified fallback. Pre-spend stops and the current signal-stop path do
-not gain new evidence collection. No diagnostic addition may move or bypass a stop/settled-tree gate,
+receipt lifecycle. Early stop records use receipt evidence only; do not perform fallback I/O ahead
+of the cleanup, output-cap, receipt and stopping-class gates. On the normal case path after
+those gates, if lifecycle is absent/unprojectable after clean CLI closure with one attributable
+executed-worker receipt, reuse the shared pid-filtered journal reader as best-effort fallback. Later
+projectable stop records may reuse that already-collected projection, without stop-specific I/O.
+Pre-spend stops and the current signal/contract-infrastructure stop paths do not gain new evidence
+collection. No diagnostic addition may move or bypass a stop/settled-tree gate,
 cause more spend, or grade a timeout. Ledger append failures retain existing stop behavior.
 
 Custom-round's current tree comparison exempts only `.turnhelm/routes.jsonl`; merely enabling lifecycle
 would otherwise create a false tree-drift failure. Exclude the exact CLI-owned
 `.turnhelm/lifecycle.jsonl` regular-file leaf consistently from its tree snapshots, before applying the
-ordinary file-size/read budget, as standard acceptance already does. Do not exclude the whole
-`.turnhelm` directory or alter declared business-file allowances. Still reject a symlink, FIFO, or
-other non-regular leaf at that path without reading it. An oversized regular lifecycle journal makes
-fallback evidence unavailable, not the consumer tree invalid. This diagnostic-file exemption is not
+ordinary file-size/read budget. This adopts standard acceptance's exact-file exclusion while retaining
+custom-round's non-regular-leaf rejection. Test this exact path before directory recursion: an empty
+directory is not a journal. Do not exclude the whole `.turnhelm` directory or alter declared
+business-file allowances. Still reject a symlink, FIFO, directory or other non-regular leaf at that path
+without reading it. An oversized regular lifecycle journal makes fallback evidence unavailable, not
+the consumer tree invalid. This diagnostic-file exemption is not
 an integrity attestation of journal contents; their projection remains untrusted and whitelisted.
 
 ### 3.4 Privacy, performance, and interpretation
@@ -205,8 +230,8 @@ capture, this design cannot identify which file a command accessed; that limitat
 
 ## 4. Connected implementation surface
 
-This is a future implementation boundary, not authorization or an execution plan. Current work adds
-only this document. The later change must cover all connected consumers in one coherent contract:
+This is a future implementation boundary, not implementation authorization. Current work changes
+only this spec and its companion plan. The later change must cover all connected consumers in one contract:
 
 | Surface | Required responsibility |
 | --- | --- |
@@ -214,9 +239,11 @@ only this document. The later change must cover all connected consumers in one c
 | `src/codex.ts` | Record enriched existing events; activity dispatch and fixed diagnostic rename |
 | `src/lifecycle.ts` | Typed detail and reusable existing retention definition, no capacity change |
 | `src/cli.ts`, `src/journal.ts` | Verify receipt/journal forwarding preserves only sanitized facts; keep current ownership, append and opt-in behavior |
-| `test/live-acceptance.ts` | Shared whitelist/projection, journal reconstruction and all-outcome retention |
+| `test/live-acceptance.ts` | Shared whitelist/projection, safe best-effort journal reconstruction, extraction fault containment and all-outcome retention |
+| `src/project.ts`, `test/project.test.ts` | Reuse and verify existing bounded non-following reader; no new I/O abstraction or reader rewrite |
 | `test/custom-round.ts` | Both task transports enable lifecycle; exact regular-journal tree exemption; shared projection on cases/projectable stops |
-| `test/codex-events.test.ts`, `test/codex.test.ts`, `test/lifecycle.test.ts` | Decoder, dispatch/backpressure and retention regressions |
+| `test/codex-events.test.ts`, `test/worker.test.ts`, `test/lifecycle.test.ts` | Decoder, dispatch/backpressure, lifecycle CLI and retention regressions |
+| `test/codex.test.ts` | Verify the existing worker-module export contract; no new runtime export is needed in this module |
 | `test/cli.test.ts`, `test/route-journal.test.ts` | Exact receipt/journal propagation and shared safe-append/opt-in/privacy regressions |
 | `test/live-acceptance.test.ts`, `test/custom-round.test.ts` | Strict projections, fallback, every outcome and unchanged stop/grade semantics |
 | `README.md`, `.agents/skills/turnhelm-routing/SKILL.md` | Current diagnostic vocabulary, activity limits and all-outcome evidence; keep shared passages aligned |
@@ -242,21 +269,30 @@ provider request. Passing them establishes the evidence mechanism, not task-deli
    Preserve existing final agent-output/oracle semantics rather than claiming to redact them.
 3. **Delivery and settlement:** fake-worker regressions retain exact task stdin, all six requested
    tuple argv, managed-home behavior, schema-on/off framing, exactly one receipt, bounded diagnostics
-   under stderr backpressure, sticky failure, cancellation and owned teardown. Diagnostics alone never
-   change CLI status or stdout. Lifecycle-disabled runs retain no lifecycle/journal.
+   under stderr backpressure, sticky failure, cancellation and owned teardown. Activity metadata,
+   item failure status and nonzero item exit codes never determine CLI status or stdout: they
+   are observations only. Existing diagnostic sink-error/output-failure behavior remains unchanged.
+   Lifecycle-disabled runs retain no lifecycle/journal.
 4. **Flood and retention:** more than 64 mixed events preserve first eight/last 56 and settle when
-   present, with overflow true and no per-item memory growth. Receipt projection, re-projection and
-   pid-filtered journal reconstruction obey the same bound. One decoded frame produces one lifecycle
+   present in the recorder/ordered receipt, with overflow true and no per-item memory growth. Receipt
+   projection, re-projection and pid-filtered journal reconstruction obey the same bound, without a
+   journal settle/order guarantee on tied timestamps. The maximally populated 64-entry receipt stays
+   below the supervisor's 65536-byte line cap. One decoded frame produces one lifecycle
    event append, not two; progress counts remain decoded-frame counts.
 5. **Projection boundary:** valid new facts survive both harnesses and journal fallback; malformed
    detail drops, unknown projected keys reject, arbitrary strings never survive. Missing metadata
    stays absent. Oversized/missing/malformed journals and another pid's events never fabricate evidence.
+   Unknown detail keys reject in either insertion order, including alongside invalid known values.
+   Raw receipt/journal extraction catches those rejections; direct strict ledger input still rejects.
+   Verify strict UTF-8, growing/replaced leaf, symlink/FIFO/directory and exact read-cap boundaries
+   through the existing reader and integration helpers; no fallback I/O occurs before stop gates.
    Custom-round permits the exact regular lifecycle journal without tree drift, including an oversized
-   journal, but still rejects symlink/FIFO leaves and changes elsewhere in `.turnhelm`.
+   journal, but still rejects symlink/FIFO/directory leaves and changes elsewhere in `.turnhelm`.
 6. **All outcomes:** standard and custom harness tests retain evidence for a correct completed
    control, completed wrong output, completed-but-unchanged implementation, failed worker, cancelled
    worker and clean one-receipt timeout. Custom tests cover both task transports and all listed
-   post-CLI stops, plus receipt-count/pre-spend/signal paths that must not gain a projection. No change
+   post-CLI stops, plus receipt-count/pre-spend/signal/contract-infrastructure and not-started paths
+   that must not gain a projection. No change
    to failure classes, timeout being unjudged, integrity-stop priority or completed/count reconciliation.
 7. **Regression commands:** run build/typecheck, the focused tests above, full `pnpm test`, and stock
    `pnpm test:coverage` with existing 80% gates. Run dependency audit and `git diff --check`; inspect the
@@ -264,9 +300,11 @@ provider request. Passing them establishes the evidence mechanism, not task-deli
 
 ## 6. Next decision boundary and non-goals
 
-After user approval of this written spec, write the implementation plan and obtain the execution
-method decision. Implement and verify offline before preparing any new live diagnostic. Do not
-silently extend the current documentation authority into those stages.
+The user explicitly requested this review/revision and an implementation plan. The companion
+[execution plan](../plans/2026-10-17-worker-activity-evidence.md) remains subject to user review and an
+execution-method decision. Implement and verify offline only after that decision, and before preparing
+any new live diagnostic. Do not silently extend documentation authority into implementation or testing
+against real providers.
 
 A later paid diagnostic must have a fresh finite manifest/SHA approval, explicit cases and caps,
 predeclared acceptance/stop rules, frozen inputs and matched controls. It must state which uncertainty
@@ -282,13 +320,25 @@ deadline changes, dashboards, and regrading historical cases. These remain separ
 
 ## 7. Self-review record
 
-Reviewed against the current decoder, worker dispatch, lifecycle recorder, journal forwarding, both
-harnesses and the sealed campaign report. The design deliberately reuses existing opt-in recording
-instead of a parallel activity subsystem. It closes the connected evidence-loss/retention gaps without
-asserting a failure cause, changing acceptance grades, or capturing sensitive native content. The
-written spec still requires user review; there has been no new agent review or paid call.
+Independent review: native `gpt-6-astra/high` subagent `astra_activity_spec_review`, isolated review-only
+context, reviewed original commit `e121891`. Verdict: **PROBLEMS - narrowly correctable**. The reviewer
+found the existing-lifecycle architecture appropriately small and rejected a parallel tracing system.
+The parent verified and incorporated the findings below; there was no second independent review of
+the revision and no native worker/provider test request.
 
-Document validation: seven numbered sections, balanced fences, strict TypeScript example typecheck,
-JSON example parse, 18 existing connected source/test/document paths, private report/diagnostic
-references and campaign totals checked. Dependency audit reported zero vulnerabilities. Runtime
-tests and live diagnostics were not rerun for this documentation-only change.
+| Review finding | Verified source at code baseline | Disposition |
+| --- | --- | --- |
+| Pre-read stat is not an actual read ceiling; substituted leaf can block/follow | `test/live-acceptance.ts:1203-1205`, `src/project.ts:32-56` | Reuse existing descriptor-backed bounded reader, with its existing parent-path/final-leaf limits; no new I/O framework |
+| Strict projection exceptions conflict with best-effort fallback and stop precedence | `test/live-acceptance.ts:1135-1136,1221`, `test/custom-round.ts:1167-1195` | Catch at raw extraction/fallback boundaries; strict ledger rejection unchanged |
+| Unknown-key rejection depends on field order | `test/live-acceptance.ts:1134-1156` | Prevalidate the key set, test both orders |
+| Test surface and two existing stop branches omitted | `test/worker.test.ts:131,2501`, `test/custom-round.ts:1247-1252,1270-1275` | Add actual worker helpers and post-CLI oracle-identity evidence |
+| Sink-error and reconstructed-settle promises too broad | `test/worker.test.ts:1634-1658`, `test/live-acceptance.ts:1225-1229` | Preserve sink failures; qualify approximate journal chronology instead of adding sequence machinery |
+| Directory-at-journal, not-started and native-schema confidence need explicit treatment | `test/custom-round.ts:334-337,880-895`, official protocol documentation above | Add boundary tests/guards and state optional-schema uncertainty |
+
+The parent also added a maximum-expanded-receipt line-cap check. Decoder combinations belong in fast
+table tests; integration fixtures prove propagation and stop categories without a Cartesian matrix.
+This review narrows the design; it does not establish a task-failure cause or change a historical grade.
+
+Document checks cover structure, English prose, examples, source/test references, companion links,
+sealed-report totals, scoped diff and dependency audit. Runtime suites and live diagnostics are not
+rerun merely to validate these documentation changes; implementation verification belongs to the plan.
