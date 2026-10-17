@@ -76,7 +76,10 @@ classifier and child cannot see session context. Input is limited to
 - Default sandbox is `read-only`. Add `--write` only after explicit approval
   immediately before that run. Routing is not write authorization; `--write`
   does not override host-protected paths or approval policy. Review the
-  resulting diff/tests and preserve unrelated changes.
+  resulting diff/tests and preserve unrelated changes. Read-only denies
+  writes, not reads — host permissions still govern any specific file; the
+  2026-10-17 campaign observed a worker claim a read-only session cannot
+  read files (cause unresolved).
 - `--output-schema <file>` (opt-in) hands Codex a JSON Schema for the final
   message: a readable regular file (symlinks refused), at most 65536 bytes,
   strict UTF-8, one JSON object, validated once at the input boundary and
@@ -162,7 +165,10 @@ structured content after the payload line, or any non-JSON message, is
 emitted verbatim (`"conflict"` / `"unstructured"`); every emission is the
 classifier's text plus one appended newline. The boundary is a
 delimitor, not a validator, and still not a redactor; success is read from
-the exit code and receipt, never stdout presence. Input/config/preflight rejection
+the exit code and receipt, never stdout presence. Observed worker failure
+modes (2026-10-17): wrong refusal, claimed completion with the
+implementation unchanged, schema-valid but value-wrong output — all
+consumer-gated. Input/config/preflight rejection
 has no receipt. A failed worker turn prints exactly one fixed
 `turnhelm: worker-failed: <class>` line — class from a frozen taxonomy,
 never native error text. The receipt's `worker` object carries
@@ -377,6 +383,15 @@ worker receipt's `lastEventAgeMs` is pinned positive through a post-drain
 settlement gap. Roster authoring rule: an oracle whose verdict depends on
 ordering, ties, or direction — sort order, first-match, prefix direction —
 must state the direction it judges and include one worked example with tied
-inputs, so a mis-graded tie is caught by the roster itself; sealed oracles
+inputs, so a mis-graded tie is caught by the roster itself; a task whose
+oracle verdict depends on when an effect must happen — a synchronous throw
+versus a deferred rejection, a same-turn identity window for promises or
+handles, state visible before versus after settlement,
+retry-after-settlement semantics — must state the timing policy it judges
+and include one worked call-order example exercising the ambiguous boundary
+(for a fetch that throws synchronously: whether the immediately following
+same-key call must return the identical promise, and whether rejection is
+deferred to a microtask), with the task text imposing exactly the policy the
+oracle judges; sealed oracles
 and recorded grades are never edited after the fact — a defective oracle is
 retired and replaced, not rewritten.
