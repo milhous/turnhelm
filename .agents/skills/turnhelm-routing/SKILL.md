@@ -243,7 +243,8 @@ optional correlation hash and death signal; no failure text — plus
 the last decode's age at settlement, the same parent-observed projection
 that never claims liveness. A failed or timed-out case additionally carries
 `workerLifecycle` — the bounded content-free worker timeline (`tMs` and
-`kind` only, at most 64 events) projected from the receipt's `lifecycle`
+`kind`, plus at most a fixed-vocabulary `detail` such as the observed
+failure class; at most 64 events) projected from the receipt's `lifecycle`
 field, or rebuilt from the best-effort `.turnhelm/lifecycle.jsonl` journal by
 the supervised CLI's pid when the CLI died before receipting; completed runs
 carry none. Records also carry `attemptTransports`, a bounded
@@ -258,7 +259,9 @@ tooling and tests judge against one frozen definition instead of two that
 drift. Each worker-suite case freezes its own integer `deadlineMs`
 (5000–3600000 ms) at prepare and may carry its own output schema through the
 same CLI flag; an expired deadline is an unjudged `timeout` verdict behind
-the cleanup and settled-tree gates, never a stop by itself. Exit `3` means a
+custom-round's three gates — the CLI closed cleanly, exactly one CLI receipt
+(a receiptless timeout stops the round with its crash evidence retained), and
+a settled tree — never a stop by itself. Exit `3` means a
 complete calibration roster with a band-policy mismatch; exit `4` means a
 complete worker roster with at least one failed or timed-out case. A
 task-output failure (wrong or missing output, every integrity check true)

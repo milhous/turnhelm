@@ -76,7 +76,7 @@ export type AcceptanceManifest = Readonly<{
 }>;
 
 export type StoppedReason =
-  | "drift" | "output-limit" | "evidence-io" | "signal"
+  | "drift" | "output-limit" | "evidence-io" | "signal" | "receipt"
   | "worker-failure" | "verdict" | "cleanup-unverified" | "unknown";
 
 export type OracleInputEvidence =
@@ -1355,7 +1355,7 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
     case "stopped": {
       const reason = raw.reason;
       const bounded: StoppedReason = reason === "drift" || reason === "output-limit" || reason === "evidence-io"
-        || reason === "signal" || reason === "worker-failure" || reason === "verdict"
+        || reason === "signal" || reason === "receipt" || reason === "worker-failure" || reason === "verdict"
         || reason === "cleanup-unverified" || reason === "unknown"
         ? reason : "unknown";
       return { phase: "stopped", caseId: evidenceString(raw.caseId), reason: bounded };
@@ -1652,6 +1652,23 @@ const lastJsonLine = (text: string): Record<string, unknown> | null => {
   } catch {
     return null;
   }
+};
+
+// DL-1 (spec §3.4): custom-round's continuation sits behind a receipt-count
+// gate — exactly one CLI receipt. Counted from the supervised CLI's captured
+// stderr; unparseable lines are never receipts.
+const countReceiptLines = (text: string): number => {
+  let count = 0;
+  for (const line of text.split("\n")) {
+    if (line.trim() === "") continue;
+    try {
+      const parsed: unknown = JSON.parse(line);
+      if (isRecord(parsed) && parsed.type === "turnhelm.receipt") count += 1;
+    } catch {
+      // Not JSON, not a receipt.
+    }
+  }
+  return count;
 };
 
 // The whole payload is parsed once: exactly the two expected own keys with
@@ -1961,6 +1978,7 @@ export async function executeAcceptance(
           const rootInfo = await stat(item.root).catch(() => null);
           const rootMatches = rootInfo !== null && rootInfo.dev === item.identity.dev && rootInfo.ino === item.identity.ino;
           const receiptFrame = lastJsonLine(decodeBounded(supervision.stderr) ?? "");
+          const receiptCount = countReceiptLines(decodeBounded(supervision.stderr) ?? "");
           // The receipt's worker object is extracted before the observation is
           // built: usage must be projected from the same durable observation,
           // not from a second read taken after fallible verification.
@@ -2038,18 +2056,26 @@ export async function executeAcceptance(
             stopExitCode = 130;
             checks = {};
           } else if (supervision.timedOut) {
-            // DL-1: an expired per-case deadline is an unjudged, continuable
-            // outcome behind the settled-tree gate. The CLI closed cleanly, so
-            // the remaining gate is identity plus the tree: a clean tree
-            // records the timeout and the roster continues; drift stops.
-            const treeClean = treeDiffClean(treeBefore, await hashTree(item.root), item.allowedChanges);
-            if (!rootMatches || !treeClean) {
-              stopReason = "drift";
+            // DL-1 (spec §3.4): an expired per-case deadline is an unjudged,
+            // continuable outcome only behind custom-round's three gates —
+            // cleanup (the cliClosed branch above), exactly one CLI receipt,
+            // and the settled tree. A receiptless timeout is a killed CLI
+            // whose worker's fate is unobservable: stop all further spend.
+            // The crash evidence is already retained on the observation.
+            if (receiptCount !== 1) {
+              stopReason = "receipt";
               stopExitCode = 1;
               checks = {};
             } else {
-              timedOutcome = true;
-              checks = {};
+              const treeClean = treeDiffClean(treeBefore, await hashTree(item.root), item.allowedChanges);
+              if (!rootMatches || !treeClean) {
+                stopReason = "drift";
+                stopExitCode = 1;
+                checks = {};
+              } else {
+                timedOutcome = true;
+                checks = {};
+              }
             }
           } else {
             try {

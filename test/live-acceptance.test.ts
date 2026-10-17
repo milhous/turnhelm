@@ -824,6 +824,30 @@ process.stdin.on("end", () => {
       return;
     }
   }
+  if (mode === "mutiny-fail-first") {
+    // EV-1: the first invocation reports a rate-limited failure (the CLI
+    // observes and journals the class), hangs to its deadline, then kills the
+    // CLI from inside the shutdown ladder — delayed so the failure journal
+    // append is safely past. No receipt can exist; the class must survive.
+    const log = process.env.TURNHELM_TEST_INVOCATIONS;
+    const prior = log !== undefined && fs.existsSync(log)
+      ? fs.readFileSync(log, "utf8").split("\\n").filter(line => line !== "").length : 0;
+    if (prior <= 1) {
+      const hostile = ${JSON.stringify(HOSTILE_FAILURE)};
+      emit({ type: "error", message: hostile });
+      emit({ type: "turn.failed", message: hostile });
+      const mutiny = () => {
+        setTimeout(() => {
+          try { process.kill(process.ppid, "SIGKILL"); } catch {}
+          process.exit(0);
+        }, 250);
+      };
+      process.on("SIGINT", mutiny);
+      process.on("SIGTERM", mutiny);
+      setInterval(() => {}, 3600);
+      return;
+    }
+  }
   if (mode === "emit-then-hang") {
     // One decoded event, then a gate file once it has flushed, then idle: the
     // caller aborts after the gate, cancelling a run that already decoded.
@@ -1377,13 +1401,14 @@ test("an oversized CLI-owned journal never stops a clean case", { timeout: 120_0
     "pass", "the case still reserves and grades");
 });
 
-test("a killed timed-out CLI retains its journal timeline without a receipt", { timeout: 120_000 }, async t => {
+test("a receiptless killed CLI stops the roster with its journal timeline retained", { timeout: 120_000 }, async t => {
   const classifier = await startClassifierFixture(t);
   const fakeBin = await writeFakeCodex(t);
   // The first case's worker mutinies: at its 5s deadline the CLI begins the
   // owned shutdown ladder and SIGINTs the worker, which SIGKILLs the CLI —
-  // no receipt can exist, so the only surviving timeline is the append-only
-  // journal the CLI wrote under the consumer root.
+  // no receipt can exist. Spec §3.4 adopts custom-round's three gates
+  // (receipt, cleanup, settled tree): a receiptless timeout stops all
+  // further spend; its crash evidence stays on the observation.
   const run = await buildRun(t, "laya", classifier.url, [
     { id: "times-out", kind: "worker-readonly", deadlineMs: 5000 },
     { id: "passes-anyway", kind: "worker-readonly" }
@@ -1391,8 +1416,8 @@ test("a killed timed-out CLI retains its journal timeline without a receipt", { 
   const invocations = join(run.runRoot, "fake-worker-invocations.log");
   const code = await executeAcceptance(run.manifestPath, run.sha256,
     { env: workerEnv(fakeBin, "mutiny-first", invocations) });
-  assert.equal(code, 4, "the hard-killed CLI still lands as an unjudged timeout, not a stop");
-  assert.equal(await countInvocations(invocations), 2, "both workers actually spawn");
+  assert.equal(code, 1, "a timeout without exactly one CLI receipt is a stop, never a continuation");
+  assert.equal(await countInvocations(invocations), 1, "only the first worker spawns: the roster halts");
   const evidence = await readEvidence(run.runRoot);
   const observed = evidence.find(line => line.phase === "observed" && line.caseId === "times-out");
   assert.equal(observed?.exitCode, null, "the CLI died to a signal, so no exit code exists");
@@ -1401,12 +1426,39 @@ test("a killed timed-out CLI retains its journal timeline without a receipt", { 
   const kinds = lifecycle.events.map(event => event.kind);
   assert.ok(kinds.includes("spawned"), "the journal timeline retains the worker spawn");
   assert.ok(!kinds.includes("settle"), "a hard kill never settles");
-  assert.ok(lifecycle.events.every(event => typeof event.tMs === "number" && Object.keys(event).length === 2),
-    "the reconstructed timeline is content-free: tMs and kind only");
-  assert.equal(evidence.find(line => line.phase === "verified" && line.caseId === "times-out")?.verdict,
-    "timeout", "the killed case is still the unjudged timeout outcome");
-  assert.equal(evidence.find(line => line.phase === "verified" && line.caseId === "passes-anyway")?.verdict,
-    "pass", "the next case still reserves and grades");
+  assert.equal(evidence.at(-1)?.phase, "stopped", "the round stops on the receipt gate");
+  assert.equal(evidence.at(-1)?.caseId, "times-out");
+  assert.equal(evidence.at(-1)?.reason, "receipt");
+  assert.equal(evidence.find(line => line.phase === "reserved" && line.caseId === "passes-anyway"), undefined,
+    "no later case is reserved after the stop");
+});
+
+test("a reported failure killed before receipt keeps its class on the retained timeline", { timeout: 120_000 }, async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  // The worker first reports a rate-limited failure — the CLI observes the
+  // class and journals it — then hangs until the deadline, and kills the CLI
+  // from inside the shutdown ladder. No receipt exists; the journal timeline
+  // must still carry the observed failure class.
+  const run = await buildRun(t, "laya", classifier.url, [
+    { id: "dies-failing", kind: "worker-readonly", deadlineMs: 5000 }
+  ]);
+  const invocations = join(run.runRoot, "fake-worker-invocations.log");
+  const code = await executeAcceptance(run.manifestPath, run.sha256,
+    { env: workerEnv(fakeBin, "mutiny-fail-first", invocations) });
+  assert.equal(code, 1, "the receiptless kill stops the round");
+  const evidence = await readEvidence(run.runRoot);
+  const observed = evidence.find(line => line.phase === "observed" && line.caseId === "dies-failing");
+  const lifecycle = lifecycleOf(observed);
+  assert.ok(lifecycle !== undefined, "the killed CLI's journal timeline is retained by pid");
+  const failure = lifecycle.events.find(event => event.kind === "failure");
+  assert.ok(failure !== undefined, "the reported failure milestone survives the kill");
+  assert.equal((failure as { detail?: { class?: string } }).detail?.class, "rate-limit",
+    "the observed failure class rides the retained crash evidence");
+  const kinds = lifecycle.events.map(event => event.kind);
+  assert.ok(kinds.includes("spawned"), "the journal timeline retains the worker spawn");
+  assert.ok(!kinds.includes("settle"), "a hard kill never settles");
+  assert.equal(evidence.at(-1)?.reason, "receipt", "the round stops on the receipt gate");
 });
 
 test("first real failure stops remaining cases", async t => {

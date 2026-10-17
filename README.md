@@ -504,7 +504,8 @@ plus `workerProgress`, the receipt's decoded-event count and, when one
 decoded, the last decode's age at settlement, the same parent-observed
 projection that never claims liveness. A failed or timed-out case additionally
 carries `workerLifecycle` — the bounded content-free worker timeline (`tMs`
-and `kind` only, at most 64 events) projected from the receipt's `lifecycle`
+and `kind`, plus at most a fixed-vocabulary `detail` such as the observed
+failure class; at most 64 events) projected from the receipt's `lifecycle`
 field, or rebuilt from the best-effort `.turnhelm/lifecycle.jsonl` journal by
 the supervised CLI's pid when the CLI died before receipting; completed runs
 carry none. Observed and case records also carry
@@ -522,9 +523,11 @@ and the root-parameterized `oracleSandboxPolicy` sandbox profile — so
 sealed-round tooling and tests judge against one frozen definition instead
 of two that drift. Each worker-suite case freezes its own integer `deadlineMs`
 (5000–3600000 ms) at prepare and may carry its own output schema through the
-same CLI flag; an expired deadline is an unjudged `timeout` verdict behind the
-cleanup and settled-tree gates — the CLI must close cleanly and the tree must
-settle, otherwise the round stops — never a stop by itself. Exit codes: `2`
+same CLI flag; an expired deadline is an unjudged `timeout` verdict behind
+custom-round's three gates — the CLI must close cleanly, carry exactly one
+CLI receipt (a receiptless timeout, a killed CLI, stops the round with its
+crash evidence retained), and leave a settled tree — never a stop by itself.
+Exit codes: `2`
 usage, `1` failure or incomplete, `0` complete pass, `3` a complete
 calibration roster containing a band-policy mismatch, `4` a complete worker
 roster containing at least one failed or timed-out case, `130`/`143` on
