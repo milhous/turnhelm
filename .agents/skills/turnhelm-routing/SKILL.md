@@ -24,7 +24,7 @@ CLI >=0.160.0; `run` needs Git.
 | `turnhelm init --dry-run [--project <dir>]` | Inspect installation; write nothing. |
 | `turnhelm init [--project <dir>]` | Install config, shared skill/metadata, and managed AGENTS block. |
 | `turnhelm doctor [--json] [--project <dir>]` | Offline checks; no classification or worker. |
-| `turnhelm doctor --probe [--project <dir>]` | One synthetic request per eligible backend; no worker. |
+| `turnhelm doctor --probe [--project <dir>]` | One synthetic request per eligible backend; no worker. A failed probe's evidence carries the last observed HTTP status with fixed guidance. |
 
 The sole config is `.turnhelm/config.json` (v2): `routingTimeoutMs`,
 `backends.laya`, `backends.jev` — whose `transport` is required, exactly
@@ -83,6 +83,12 @@ classifier and child cannot see session context. Input is limited to
   staged inside the run's managed home — the caller's path is never forwarded
   or re-read. `payload.mode` still reports framing only; schema conformance
   stays the consumer's acceptance gate.
+- `--lifecycle` (opt-in) records a bounded, content-free worker timeline — a
+  frozen event taxonomy (spawned through settle) with millisecond ages, never
+  worker output, task text, or error prose. The executed-worker receipt
+  carries a `lifecycle` projection of at most 64 events (with an `overflow`
+  marker), and each event is appended best-effort to
+  `.turnhelm/lifecycle.jsonl`; journaling never fails or delays the run.
 - Successful classification selects among `fast`, `balanced`, `deep`, `frontier`,
   `frontier_xhigh`, `frontier_max`. Maximum effort is an ordinary automatic
   selection; no bypass, max flag, or extra stage exists. A run launches at most
@@ -235,7 +241,12 @@ not secret sanitization. Observed records also carry a whitelisted
 optional correlation hash and death signal; no failure text — plus
 `workerProgress`, the receipt's decoded-event count and, when one decoded,
 the last decode's age at settlement, the same parent-observed projection
-that never claims liveness. Records also carry `attemptTransports`, a bounded
+that never claims liveness. A failed or timed-out case additionally carries
+`workerLifecycle` — the bounded content-free worker timeline (`tMs` and
+`kind` only, at most 64 events) projected from the receipt's `lifecycle`
+field, or rebuilt from the best-effort `.turnhelm/lifecycle.jsonl` journal by
+the supervised CLI's pid when the CLI died before receipting; completed runs
+carry none. Records also carry `attemptTransports`, a bounded
 per-attempt backend/transport-mode projection (Laya always direct; any
 missing, duplicate, or invalid data reads `unverified`) — frozen application
 policy, never a proxy-exit attestation, and never a gate for ordinary cases:
@@ -244,11 +255,15 @@ config. The harness also exports its shared oracle
 primitives — the payload-agnostic `envelopePayload` envelope fact and the
 root-parameterized `oracleSandboxPolicy` sandbox profile — so sealed-round
 tooling and tests judge against one frozen definition instead of two that
-drift. Exit `3` means a complete
-calibration roster with a band-policy mismatch; exit `4` means a complete
-worker roster with at least one engineering failure. A task-output failure
-(wrong or missing output, every integrity check true) fails the case and the
-approved roster continues; any integrity failure — including a replaced
+drift. Each worker-suite case freezes its own integer `deadlineMs`
+(5000–3600000 ms) at prepare and may carry its own output schema through the
+same CLI flag; an expired deadline is an unjudged `timeout` verdict behind
+the cleanup and settled-tree gates, never a stop by itself. Exit `3` means a
+complete calibration roster with a band-policy mismatch; exit `4` means a
+complete worker roster with at least one failed or timed-out case. A
+task-output failure (wrong or missing output, every integrity check true)
+fails the case and the approved roster continues, as does an unjudged
+per-case timeout; any integrity failure — including a replaced
 consumer root, caught by `root-identity` — stops immediately. A `completed`
 record plus the exit code is a convenience status only: acceptance reconciles
 case IDs, verdicts, counts, the absence of a terminal `stopped`, and the
@@ -275,7 +290,10 @@ exported through the built `dist/test` surface and invocable as
 <sha256>` — for owner-defined validation rosters. The round input is a
 data-only JSON roster: nothing executable is trusted from it, and every
 referenced file is hashed into a frozen manifest as data, alongside a per-case
-snapshot of the whole consumer tree. `prepareRound` validates the roster,
+snapshot of the whole consumer tree. Each roster case carries a required
+integer `deadlineMs` (5000–3600000 ms) that the runner supervises the case CLI
+under, and may carry an `outputSchema` file frozen with the same hash record.
+`prepareRound` validates the roster,
 re-verifies the pinned HEAD and the whole-consumption baseline (every built
 module the round executes), preflights the sandbox machinery and each roster
 contract's loadability, and writes the manifest with a human approval request
@@ -299,7 +317,12 @@ Every case then passes the same settled-tree gate — root dev/ino plus
 canonical-path re-check and a re-hash against the case's allowedChanges —
 graded or timed out: a same-content root replacement stops `root-identity`,
 and a write outside the allowance stops `tree-drift`, even when the output
-graded fine. A timeout is an unjudged per-case outcome, not a stop
+graded fine. The same identity rule binds the frozen inputs: every
+roster-referenced file — including a case's `outputSchema` and contract
+sources — re-verifies dev/ino plus bytes at the pre-spend gate and around the
+sandboxed contract check, so a byte-identical rebind of an oracle or contract
+file stops `oracle-identity` before any spend, while a mutated or missing
+file stops `case-files`. A timeout is an unjudged per-case outcome, not a stop
 (`outcome:"timeout"`): no oracle grading and no contract check, and after the
 settled-tree gate its case record is appended and the roster continues to the
 next reservation. Every case record (pass, failed, or timeout) and the
