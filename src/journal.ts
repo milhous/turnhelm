@@ -9,7 +9,10 @@ const TASK_ENCODER = new TextEncoder();
 
 // The shared safe-append core behind both journals: skip known nonregular
 // leaves, open final-leaf-protected for append-only creation, re-check the
-// regular file, and never let a journaling failure fail the run.
+// regular file, and never let a journaling failure fail the run. The per-event
+// reopen is that discipline itself — each append re-verifies the regular leaf
+// so a between-events substitution is caught — and its cost is bounded by the
+// small fixed event count per run.
 const appendJournalLine = async (
   journalPath: string,
   line: string,

@@ -88,7 +88,8 @@ classifier and child cannot see session context. Input is limited to
   worker output, task text, or error prose. The executed-worker receipt
   carries a `lifecycle` projection of at most 64 events (with an `overflow`
   marker), and each event is appended best-effort to
-  `.turnhelm/lifecycle.jsonl`; journaling never fails or delays the run.
+  `.turnhelm/lifecycle.jsonl`; a journaling failure never fails the run, though
+  fire-and-forget appends may briefly hold the event loop at exit.
 - Successful classification selects among `fast`, `balanced`, `deep`, `frontier`,
   `frontier_xhigh`, `frontier_max`. Maximum effort is an ordinary automatic
   selection; no bypass, max flag, or extra stage exists. A run launches at most
@@ -285,7 +286,11 @@ projection — evidence that never gates an outcome; hosted Jev never projects.
 `wholeRunUsageScope` is `"unverified"`. Snapshots are not whole-task costs
 or savings. Offline doctor/help evidence does not prove runtime config-key
 semantics, model entitlement, or paid benefit. A real worker using ChatGPT login
-is not API-key billing or invoice evidence.
+is not API-key billing or invoice evidence. Hermetic admission suites rebind
+profile mappings per tuple, so they evidence execution under a forced pair,
+never natural selection; any six-profile natural-coverage claim requires
+natural runs with unchanged mappings, reported with actual selections and
+remaining gaps.
 
 The checkout also carries a hermetic custom-round runner — `test/custom-round.ts`,
 exported through the built `dist/test` surface and invocable as

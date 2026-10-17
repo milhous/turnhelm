@@ -1194,6 +1194,8 @@ export const projectWorkerLifecycle = (value: unknown): WorkerLifecycleEvidence 
 // pid, bounded by the same read cap and ring as the receipt projection. A
 // missing, oversized, or malformed journal, or no events for the pid, keeps
 // the projection absent — nothing is fabricated.
+// 1 MiB read ceiling: a journal past it is treated as missing — the projection
+// degrades to absent rather than reading unbounded CLI-owned bytes.
 const LIFECYCLE_JOURNAL_CAP_BYTES = 1 << 20;
 export const readWorkerLifecycleJournal = async (root: string, pid: number | null): Promise<WorkerLifecycleEvidence | undefined> => {
   if (pid === null) return undefined;
@@ -1446,7 +1448,7 @@ export type CliSupervision = Readonly<{
 export function superviseCli(
   file: string,
   args: readonly string[],
-  options: Readonly<{ env: NodeJS.ProcessEnv; cwd?: string; signal?: AbortSignal; timeoutMs?: number; termGraceMs?: number; postTermMs?: number }>
+  options: Readonly<{ env: NodeJS.ProcessEnv; cwd?: string; signal?: AbortSignal; timeoutMs: number; termGraceMs?: number; postTermMs?: number }>
 ): Promise<CliSupervision> {
   return new Promise(resolve => {
     if (options.signal?.aborted) {
@@ -1563,7 +1565,7 @@ export function superviseCli(
       state.signal = signal;
       finish(true);
     });
-    timeoutTimer = setTimeout(() => halt("timeout"), options.timeoutMs ?? CASE_TIMEOUT_MS);
+    timeoutTimer = setTimeout(() => halt("timeout"), options.timeoutMs);
     if (options.signal !== undefined) {
       if (options.signal.aborted) halt("abort");
       else {

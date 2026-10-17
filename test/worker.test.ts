@@ -574,7 +574,9 @@ test("a surviving descendant keeps the stripped key set and managed marker after
   t.after(() => rm(home, { recursive: true, force: true }));
   await writeFile(join(home, ".zshenv"), "export TURNHELM_TEST_SENTINEL_MARKER=leaked\n");
   const { recorded, directory } = await runWorker(t, {
-    parentEnv: { HOME: home },
+    // The startup-file keys ride the parent env so their null samples below
+    // demonstrate stripping in-chain, not mere absence.
+    parentEnv: { HOME: home, BASH_ENV: "/tmp/host-bashenv", ENV: "/tmp/host-shenv" },
     script: `
 const KEYS = ["LAYA_API_KEY", "TYPESAFE_API_KEY", "TURNHELM_ALLOW_HOSTED_JEV", "TURNHELM_CONFIG",
   "BASH_ENV", "ENV", "TURNHELM_MANAGED_CHILD", "CODEX_HOME", "ZDOTDIR"];
@@ -610,6 +612,11 @@ descendant.unref();
   });
   assert.equal(recorded.status, "completed", "the worker completes normally while the descendant survives");
   const leader = JSON.parse(await fakeFile(directory, "leader.json")) as { pid: number; codexHome: string };
+  // The descendant's death is registered before any assertion can abandon it;
+  // the leader only settles after descendant-ready.json exists, so no poll is
+  // needed to read it here.
+  const descendant = JSON.parse(await fakeFile(directory, "descendant-ready.json")) as { pid: number };
+  t.after(() => { try { process.kill(descendant.pid, "SIGKILL"); } catch { /* already gone */ } });
   const samplesPath = join(directory, "descendant-samples.json");
   const deadline = Date.now() + 15_000;
   let samplesRaw: string | null = null;
@@ -619,10 +626,8 @@ descendant.unref();
     await new Promise(resolve => setTimeout(resolve, 50));
   }
   assert.ok(samplesRaw !== null, "the descendant samples after the leader exits");
-  const descendant = JSON.parse(await fakeFile(directory, "descendant-ready.json")) as { pid: number };
   const samples = JSON.parse(samplesRaw) as { before: Record<string, string | null>; after: Record<string, string | null> };
   assert.notEqual(descendant.pid, leader.pid, "the survivor is a separate process");
-  t.after(() => { try { process.kill(descendant.pid, "SIGKILL"); } catch { /* already gone */ } });
   for (const [name, sample] of [["before", samples.before], ["after", samples.after]] as const) {
     for (const key of ["LAYA_API_KEY", "TYPESAFE_API_KEY", "TURNHELM_ALLOW_HOSTED_JEV", "TURNHELM_CONFIG", "BASH_ENV", "ENV"]) {
       assert.equal(sample[key], null, name + " sample: " + key + " stays stripped");
