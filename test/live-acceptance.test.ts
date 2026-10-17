@@ -898,6 +898,12 @@ process.stdin.on("end", () => {
     emit({ type: "turn.completed" });
     process.exit(0);
   }
+  if (mode === "fat-journal") {
+    // EV-1: bloat the CLI-owned lifecycle journal past the tree read bound —
+    // an append-only journal with no size contract of its own must never fail
+    // a clean case's tree walk.
+    fs.appendFileSync(path.join(process.cwd(), ".turnhelm", "lifecycle.jsonl"), "x".repeat(1024 * 1024 + 4096));
+  }
   if (mode === "mutate-input") {
     fs.writeFileSync(path.join(process.cwd(), "input.json"), JSON.stringify({ values: [1] }));
   }
@@ -1350,6 +1356,20 @@ test("a failed worker case retains its lifecycle projection", { timeout: 120_000
   assert.equal(lifecycle.overflow, false);
   assert.ok(lifecycle.events.every(event => typeof event.tMs === "number" && Object.keys(event).length === 2),
     "the retained timeline is content-free: tMs and kind only");
+});
+
+test("an oversized CLI-owned journal never stops a clean case", { timeout: 120_000 }, async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  // The worker bloats .turnhelm/lifecycle.jsonl past the tree read bound; the
+  // journal is CLI-owned and append-only with no size contract, so a clean
+  // case must complete — the projection degrades, the tree walk must not.
+  const run = await buildRun(t, "laya", classifier.url, [{ id: "passes-anyway", kind: "worker-readonly" }]);
+  const code = await executeAcceptance(run.manifestPath, run.sha256, { env: workerEnv(fakeBin, "fat-journal") });
+  assert.equal(code, 0, "a fat journal is evidence degradation, never a drift stop");
+  const evidence = await readEvidence(run.runRoot);
+  assert.equal(evidence.find(line => line.phase === "verified" && line.caseId === "passes-anyway")?.verdict,
+    "pass", "the case still reserves and grades");
 });
 
 test("a killed timed-out CLI retains its journal timeline without a receipt", { timeout: 120_000 }, async t => {

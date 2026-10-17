@@ -1578,6 +1578,12 @@ const hashTree = async (root: string): Promise<Map<string, string> | null> => {
       if (entry.isDirectory()) {
         if (!(await walk(join(root, relative), relative + "/"))) return false;
       } else if (entry.isFile()) {
+        // The CLI-owned append-only journals are excluded from the walk
+        // entirely: they grow without a size contract of their own, so an
+        // oversize journal must degrade its evidence projection, never fail a
+        // clean case's tree walk. A worker write to them is covered by the
+        // CLI-owned-root allowance.
+        if (relative === ".turnhelm/routes.jsonl" || relative === ".turnhelm/lifecycle.jsonl") continue;
         // Size is checked via stat before the read: an oversize (or racing)
         // file must never be loaded whole just to be rejected. The residual
         // stat→read race matches the journal cap's, both fail closed.
@@ -1596,8 +1602,9 @@ const hashTree = async (root: string): Promise<Map<string, string> | null> => {
   return (await walk(root, "")) ? files : null;
 };
 
-// Only paths the frozen write scope (and the journal) admit may differ between
-// the before/after trees, in either direction: edits, creations, deletions.
+// Only paths the frozen write scope admits may differ between the before/after
+// trees, in either direction: edits, creations, deletions. The CLI-owned
+// journals never appear here — hashTree excludes them from the walk.
 const treeDiffClean = (
   before: Map<string, string> | null,
   after: Map<string, string> | null,
@@ -1605,7 +1612,6 @@ const treeDiffClean = (
 ): boolean => {
   if (before === null || after === null) return false;
   for (const path of new Set([...before.keys(), ...after.keys()])) {
-    if (path === ".turnhelm/routes.jsonl" || path === ".turnhelm/lifecycle.jsonl") continue;
     if (before.get(path) === after.get(path)) continue;
     if (!allowed.some(scope => path === scope || path.startsWith(scope + "/"))) return false;
   }
