@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Docs-only: the staged diff touches exactly five files — `README.md`, `.agents/skills/turnhelm-routing/SKILL.md`, `docs/validation/2026-10-17-campaign-5df68f6-disposition.md` (new), the spec, this plan. No `src/`, `test/`, `assets/`, config, or dependency change; no live calls; sealed campaign artifacts outside the repo are never edited.
-- Shared passages are **verbatim-identical** across README and SKILL where the spec says so (OR-1 rule sentence, DF-1 read-only clause, DF-1 failure-modes sentence); additions are additive — no existing sentence is reworded or deleted.
+- Shared passages across README and SKILL: **verbatim-identical** for the OR-1 rule sentence; the DF-1 skill copies are the sanctioned compressed form of the README text (Task 2 Step 3), matching how that file already compresses its README counterparts; additions are additive — no existing sentence is reworded or deleted.
 - The doc-fragment pins (`test/package.test.ts:129–176`, `test/init.test.ts:225–249`) must pass **unmodified** — if an edit would require touching a test, the edit is wrong.
 - English, existing voice (long normative sentences, no marketing).
 - Editing `SKILL.md` intentionally strands existing consumer installs: `init` refuses changed skill files and stops for owner reconciliation — that is the designed upgrade path under this spec's no-backward-compatibility constraint, not a defect to engineer around.

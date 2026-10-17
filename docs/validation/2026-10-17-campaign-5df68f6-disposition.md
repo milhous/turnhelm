@@ -25,7 +25,7 @@ grades and authorities are closed; this note changes none of them.
 | business/12-redaction | claimed-completion-with-unchanged-implementation — completion JSON exact, `module.mjs` byte-identical to the placeholder |
 | business/30-incident | task-output-mismatch — empty `firstFailure`/`cause` instead of the frozen database/connection-pool-exhausted facts |
 | business/37-capacity | task-output-mismatch — zeroed capacities and `safe:false` instead of the frozen 60/60/true |
-| business/42-coalescing | code-contract-assertion-failure — real frozen-contract failure with a task/oracle timing ambiguity: the contract imposes a same-turn synchronous-throw identity window the task text does not unambiguously require |
+| business/42-coalescing | code-contract-assertion-failure-inferred-from-frozen-primary-gates — real frozen-contract failure with a task/oracle timing ambiguity: the contract imposes a same-turn synchronous-throw identity window the task text does not unambiguously require |
 
 ## Open alarms and standing instructions
 
