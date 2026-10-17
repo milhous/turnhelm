@@ -100,6 +100,14 @@ export type WorkerFailureEvidence = Readonly<{
 // decode to settlement. An observation, never a liveness or stall claim.
 export type WorkerProgressEvidence = Readonly<{ events: number; lastEventAgeMs?: number }>;
 
+// The bounded lifecycle projection (spec §3.2 EV-1): the content-free worker
+// timeline, retained only where it explains a bad outcome — a failed worker or
+// an expired deadline. tMs and kind only; no detail ever rides.
+export type WorkerLifecycleEvidence = Readonly<{
+  events: readonly Readonly<{ tMs: number; kind: string }>[];
+  overflow: boolean;
+}>;
+
 // Bounded transport-policy evidence (spec §7): application policy replayed
 // from the CLI's routing attempts, never a networking or exit attestation.
 export type AttemptTransportEvidence =
@@ -109,7 +117,7 @@ export type AttemptTransportEvidence =
 export type SafeEvidence =
   | Readonly<{ phase: "prepared"; suite: LiveSuite; manifestSha256: string; startedAt: string }>
   | Readonly<{ phase: "reserved"; caseId: string; worker: number; backends: readonly AcceptanceBackend[] }>
-  | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number; attemptTransports?: AttemptTransportEvidence; workerUsage?: WorkerUsageEvidence; workerFailure?: WorkerFailureEvidence; workerProgress?: WorkerProgressEvidence }>
+  | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number; attemptTransports?: AttemptTransportEvidence; workerUsage?: WorkerUsageEvidence; workerFailure?: WorkerFailureEvidence; workerProgress?: WorkerProgressEvidence; workerLifecycle?: WorkerLifecycleEvidence }>
   | Readonly<{ phase: "verified"; caseId: string; verdict: "pass" | "fail" | "timeout"; policy: "match" | "mismatch" | "not-applicable"; checks: Readonly<Record<string, boolean>>; oracleInput?: OracleInputEvidence }>
   | Readonly<{ phase: "completed"; outcome: "pass" | "policy-mismatch"; cases: number; policyMatches: number; policyMismatches: number }>
   | Readonly<{ phase: "completed"; outcome: "pass" | "fail"; cases: number; failed: number; timedOut: number }>
@@ -1097,6 +1105,72 @@ const projectWorkerProgress = (value: unknown): WorkerProgressEvidence | undefin
   return projection;
 };
 
+// The recorder's frozen kind taxonomy, hand-copied like FAILURE_SIGNALS: a
+// kind outside it is not lifecycle evidence and drops the projection.
+const LIFECYCLE_KINDS: ReadonlySet<string> = new Set(["spawned", "stdin-delivered", "event", "completion", "failure",
+  "abort", "shutdown-term", "shutdown-kill", "shutdown-discharged", "stdout-end", "close", "settle"]);
+
+// All-or-nothing like workerFailure: an unknown key inside a present
+// projection rejects; a malformed envelope or entry drops the whole
+// projection, and entry detail is accepted from the receipt but never
+// retained. Truncation to the recorder's own ring bound reports itself.
+const projectWorkerLifecycle = (value: unknown): WorkerLifecycleEvidence | undefined => {
+  if (!isRecord(value)) return undefined;
+  for (const key of Object.keys(value)) {
+    if (key !== "events" && key !== "overflow") {
+      throw evidenceReject("workerLifecycle must not contain unknown field " + JSON.stringify(key));
+    }
+  }
+  if (typeof value.overflow !== "boolean" || !Array.isArray(value.events)) return undefined;
+  const events: { tMs: number; kind: string }[] = [];
+  for (const entry of value.events) {
+    if (!isRecord(entry)) return undefined;
+    for (const key of Object.keys(entry)) {
+      if (key !== "tMs" && key !== "kind" && key !== "detail") {
+        throw evidenceReject("workerLifecycle entry must not contain unknown field " + JSON.stringify(key));
+      }
+    }
+    if (typeof entry.tMs !== "number" || !Number.isSafeInteger(entry.tMs) || entry.tMs < 0) return undefined;
+    if (typeof entry.kind !== "string" || !LIFECYCLE_KINDS.has(entry.kind)) return undefined;
+    events.push({ tMs: entry.tMs, kind: entry.kind });
+  }
+  return { events: events.slice(-64), overflow: value.overflow || events.length > 64 };
+};
+
+// EV-1 fallback: a CLI killed before it could receipt leaves only its
+// append-only lifecycle journal under the consumer root. The timeline is
+// rebuilt content-free from that journal, filtered by the supervised CLI's
+// pid, bounded by the same read cap and ring as the receipt projection. A
+// missing, oversized, or malformed journal, or no events for the pid, keeps
+// the projection absent — nothing is fabricated.
+const LIFECYCLE_JOURNAL_CAP_BYTES = 1 << 20;
+const readWorkerLifecycleJournal = async (root: string, pid: number | null): Promise<WorkerLifecycleEvidence | undefined> => {
+  if (pid === null) return undefined;
+  const journalPath = join(root, ".turnhelm", "lifecycle.jsonl");
+  const info = await stat(journalPath).catch(() => null);
+  if (info === null || !info.isFile() || info.size > LIFECYCLE_JOURNAL_CAP_BYTES) return undefined;
+  const raw = await readFile(journalPath).catch(() => null);
+  if (raw === null) return undefined;
+  const events: { tMs: number; kind: string }[] = [];
+  for (const line of raw.toString("utf8").split("\n")) {
+    if (line === "") continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      return undefined;
+    }
+    if (!isRecord(parsed) || parsed.type !== "turnhelm.worker-lifecycle" || parsed.pid !== pid) continue;
+    if (typeof parsed.tMs !== "number" || !Number.isSafeInteger(parsed.tMs) || parsed.tMs < 0
+      || typeof parsed.kind !== "string" || !LIFECYCLE_KINDS.has(parsed.kind)) {
+      return undefined;
+    }
+    events.push({ tMs: parsed.tMs, kind: parsed.kind });
+  }
+  if (events.length === 0) return undefined;
+  return { events: events.slice(-64), overflow: events.length > 64 };
+};
+
 // Pure, bounded transport-policy projection (spec §7), shared by both
 // harnesses: at most two unique backends in a Laya-then-Jev subsequence.
 // Missing, non-array, invalid-enum, duplicate, reversed, oversized, or
@@ -1145,6 +1219,7 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
     case "observed": {
       const workerFailure = raw.workerFailure === undefined ? undefined : projectWorkerFailure(raw.workerFailure);
       const workerProgress = raw.workerProgress === undefined ? undefined : projectWorkerProgress(raw.workerProgress);
+      const workerLifecycle = raw.workerLifecycle === undefined ? undefined : projectWorkerLifecycle(raw.workerLifecycle);
       return {
         phase: "observed",
         caseId: evidenceString(raw.caseId) ?? "",
@@ -1157,7 +1232,8 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
         ...(raw.attemptTransports !== undefined ? { attemptTransports: projectAttemptTransports(raw.attemptTransports) } : {}),
         ...(raw.workerUsage !== undefined ? { workerUsage: projectWorkerUsage(raw.workerUsage) } : {}),
         ...(workerFailure !== undefined ? { workerFailure } : {}),
-        ...(workerProgress !== undefined ? { workerProgress } : {})
+        ...(workerProgress !== undefined ? { workerProgress } : {}),
+        ...(workerLifecycle !== undefined ? { workerLifecycle } : {})
       };
     }
     case "verified": {
@@ -1297,6 +1373,7 @@ const decodeBounded = (data: Buffer): string | null => {
 export type CliSupervision = Readonly<{
   exitCode: number | null;
   signal: NodeJS.Signals | null;
+  pid: number | null;
   durationMs: number;
   stdout: Buffer;
   stderr: Buffer;
@@ -1320,7 +1397,7 @@ export function superviseCli(
       // The operator aborted before the invocation: nothing is spawned, so
       // no spend can happen and there is nothing to clean up.
       resolve({
-        exitCode: null, signal: null, durationMs: 0,
+        exitCode: null, signal: null, pid: null, durationMs: 0,
         stdout: Buffer.alloc(0), stderr: Buffer.alloc(0),
         outputOverflow: false, timedOut: false, aborted: true,
         termSent: false, cliClosed: false
@@ -1337,6 +1414,7 @@ export function superviseCli(
     const state = {
       exitCode: null as number | null,
       signal: null as NodeJS.Signals | null,
+      pid: (child.pid ?? null) as number | null,
       stdout: [] as Buffer[],
       stderr: [] as Buffer[],
       outputOverflow: false,
@@ -1366,6 +1444,7 @@ export function superviseCli(
       resolve({
         exitCode: state.exitCode,
         signal: state.signal,
+        pid: state.pid,
         durationMs: Math.round(performance.now() - started),
         stdout: Buffer.concat(state.stdout),
         stderr: Buffer.concat(state.stderr),
@@ -1522,7 +1601,7 @@ const treeDiffClean = (
 ): boolean => {
   if (before === null || after === null) return false;
   for (const path of new Set([...before.keys(), ...after.keys()])) {
-    if (path === ".turnhelm/routes.jsonl") continue;
+    if (path === ".turnhelm/routes.jsonl" || path === ".turnhelm/lifecycle.jsonl") continue;
     if (before.get(path) === after.get(path)) continue;
     if (!allowed.some(scope => path === scope || path.startsWith(scope + "/"))) return false;
   }
@@ -1808,7 +1887,7 @@ export async function executeAcceptance(
           }
           const supervision = await superviseCli(
             process.execPath,
-            [CLI_PATH, "run", "--project", item.root,
+            [CLI_PATH, "run", "--project", item.root, "--lifecycle",
               ...(item.kind === "worker-write" ? ["--write"] : []),
               // SC-1: the frozen schema rides the CLI flag from the consumer
               // root; the CLI's input boundary re-validates and stages it.
@@ -1874,6 +1953,16 @@ export async function executeAcceptance(
               ...(worker.lastEventAgeMs !== undefined ? { lastEventAgeMs: worker.lastEventAgeMs } : {})
             })
             : undefined;
+          // EV-1: the worker timeline is retained exactly where it explains a
+          // bad outcome — a failed worker or an expired deadline. The receipt's
+          // own projection is preferred; a CLI that died before receipting is
+          // rebuilt from its append-only journal, filtered by the supervised
+          // CLI's pid.
+          const workerLifecycle = worker?.status === "failed" || supervision.timedOut
+            ? worker?.lifecycle !== undefined
+              ? projectWorkerLifecycle(worker.lifecycle)
+              : await readWorkerLifecycleJournal(item.root, supervision.pid)
+            : undefined;
           const claimedRoot = receiptFrame !== null && typeof receiptFrame.root === "string" ? receiptFrame.root : null;
           const rootOk = claimedRoot !== null && await realpath(claimedRoot).catch(() => "") === item.root;
           observation = {
@@ -1885,7 +1974,8 @@ export async function executeAcceptance(
             attemptTransports: projectAttemptTransports(receiptLine?.attempts),
             workerUsage: projectWorkerUsage(worker?.usage),
             ...(workerFailure !== undefined ? { workerFailure } : {}),
-            ...(workerProgress !== undefined ? { workerProgress } : {})
+            ...(workerProgress !== undefined ? { workerProgress } : {}),
+            ...(workerLifecycle !== undefined ? { workerLifecycle } : {})
           };
 
           // The observation is persisted before any fallible verification read
