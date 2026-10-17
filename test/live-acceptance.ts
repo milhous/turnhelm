@@ -14,6 +14,7 @@ import { promisify } from "node:util";
 import { parseProjectConfig, PROFILE_IDS, type ProfileId, type ProjectConfig } from "../src/config.js";
 import { FAILURE_PHRASINGS, type FailureClass } from "../src/codex-events.js";
 import { initProject } from "../src/init.js";
+import { validateOutputSchemaBytes } from "../src/output-schema.js";
 import { envelopePayload } from "../src/payload.js";
 import { readProjectFile } from "../src/project.js";
 import { routeTask } from "../src/route.js";
@@ -43,8 +44,19 @@ export type AcceptanceCase = Readonly<{
   inputHashes: Readonly<Record<string, string>>;
   allowedChanges: readonly string[];
   oracle: AcceptanceOracle;
+  outputSchema?: Readonly<{ relative: string; sha256: string }>;
   reservation: Readonly<{ worker: number; backends: readonly AcceptanceBackend[] }>;
 }>;
+
+// SC-1 (spec §3.1): the frozen output schema for stdout-json cases — exact
+// bytes, validated through the same input-boundary check the CLI runs before
+// they are written into the consumer root and hashed with the other inputs.
+const STDOUT_JSON_SCHEMA = Buffer.from(
+  '{"type":"object","required":["count","sum"],'
+  + '"properties":{"count":{"type":"number"},"sum":{"type":"number"}},"additionalProperties":false}',
+  "utf8"
+);
+const OUTPUT_SCHEMA_RELATIVE = "output-schema.json";
 
 export type AcceptanceManifest = Readonly<{
   version: 2;
@@ -242,7 +254,10 @@ const parseManifest = (value: unknown): AcceptanceManifest => {
   const seen = new Set<string>();
   const cases = value.cases.map(raw => {
     if (!isRecord(raw)) throw fail("case must be an object");
-    expectKeys(raw, ["allowedChanges", "config", "id", "identity", "inputHashes", "kind", "oracle", "reservation", "root", "task", "taskBytes", "taskHash"], "case");
+    // outputSchema is the one optional case key; every other key stays exact.
+    const caseKeys = ["allowedChanges", "config", "id", "identity", "inputHashes", "kind", "oracle", "reservation", "root", "task", "taskBytes", "taskHash"];
+    if (raw.outputSchema !== undefined) caseKeys.push("outputSchema");
+    expectKeys(raw, caseKeys, "case");
     const id = expectString(raw.id, "case id");
     if (seen.has(id)) throw fail("case id " + JSON.stringify(id) + " is duplicated");
     seen.add(id);
@@ -277,18 +292,35 @@ const parseManifest = (value: unknown): AcceptanceManifest => {
     if (raw.taskHash !== sha256hex(Buffer.from(task, "utf8"))) throw fail("case taskHash must match the task text");
     const taskHash: string = raw.taskHash;
 
+    // SC-1: a schema-bearing case freezes its schema as a path+hash entry tied
+    // to its own inputHashes record; the shape check is bounded and the
+    // stdout-json-only rule is enforced once the oracle is parsed below.
+    let outputSchema: AcceptanceCase["outputSchema"];
+    if (raw.outputSchema !== undefined) {
+      if (!isRecord(raw.outputSchema)) throw fail("case outputSchema must be an object");
+      expectKeys(raw.outputSchema, ["relative", "sha256"], "case outputSchema");
+      const relative = expectString(raw.outputSchema.relative, "case outputSchema relative");
+      if (!isHex(raw.outputSchema.sha256, 64)) throw fail("case outputSchema sha256 is malformed");
+      outputSchema = { relative, sha256: raw.outputSchema.sha256 };
+    }
     if (!isRecord(raw.inputHashes)) throw fail("case inputHashes must be an object");
     const inputHashes: Record<string, string> = {};
     if (kind === "classifier-only") {
       if (Object.keys(raw.inputHashes).length !== 0) throw fail("classifier-only case must not hash inputs");
     } else {
+      const expectedFiles = outputSchema === undefined
+        ? [...WORKER_FROZEN_FILES]
+        : [...WORKER_FROZEN_FILES, outputSchema.relative];
       const keys = Object.keys(raw.inputHashes);
-      if (keys.length !== WORKER_FROZEN_FILES.length || !WORKER_FROZEN_FILES.every(file => keys.includes(file))) {
+      if (keys.length !== expectedFiles.length || !expectedFiles.every(file => keys.includes(file))) {
         throw fail("worker case inputHashes must cover exactly the frozen case files");
       }
-      for (const file of WORKER_FROZEN_FILES) {
+      for (const file of expectedFiles) {
         if (!isHex(raw.inputHashes[file], 64)) throw fail("worker case " + file + " hash is malformed");
         inputHashes[file] = raw.inputHashes[file] as string;
+      }
+      if (outputSchema !== undefined && inputHashes[outputSchema.relative] !== outputSchema.sha256) {
+        throw fail("case outputSchema must hash-match its inputHashes entry");
       }
     }
 
@@ -333,6 +365,10 @@ const parseManifest = (value: unknown): AcceptanceManifest => {
       };
     }
 
+    if (outputSchema !== undefined && (kind !== "worker-readonly" || oracle.kind !== "stdout-json")) {
+      throw fail("case outputSchema belongs only to worker-readonly stdout-json cases");
+    }
+
     if (!isRecord(raw.reservation)) throw fail("case reservation must be an object");
     expectKeys(raw.reservation, ["worker", "backends"], "case reservation");
     const reservedWorker = expectCount(raw.reservation.worker, "case reservation worker");
@@ -353,7 +389,11 @@ const parseManifest = (value: unknown): AcceptanceManifest => {
     if (config.backends.laya.enabled && !backends.includes("laya")) throw fail("case reservation must cover the enabled laya backend");
     if (config.backends.jev.enabled && !backends.includes("jev")) throw fail("case reservation must cover the enabled jev backend");
 
-    return { id, kind, root, identity, task, taskHash, taskBytes, config, inputHashes, allowedChanges: wanted, oracle, reservation: { worker: reservedWorker, backends } };
+    return {
+      id, kind, root, identity, task, taskHash, taskBytes, config, inputHashes, allowedChanges: wanted, oracle,
+      ...(outputSchema !== undefined ? { outputSchema } : {}),
+      reservation: { worker: reservedWorker, backends }
+    };
   });
 
   if (caps.worker !== cases.reduce((total, item) => total + item.reservation.worker, 0)
@@ -687,6 +727,19 @@ export async function prepareAcceptance(
     const task = kind === "worker-write" ? corpus.workerWriteTask : corpus.workerReadonlyTask;
     const taskBytes = Buffer.from(task, "utf8");
     if (taskBytes.length > MAX_TASK_BYTES) throw new Error("consumer task exceeds the transport bound");
+    // SC-1: every stdout-json case carries the fixed output schema, validated
+    // through the shared boundary check before it is written, then frozen by
+    // relative path and hash with the other inputs. Write cases keep their
+    // summary-file contract and freeze no schema.
+    let outputSchema: AcceptanceCase["outputSchema"];
+    if (kind === "worker-readonly") {
+      const schema = validateOutputSchemaBytes(STDOUT_JSON_SCHEMA);
+      if ("error" in schema) throw new Error("prepare could not validate the frozen output schema: " + schema.error);
+      await writeFile(join(root, OUTPUT_SCHEMA_RELATIVE), STDOUT_JSON_SCHEMA, { mode: 0o644 });
+      outputSchema = { relative: OUTPUT_SCHEMA_RELATIVE, sha256: sha256hex(STDOUT_JSON_SCHEMA) };
+    }
+    const inputHashes = await frozenFileHashes(root);
+    if (outputSchema !== undefined) inputHashes[outputSchema.relative] = outputSchema.sha256;
     return {
       id,
       kind,
@@ -696,11 +749,12 @@ export async function prepareAcceptance(
       taskHash: sha256hex(taskBytes),
       taskBytes: taskBytes.length,
       config,
-      inputHashes: await frozenFileHashes(root),
+      inputHashes,
       allowedChanges: kind === "worker-write" ? ["out/summary.json"] : [],
       oracle: kind === "worker-write"
         ? { kind: "summary-file", expected }
         : { kind: "stdout-json", expected },
+      ...(outputSchema !== undefined ? { outputSchema } : {}),
       reservation: { worker: 1, backends }
     };
   };
@@ -1738,7 +1792,11 @@ export async function executeAcceptance(
           const supervision = await superviseCli(
             process.execPath,
             [CLI_PATH, "run", "--project", item.root,
-              ...(item.kind === "worker-write" ? ["--write"] : []), "--", item.task],
+              ...(item.kind === "worker-write" ? ["--write"] : []),
+              // SC-1: the frozen schema rides the CLI flag from the consumer
+              // root; the CLI's input boundary re-validates and stages it.
+              ...(item.outputSchema !== undefined ? ["--output-schema", join(item.root, item.outputSchema.relative)] : []),
+              "--", item.task],
             { env: caseEnv, timeoutMs: CASE_TIMEOUT_MS, signal: abort, termGraceMs: options?.termGraceMs, postTermMs: options?.postTermMs }
           );
 

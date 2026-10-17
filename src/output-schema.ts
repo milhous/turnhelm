@@ -2,6 +2,26 @@ import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 
 export const SCHEMA_MAX_BYTES = 64 * 1024;
 
+// The content checks shared by the path and bytes variants: cap, UTF-8, and
+// plain object. Fixed wording only; content never reaches a diagnostic.
+export function validateOutputSchemaBytes(bytes: Buffer): { bytes: Buffer } | { error: string } {
+  if (bytes.length > SCHEMA_MAX_BYTES) return { error: "the output schema exceeds the 65536-byte limit." };
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return { error: "the output schema is not valid UTF-8." };
+  }
+  try {
+    const parsed: unknown = JSON.parse(bytes.toString("utf8"));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return { error: "the output schema must be a single JSON object." };
+    }
+  } catch {
+    return { error: "the output schema must be a single JSON object." };
+  }
+  return { bytes };
+}
+
 // OC-1: the opt-in output schema is validated exactly once at the input
 // boundary, so only already-validated bytes cross toward the worker, which
 // stages its own copy inside the managed home — the caller's path is never
@@ -31,20 +51,7 @@ export function validateOutputSchema(path: string): { bytes: Buffer } | { error:
         chunks.push(chunk.subarray(0, got));
       }
       const bytes = Buffer.concat(chunks);
-      try {
-        new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-      } catch {
-        return { error: "the output schema is not valid UTF-8." };
-      }
-      try {
-        const parsed: unknown = JSON.parse(bytes.toString("utf8"));
-        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-          return { error: "the output schema must be a single JSON object." };
-        }
-      } catch {
-        return { error: "the output schema must be a single JSON object." };
-      }
-      return { bytes };
+      return validateOutputSchemaBytes(bytes);
     } finally {
       closeSync(descriptor);
     }

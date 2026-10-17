@@ -534,6 +534,10 @@ test("prepare is offline and freezes independent consumers", async t => {
         ".agents/skills/turnhelm-routing/agents/openai.yaml", "input.json"] as const;
       const expectedHashes: Record<string, string> = {};
       for (const file of frozenCaseFiles) expectedHashes[file] = sha256hex(await readFile(join(item.root, file)));
+      // SC-1: readonly (stdout-json) cases freeze the fixed output schema too.
+      if (item.kind === "worker-readonly") {
+        expectedHashes["output-schema.json"] = sha256hex(await readFile(join(item.root, "output-schema.json")));
+      }
       assert.deepEqual(item.inputHashes, expectedHashes);
       assert.equal(item.allowedChanges.length, item.kind === "worker-write" ? 1 : 0);
       if (item.kind === "worker-write") assert.deepEqual(item.allowedChanges, ["out/summary.json"]);
@@ -543,7 +547,9 @@ test("prepare is offline and freezes independent consumers", async t => {
   // Strict per-case keys, task bounds, and hashes for every case.
   for (const item of laya.cases) {
     assert.deepEqual(Object.keys(item).sort(),
-      ["allowedChanges", "config", "id", "identity", "inputHashes", "kind", "oracle", "reservation", "root", "task", "taskBytes", "taskHash"]);
+      item.kind === "worker-readonly"
+        ? ["allowedChanges", "config", "id", "identity", "inputHashes", "kind", "oracle", "outputSchema", "reservation", "root", "task", "taskBytes", "taskHash"]
+        : ["allowedChanges", "config", "id", "identity", "inputHashes", "kind", "oracle", "reservation", "root", "task", "taskBytes", "taskHash"]);
     assert.ok(item.taskBytes <= 8192, item.id + " task fits the transport bound");
     const taskBytes = Buffer.from(item.task, "utf8");
     assert.equal(item.taskBytes, taskBytes.length);
@@ -683,6 +689,33 @@ const choiceBody = (profileId: string): string => JSON.stringify({
   usage: { truncated: false, state_tokens_dropped: 0 }
 });
 
+test("prepare writes and freezes the stdout-json case schema", { timeout: 120_000 }, async t => {
+  const result = await prepareAcceptance("laya");
+  t.after(() => rm(dirname(result.manifestPath), { recursive: true, force: true }).catch(() => {}));
+  const schemaBytes = Buffer.from(STDOUT_JSON_SCHEMA_TEXT, "utf8");
+  const schemaSha = sha256hex(schemaBytes);
+  type SchemaCase = {
+    id: string; kind: string; root: string;
+    outputSchema?: { relative: string; sha256: string };
+    inputHashes: Record<string, string>;
+  };
+  const cases = (await loadManifest(result.manifestPath)).cases as readonly SchemaCase[];
+  const readonlyCases = cases.filter(item => item.kind === "worker-readonly");
+  assert.ok(readonlyCases.length > 0, "the laya suite freezes readonly cases");
+  for (const item of readonlyCases) {
+    assert.deepEqual(item.outputSchema, { relative: "output-schema.json", sha256: schemaSha },
+      item.id + " freezes the fixed schema by relative path and hash");
+    const onDisk = await readFile(join(item.root, "output-schema.json"));
+    assert.ok(onDisk.equals(schemaBytes), item.id + " wrote the exact schema bytes");
+    assert.equal(item.inputHashes["output-schema.json"], schemaSha,
+      item.id + " hashes the schema with the other frozen inputs");
+  }
+  for (const item of cases.filter(entry => entry.kind !== "worker-readonly")) {
+    assert.equal(item.outputSchema, undefined, item.id + " carries no schema");
+    assert.equal(item.inputHashes["output-schema.json"], undefined, item.id + " hashes no schema");
+  }
+});
+
 const startClassifierFixture = async (t: TestContext, onRequest?: (count: number) => void) => {
   const state = { requests: 0 };
   const scripted: string[] = [];
@@ -710,6 +743,12 @@ const HOSTILE_ANSWER = '"}\\n before {"count":4,"sum":17} after "'
 
 // A failure message whose text must never survive past the class+hash pair.
 const HOSTILE_FAILURE = "upstream rate limit exceeded while password=p@ss.word! stayed live for the caller";
+
+// SC-1 (spec §3.1) pins the stdout-json case schema's exact bytes. The literal
+// here is deliberately independent of the harness's copy so a drift in either
+// direction fails a test instead of silently agreeing.
+const STDOUT_JSON_SCHEMA_TEXT = '{"type":"object","required":["count","sum"],'
+  + '"properties":{"count":{"type":"number"},"sum":{"type":"number"}},"additionalProperties":false}';
 
 // Modes: ok-readonly, ok-write, write-readonly (writes despite read-only sandbox),
 // fail, hang, emit-then-hang (one decoded event, then idles until cancelled),
@@ -739,6 +778,13 @@ process.stdin.on("end", () => {
   if (process.env.TURNHELM_TEST_INVOCATIONS) {
     fs.appendFileSync(process.env.TURNHELM_TEST_INVOCATIONS,
       JSON.stringify({ argv: process.argv.length }) + "\\n");
+  }
+  if (process.env.TURNHELM_TEST_ARGV_FILE) {
+    const schemaIndex = args.indexOf("--output-schema");
+    fs.writeFileSync(process.env.TURNHELM_TEST_ARGV_FILE, JSON.stringify({
+      argv: args,
+      outputSchema: schemaIndex === -1 ? null : fs.readFileSync(args[schemaIndex + 1], "utf8")
+    }));
   }
   const emit = event => process.stdout.write(JSON.stringify(event) + "\\n");
   const answer = JSON.stringify({ count: 4, sum: 17 });
@@ -945,6 +991,7 @@ type CraftedCase = {
   reservation?: readonly ("laya" | "jev")[];
   jevEnabled?: boolean;
   jevTransport?: { mode: "direct" } | { mode: "http-connect"; proxyUrl: string };
+  withSchema?: boolean;
 };
 
 const readEvidence = async (runRoot: string): Promise<Record<string, unknown>[]> =>
@@ -1019,6 +1066,10 @@ const buildRun = async (
       await writeFile(join(root, ".turnhelm", "routes.jsonl"), entry.journalSeed.join("\n") + "\n", { mode: 0o644 });
     }
     const info = await stat(root);
+    const schemaBytes = entry.withSchema === true ? Buffer.from(STDOUT_JSON_SCHEMA_TEXT, "utf8") : undefined;
+    if (schemaBytes !== undefined) {
+      await writeFile(join(root, "output-schema.json"), schemaBytes, { mode: 0o644 });
+    }
     manifestCases.push({
       id: entry.id, kind: entry.kind, root: await realpath(root),
       identity: { dev: info.dev, ino: info.ino },
@@ -1028,8 +1079,12 @@ const buildRun = async (
         "AGENTS.md": sha256hex(await readFile(join(root, "AGENTS.md"))),
         ".agents/skills/turnhelm-routing/SKILL.md": sha256hex(await readFile(join(root, ".agents", "skills", "turnhelm-routing", "SKILL.md"))),
         ".agents/skills/turnhelm-routing/agents/openai.yaml": sha256hex(await readFile(join(root, ".agents", "skills", "turnhelm-routing", "agents", "openai.yaml"))),
-        "input.json": sha256hex(input)
+        "input.json": sha256hex(input),
+        ...(schemaBytes !== undefined ? { "output-schema.json": sha256hex(schemaBytes) } : {})
       },
+      ...(schemaBytes !== undefined
+        ? { outputSchema: { relative: "output-schema.json", sha256: sha256hex(schemaBytes) } }
+        : {}),
       allowedChanges: entry.kind === "worker-write" ? ["out/summary.json"] : [],
       oracle: entry.kind === "worker-write"
         ? { kind: "summary-file", expected: { count: 4, sum: 17 } }
@@ -2081,6 +2136,29 @@ test("RR01 whole payload and exact keys", async t => {
   const looseWrite = await runOf("summary-loose", "worker-write", "wr-loose");
   assert.equal(looseWrite.code, 0);
 });
+
+test("the acceptance worker CLI passes --output-schema for stdout-json cases and not for summary-file cases",
+  { timeout: 90_000 }, async t => {
+    const classifier = await startClassifierFixture(t);
+    const fakeBin = await writeFakeCodex(t);
+    const readonlyRun = await buildRun(t, "laya", classifier.url, [
+      { id: "ro-schema", kind: "worker-readonly", withSchema: true }
+    ]);
+    const readonlyArgv = join(readonlyRun.runRoot, "argv.json");
+    const readonlyCode = await executeAcceptance(readonlyRun.manifestPath, readonlyRun.sha256,
+      { env: { ...workerEnv(fakeBin, "ok-readonly"), TURNHELM_TEST_ARGV_FILE: readonlyArgv } });
+    assert.equal(readonlyCode, 0, "the schema-carrying stdout-json case still passes");
+    const writeRun = await buildRun(t, "laya", classifier.url, [{ id: "wr-plain", kind: "worker-write" }]);
+    const writeArgv = join(writeRun.runRoot, "argv.json");
+    const writeCode = await executeAcceptance(writeRun.manifestPath, writeRun.sha256,
+      { env: { ...workerEnv(fakeBin, "ok-write"), TURNHELM_TEST_ARGV_FILE: writeArgv } });
+    assert.equal(writeCode, 0, "the schema-less summary-file case still passes");
+    const readonlyRecorded = JSON.parse(await readFile(readonlyArgv, "utf8")) as { argv: string[]; outputSchema: string | null };
+    assert.ok(readonlyRecorded.argv.includes("--output-schema"), "the stdout-json case forwards the flag");
+    assert.equal(readonlyRecorded.outputSchema, STDOUT_JSON_SCHEMA_TEXT, "the staged bytes are the frozen schema's bytes");
+    const writeRecorded = JSON.parse(await readFile(writeArgv, "utf8")) as { argv: string[]; outputSchema: string | null };
+    assert.ok(!writeRecorded.argv.includes("--output-schema"), "the summary-file case forwards no flag");
+  });
 
 test("the stdout oracle accepts the adjudicated payload-plus-prose envelope and nothing wider", async t => {
   const classifier = await startClassifierFixture(t);
