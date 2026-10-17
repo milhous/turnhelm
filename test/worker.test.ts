@@ -2490,7 +2490,8 @@ test("an end-to-end hostile worker failure yields class-only attribution in the 
 // config/credential staging as the hostile-worker e2e above. The fake answer
 // text doubles as the content-free canary.
 const LIFECYCLE_CANARY_TEXT = "lifecycle-canary-final-answer-4f9d2c";
-type FakeWorkerMode = "single-message" | "stall" | "event-flood";
+const LIFECYCLE_RATE_LIMIT_TEXT = "upstream rate limit exceeded while the caller waited";
+type FakeWorkerMode = "single-message" | "stall" | "event-flood" | "rate-fail" | "protocol-fail";
 
 const stageLifecycleCli = async (t: TestContext, mode: FakeWorkerMode): Promise<{ root: string; spawnCli: (args: string[]) => ChildProcess }> => {
   const directory = await mkdtemp(join(tmpdir(), "turnhelm-lifecycle-"));
@@ -2520,6 +2521,15 @@ const stageLifecycleCli = async (t: TestContext, mode: FakeWorkerMode): Promise<
   }
   frames.push(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: LIFECYCLE_CANARY_TEXT } }));
   if (mode !== "stall") frames.push(JSON.stringify({ type: "turn.completed" }));
+  if (mode === "rate-fail") {
+    frames.length = 0;
+    frames.push(JSON.stringify({ type: "error", message: LIFECYCLE_RATE_LIMIT_TEXT }));
+    frames.push(JSON.stringify({ type: "turn.failed", message: LIFECYCLE_RATE_LIMIT_TEXT }));
+  }
+  if (mode === "protocol-fail") {
+    frames.length = 0;
+    frames.push("!!!not-a-json-frame");
+  }
   await executableFixture(join(bin, "codex"), [
     `#!${process.execPath}`,
     "const argv = process.argv.slice(2);",
@@ -2592,6 +2602,36 @@ test("a completed run's receipt carries a bounded content-free lifecycle", { tim
   assert.equal(lifecycle.events[0].kind, "spawned", "the ring begins at spawn");
   assert.equal(lifecycle.events.at(-1)?.kind, "settle", "the ring ends at settlement");
   assert.ok(!JSON.stringify(lifecycle).includes(LIFECYCLE_CANARY_TEXT), "the lifecycle projection stays content-free");
+});
+
+test("a reported worker failure rides the lifecycle timeline with its class", { timeout: 30_000 }, async t => {
+  const { spawnCli } = await stageLifecycleCli(t, "rate-fail");
+  const run = await collectRun(spawnCli(["--lifecycle"]));
+  assert.notEqual(run.code, 0, "the reported failure fails the run");
+  const lifecycle = ((receiptOf(run.stderr).worker as Record<string, unknown>).lifecycle ?? null) as
+    { events: { kind: string; detail?: { class?: string } }[]; overflow: boolean } | null;
+  assert.ok(lifecycle !== null, "the receipt worker object carries a lifecycle projection");
+  const failure = lifecycle.events.find(event => event.kind === "failure");
+  assert.ok(failure !== undefined, "the timeline keeps the failure milestone");
+  assert.equal(failure.detail?.class, "rate-limit",
+    "the observed failure class from the frozen taxonomy rides the event, never the raw text");
+  assert.equal(lifecycle.events.at(-1)?.kind, "settle", "the ring still ends at settlement");
+  assert.ok(!JSON.stringify(lifecycle).includes(LIFECYCLE_RATE_LIMIT_TEXT),
+    "the class projection stays content-free: no failure prose");
+});
+
+test("a transport failure rides the lifecycle timeline with its cause", { timeout: 30_000 }, async t => {
+  const { spawnCli } = await stageLifecycleCli(t, "protocol-fail");
+  const run = await collectRun(spawnCli(["--lifecycle"]));
+  assert.notEqual(run.code, 0, "the protocol failure fails the run");
+  const lifecycle = ((receiptOf(run.stderr).worker as Record<string, unknown>).lifecycle ?? null) as
+    { events: { kind: string; detail?: { class?: string } }[]; overflow: boolean } | null;
+  assert.ok(lifecycle !== null, "the receipt worker object carries a lifecycle projection");
+  const failure = lifecycle.events.find(event => event.kind === "failure");
+  assert.ok(failure !== undefined, "the timeline keeps the failure milestone");
+  assert.equal(failure.detail?.class, "protocol",
+    "the parent-observed transport cause rides the event");
+  assert.equal(lifecycle.events.at(-1)?.kind, "settle", "the ring still ends at settlement");
 });
 
 test("the lifecycle journal outlives an outer kill before settlement", { timeout: 30_000 }, async t => {

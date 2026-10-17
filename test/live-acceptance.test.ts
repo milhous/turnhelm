@@ -1354,8 +1354,13 @@ test("a failed worker case retains its lifecycle projection", { timeout: 120_000
   assert.equal(kinds[0], "spawned", "the receipt's timeline begins at the worker spawn");
   assert.equal(kinds.at(-1), "settle", "the receipt's timeline ends at settlement");
   assert.equal(lifecycle.overflow, false);
-  assert.ok(lifecycle.events.every(event => typeof event.tMs === "number" && Object.keys(event).length === 2),
-    "the retained timeline is content-free: tMs and kind only");
+  const failure = lifecycle.events.find(event => event.kind === "failure");
+  assert.ok(failure !== undefined, "the timeline keeps the failure milestone");
+  assert.equal((failure as { detail?: { class?: string } }).detail?.class, "rate-limit",
+    "the retained timeline carries the observed failure class from the frozen taxonomy");
+  assert.ok(lifecycle.events.every(event => typeof event.tMs === "number"
+    && (Object.keys(event).length === 2 || (Object.keys(event).length === 3 && typeof (event as { detail?: unknown }).detail === "object"))),
+    "the retained timeline is content-free: tMs, kind, and at most a fixed-vocabulary detail");
 });
 
 test("an oversized CLI-owned journal never stops a clean case", { timeout: 120_000 }, async t => {

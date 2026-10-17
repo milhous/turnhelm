@@ -103,8 +103,9 @@ export type WorkerProgressEvidence = Readonly<{ events: number; lastEventAgeMs?:
 // The bounded lifecycle projection (spec §3.2 EV-1): the content-free worker
 // timeline, retained only where it explains a bad outcome — a failed worker or
 // an expired deadline. tMs and kind only; no detail ever rides.
+export type WorkerLifecycleDetail = Readonly<Record<string, string | number | null>>;
 export type WorkerLifecycleEvidence = Readonly<{
-  events: readonly Readonly<{ tMs: number; kind: string }>[];
+  events: readonly Readonly<{ tMs: number; kind: string; detail?: WorkerLifecycleDetail }>[];
   overflow: boolean;
 }>;
 
@@ -1110,10 +1111,31 @@ const projectWorkerProgress = (value: unknown): WorkerProgressEvidence | undefin
 const LIFECYCLE_KINDS: ReadonlySet<string> = new Set(["spawned", "stdin-delivered", "event", "completion", "failure",
   "abort", "shutdown-term", "shutdown-kill", "shutdown-discharged", "stdout-end", "close", "settle"]);
 
+// The recorder's frozen detail vocabulary, same hand-copied discipline as the
+// kinds: every value is a fixed-vocabulary string or a number the recorder
+// itself produced — content-free by construction.
+const LIFECYCLE_DETAIL_KEYS: ReadonlySet<string> =
+  new Set(["eventKind", "pid", "exitCode", "signal", "status", "class"]);
+
+const projectLifecycleDetail = (value: unknown): WorkerLifecycleDetail | undefined => {
+  if (!isRecord(value)) return undefined;
+  const detail: Record<string, string | number | null> = {};
+  for (const key of Object.keys(value)) {
+    if (!LIFECYCLE_DETAIL_KEYS.has(key)) {
+      throw evidenceReject("workerLifecycle detail must not contain unknown field " + JSON.stringify(key));
+    }
+    const raw = value[key];
+    if (typeof raw === "string" || typeof raw === "number" || raw === null) detail[key] = raw;
+    else return undefined; // a malformed optional field drops only itself
+  }
+  return detail;
+};
+
 // All-or-nothing like workerFailure: an unknown key inside a present
 // projection rejects; a malformed envelope or entry drops the whole
-// projection, and entry detail is accepted from the receipt but never
-// retained. Truncation to the recorder's own ring bound reports itself.
+// projection. Entry detail is retained only from the fixed vocabulary above —
+// the observed failure class survives, raw worker content never enters.
+// Truncation to the recorder's own ring bound reports itself.
 const projectWorkerLifecycle = (value: unknown): WorkerLifecycleEvidence | undefined => {
   if (!isRecord(value)) return undefined;
   for (const key of Object.keys(value)) {
@@ -1122,7 +1144,7 @@ const projectWorkerLifecycle = (value: unknown): WorkerLifecycleEvidence | undef
     }
   }
   if (typeof value.overflow !== "boolean" || !Array.isArray(value.events)) return undefined;
-  const events: { tMs: number; kind: string }[] = [];
+  const events: { tMs: number; kind: string; detail?: WorkerLifecycleDetail }[] = [];
   for (const entry of value.events) {
     if (!isRecord(entry)) return undefined;
     for (const key of Object.keys(entry)) {
@@ -1132,7 +1154,8 @@ const projectWorkerLifecycle = (value: unknown): WorkerLifecycleEvidence | undef
     }
     if (typeof entry.tMs !== "number" || !Number.isSafeInteger(entry.tMs) || entry.tMs < 0) return undefined;
     if (typeof entry.kind !== "string" || !LIFECYCLE_KINDS.has(entry.kind)) return undefined;
-    events.push({ tMs: entry.tMs, kind: entry.kind });
+    const detail = entry.detail === undefined ? undefined : projectLifecycleDetail(entry.detail);
+    events.push(detail === undefined ? { tMs: entry.tMs, kind: entry.kind } : { tMs: entry.tMs, kind: entry.kind, detail });
   }
   return { events: events.slice(-64), overflow: value.overflow || events.length > 64 };
 };
@@ -1151,7 +1174,7 @@ const readWorkerLifecycleJournal = async (root: string, pid: number | null): Pro
   if (info === null || !info.isFile() || info.size > LIFECYCLE_JOURNAL_CAP_BYTES) return undefined;
   const raw = await readFile(journalPath).catch(() => null);
   if (raw === null) return undefined;
-  const events: { tMs: number; kind: string }[] = [];
+  const events: { tMs: number; kind: string; detail?: WorkerLifecycleDetail }[] = [];
   for (const line of raw.toString("utf8").split("\n")) {
     if (line === "") continue;
     let parsed: unknown;
@@ -1165,7 +1188,8 @@ const readWorkerLifecycleJournal = async (root: string, pid: number | null): Pro
       || typeof parsed.kind !== "string" || !LIFECYCLE_KINDS.has(parsed.kind)) {
       return undefined;
     }
-    events.push({ tMs: parsed.tMs, kind: parsed.kind });
+    const detail = parsed.detail === undefined ? undefined : projectLifecycleDetail(parsed.detail);
+    events.push(detail === undefined ? { tMs: parsed.tMs, kind: parsed.kind } : { tMs: parsed.tMs, kind: parsed.kind, detail });
   }
   if (events.length === 0) return undefined;
   // The journal's line order is append-racy (the CLI's appends are

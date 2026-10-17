@@ -459,7 +459,7 @@ export function executeWorker(
     const recordFailure = (cause: "spawn" | "stdin" | "protocol" | "output"): void => {
       if (failure !== undefined || decided || shutdownStarted || finished) return;
       failure = cause;
-      options.lifecycle?.record("failure");
+      options.lifecycle?.record("failure", { class: cause });
       beginShutdown();
     };
 
@@ -655,7 +655,12 @@ export function executeWorker(
           // failure event owns the attribution and the single diagnostic line;
           // the deadline, not an immediate shutdown, now bounds the
           // group-cleanup obligation.
-          if (!stickyFailed) reportWorkerFailed(event.failureClass);
+          if (!stickyFailed) {
+            reportWorkerFailed(event.failureClass);
+            // EV-1: the observed failure class from the frozen taxonomy rides
+            // the timeline — never the message prose behind it.
+            options.lifecycle?.record("failure", { class: event.failureClass });
+          }
           stickyFailed = true;
           if (failureClass === undefined) {
             failureClass = event.failureClass;

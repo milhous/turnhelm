@@ -9,7 +9,7 @@ export type LifecycleKind = "spawned" | "stdin-delivered" | "event" | "completio
   | "abort" | "shutdown-term" | "shutdown-kill" | "shutdown-discharged" | "stdout-end" | "close" | "settle";
 
 export type LifecycleEvent = Readonly<{ tMs: number; kind: LifecycleKind;
-  detail?: Readonly<{ eventKind?: string; pid?: number; exitCode?: number | null; signal?: string; status?: string }> }>;
+  detail?: Readonly<{ eventKind?: string; pid?: number; exitCode?: number | null; signal?: string; status?: string; class?: string }> }>;
 
 export const LIFECYCLE_CAPACITY = 64;
 const HEAD_KEEP = 8;
