@@ -26,8 +26,8 @@ as designed. The spec's job is to make the *systematic* lessons cheap to apply n
 | `12-redaction`: exact completion JSON, `module.mjs` byte-identical to the placeholder | worker claimed completion without implementing; caught by the frozen write contract (primary gates) plus a static hash observation — the gates worked | documentation (DF-1); no code |
 | `30-incident`, `37-capacity`: schema-valid but value-wrong outputs (empty strings, zeros/false) | output framing ≠ semantic correctness; caught by oracles. The stance ("schema conformance is the consumer's acceptance gate") is already documented; the observed modes are not named anywhere | documentation (DF-1) |
 | `42-coalescing`: real frozen-contract assertion failure, but the contract imposes a same-turn synchronous-throw identity window the task text does not unambiguously require | task/oracle **timing** ambiguity. The existing roster-authoring rule (README:669–674, copied in the skill) covers ordering, ties, and direction — not *when* an effect must happen | authoring rule (OR-1) + case retirement (CD-1) |
-| `calibration-dev`: heading-en selected `frontier` in 3/3 trials against its frozen band `[fast, balanced]`; heading-zh and the whole holdout split in-band | one prompt family (n=1, three repeated trials), an en/zh asymmetry in classifier selection — a genuine open alarm, not a product defect | disposition record (CD-1); band left untouched |
-| 31/50 natural business selections fell below the predeclared band floor; all four natural task-delivery failures ran at the fast tier (`gpt-6-luna`); one same-task controlled pair (`12-redaction`: natural fast failed, fixed-balanced control passed) | bands are policy hypotheses, not optimality ground truth; the report's limits forbid causal routing claims on this evidence | disposition record (CD-1); no routing change |
+| `calibration-dev`: heading-en selected `frontier` in 3/3 trials against its frozen band `[fast, balanced]`; heading-zh and the whole holdout split in-band | one prompt family (n=1, three repeated trials), an en/zh asymmetry in classifier selection — a genuine open alarm, not a product defect, and not evidence of any particular tier being sufficient or excessive | disposition record (CD-1); band left untouched |
+| 31/50 natural business selections landed outside their predeclared bands — every one of the 31 below the band floor (per-case `expectedBand`/`selected` pairs in the sealed `report.json`); the four frozen natural business failures — including 42-coalescing, whose grade stands as a real contract-assertion failure while its cause remains timing-ambiguous — all ran at the fast tier (`gpt-6-luna`); one same-task controlled pair (`12-redaction`: natural fast failed, fixed-balanced control passed) | bands are policy hypotheses, not optimality ground truth; the report's limits forbid causal routing claims on this evidence | disposition record (CD-1); no routing change |
 | `frontier_xhigh`/`frontier_max`: zero natural selections in 50 business cases (reachable only via forced rebind admissions) | observed coverage fact, not a defect | recorded (CD-1) |
 
 | Approach | Long-term benefit / safety / performance | Decision |
@@ -36,7 +36,7 @@ as designed. The spec's job is to make the *systematic* lessons cheap to apply n
 | B: machine-checked timing-policy declaration field in the roster schema | config for prose; `prepareRound` cannot verify task-text/contract alignment anyway — the rule is for authors, not parsers | Reject |
 | C: name the three observed worker failure modes and the read-only semantics in product docs | consumers writing acceptance gates should know the observed failure distribution (wrong refusal, fake completion, value-wrong-valid-shape) instead of rediscovering it per campaign | **Adopt** (DF-1) |
 | D: code mitigations in `turnhelm run` (unchanged-implementation detection, output plausibility checks) | `turnhelm run` is a launcher, not an acceptance oracle; consumers gate (the 2026-10-16 RCA §3A stance, reaffirmed by this campaign); the harness already catches both modes at zero product cost | Reject |
-| E: refit the heading band to include `frontier` | blesses over-provisioning on the easiest task in the corpus from n=1; the standing mismatch **is** the tripwire doing its job — exit 3 on a known alarm is information, not noise to silence | Reject |
+| E: refit the heading band to include `frontier` | the band is a predeclared policy hypothesis and the evidence is one prompt family (n=1); refitting would replace the hypothesis with the classifier's current behavior and silence the alarm it exists to raise — exit 3 on a known mismatch is information, not noise. Which tier a heading edit actually needs is unmeasured and plays no part in this decision | Reject |
 | F: change profile mappings, classifier weights, or band policy on this evidence | optimality unmeasured; four fast-tier failures against ~25 fast-tier passes and one controlled pair do not authorize a cost/quality tradeoff; requires a matched diagnostic with fresh authorization | Reject (recorded in CD-1 as the open question) |
 | G: dated in-repo disposition note for the campaign | the open alarms currently live only in a sealed state-directory report; future roster authors and band owners need them where the code lives | **Adopt** (CD-1) |
 
@@ -50,9 +50,12 @@ annotated around stale wording.
 Files changed: `README.md` (roster-authoring rule paragraph; completion-not-verification boundary
 paragraphs), `.agents/skills/turnhelm-routing/SKILL.md` (the same two passages, kept verbatim-aligned with
 README), `docs/validation/2026-10-17-campaign-5df68f6-disposition.md` (new), plus this spec and its
-execution plan. **Zero `src/` and `test/` changes**: skill-file tests compare shipped copies against repo
-copies as units (`test/init.test.ts`, `test/package.test.ts`), never sentence text, so doc edits cannot
-break them.
+execution plan. **Zero `src/` and `test/` changes.** The doc edits are not test-free: `test/package.test.ts`
+(required README and skill fragments, lines 129–176) and `test/init.test.ts` (required and forbidden skill
+text, lines 225–249) pin specific passages — the edits are additive sentences that touch none of the pinned
+fragments, and keeping those assertions green **unmodified** is itself a check (§4). No existing assertion
+compares the *new* passages across README and SKILL, so their verbatim alignment is checked explicitly at
+review time (§4 item 2), not inferred from the suite.
 
 Inherited unchanged: every product invariant — routing order and deadline split, transport policy, env
 stripping, managed-home boundary and its documented residuals, payload classification, settlement and
@@ -77,8 +80,10 @@ future reuse is a v2 with the stated policy.
 
 The README boundary paragraphs (the "consumer's acceptance gate" passage and the completion-not-verification
 passage) and the skill's interpreting-results paragraph gain, in the same voice: (a) one clause —
-`--sandbox read-only` denies writes, not reads; a worker that reports it cannot read files in a read-only
-run is mistaken (observed: feature-prose, 2026-10-17); (b) the three observed task-delivery failure modes
+`--sandbox read-only` denies writes, not reads; read-only mode itself does not prohibit reading, though
+whether any specific file is readable still depends on host permissions, and the internal cause of the
+2026-10-17 feature-prose refusal is unresolved (the retained content-free evidence cannot distinguish a
+mistaken worker claim from an actual read denial); (b) the three observed task-delivery failure modes
 named as known, gated classes — wrong refusal, claimed completion with unchanged implementation,
 schema-valid but value-wrong output. No behavior change; the docs state what the gates already do and what
 this campaign actually observed.
@@ -98,23 +103,28 @@ index for future campaign authorship and supersedes nothing.
 ### Safety and performance statements
 
 No code path, dependency, or data flow is touched — the risk surface is unchanged. The benefit is
-procedural: ambiguous oracles are the only failure class this campaign found that a *future* paid run can
-inherit (OR-1 closes it at authoring time, before spend); named failure modes and a durable disposition
-record replace campaign-private tribal knowledge (DF-1, CD-1).
+procedural and stated bounded: OR-1 *reduces the risk* of authoring a new timing-ambiguous oracle (a prose
+rule cannot guarantee alignment); the observed worker misbehavior classes can recur in future runs and
+remain consumer-gated, as this campaign demonstrated; named failure modes and a durable disposition record
+replace campaign-private tribal knowledge (DF-1, CD-1). No claim is made about future delivery or routing
+quality.
 
 ## 4. Verification
 
 Offline only; zero paid calls (the §6 review calls aside).
 
-1. `git diff --stat main` shows exactly the four doc files (spec, plan, disposition note, README/SKILL edits).
-2. Text checks: the timing-rule sentences present in both README and SKILL and mutually consistent; the
-   read-only clause and the three named modes present in both; the disposition note cites the report path,
-   seal SHA, and the do-not-refit instruction verbatim-checkable.
-3. `pnpm test && pnpm build` green — the skill-copy tests must stay green unmodified, proving the
-   README↔SKILL copies remain unit-consistent.
+1. The change set is limited to the five named doc files (README, SKILL, disposition note, this spec, the
+   plan); after staging, `git diff --stat main --cached` shows exactly those five (unstaged `git diff`
+   alone would miss untracked additions).
+2. Text checks: the timing-rule sentences present in both README and SKILL and **verbatim-identical** in
+   their shared wording; the read-only clause and the three named modes likewise present in both; the
+   disposition note cites the report path, seal SHA, and the do-not-refit instruction verbatim-checkably.
+3. `pnpm test && pnpm build` green with the fragment-pinning tests (`package.test.ts`, `init.test.ts`)
+   green **unmodified** — the edits added text without touching any pinned passage.
 4. `git diff --check` clean.
 
-What these checks do not establish: nothing — there is no behavior change to establish.
+What these checks do not establish: any behavioral or delivery-quality improvement — this is a
+documentation change; its effect on future campaigns is not measurable offline.
 
 ## 5. Non-goals
 
@@ -128,4 +138,18 @@ harness roster-schema additions and no corpus expansion.
 
 ## 6. Review record — 2026-10-17 astra re-check
 
-(to be filled from the review run)
+Routed through Turnhelm against a clean clone of this branch at `b9c2176` with the dossier copied in
+(`ACCEPTANCE-SPEC.md`, `EVIDENCE-REPORT.md`, `DIAGNOSTIC-NOTES.md`; root
+`/Users/zhangxiao/.local/state/turnhelm/astra-review-20261017`). Laya/direct selected `deep` →
+`gpt-6-astra` / `high` (review config maps every profile to that tuple), routing 680 ms; worker completed
+in 97.9 s, 23 progress events, `payload.mode: "strict"`. Verdict **PROBLEMS** — 5 findings (4×P2, 1×P3),
+all adjudicated below; the spec above is the revised text. The review's scope judgment: docs-only is the
+right scope, no source or test change is forced by the evidence, and rejects D and F stand.
+
+| # | Pri | Finding (condensed) | Disposition |
+| --- | --- | --- | --- |
+| 1 | P2 | DF-1's "a worker that reports it cannot read … is mistaken" turns an unresolved refusal into a proven diagnosis; the evidence leaves the internal cause open | Accepted — DF-1(a) rewritten: read-only mode itself does not prohibit reads, host permissions still govern any specific file, and the feature-prose cause is stated as unresolved |
+| 2 | P2 | Approach E's "over-provisioning on the easiest task" implies unmeasured optimality | Accepted — E's rationale now rests on hypothesis preservation and the n=1 limit; tier adequacy is explicitly not part of the decision |
+| 3 | P2 | "Fell below the band floor" lacks direction evidence in the summarized report; "task-delivery failures" over-classifies the timing-ambiguous 42 case | Partially accepted — the downward direction is real and now cited to the per-case `expectedBand`/`selected` pairs in the sealed `report.json` (all 31 mismatches select below their band floor), not asserted from the summary; the four failures are re-worded as frozen grades, naming 42's ambiguity and preserving its failed grade without claiming proven worker incorrectness |
+| 4 | P2 | §2 wrongly said the tests never inspect sentence text (`package.test.ts:129–176`, `init.test.ts:225–249` pin fragments); §4.3 over-claimed what green copy-tests prove; §4.1's file count wrong and misses untracked files | Accepted — §2 states the pinned-fragment reality and makes unmodified-green pinning a check; §4 adds an explicit verbatim comparison of the new README↔SKILL passages (no test compares them); §4.1 corrected to five files with the staged-diff note |
+| 5 | P3 | "Only failure class a future run can inherit" + "closes it" + "nothing to establish" overstate what finite observations support | Accepted — statements bounded: OR-1 reduces authoring risk without guaranteeing alignment; worker misbehavior can recur and stays consumer-gated; §4 closing states no delivery-quality claim is measurable offline |
