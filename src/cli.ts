@@ -4,7 +4,8 @@ import { readProjectConfig } from "./config.js";
 import { doctorProject } from "./doctor.js";
 import { initProject } from "./init.js";
 import { validateOutputSchema } from "./output-schema.js";
-import { appendRouteJournal } from "./journal.js";
+import { appendLifecycleEvent, appendRouteJournal } from "./journal.js";
+import { LifecycleRecorder } from "./lifecycle.js";
 import { inspectCodex, inspectGit } from "./preflight.js";
 import { resolveProject } from "./project.js";
 import { isSupportedNode, MIN_NODE_VERSION } from "./runtime.js";
@@ -17,18 +18,18 @@ class UsageError extends Error {}
 type Command =
   | { command: "init"; project?: string; dryRun: boolean }
   | { command: "doctor"; project?: string; json: boolean; probe: boolean }
-  | { command: "run"; project?: string; write: boolean; outputSchema?: string; task?: string };
+  | { command: "run"; project?: string; write: boolean; lifecycle: boolean; outputSchema?: string; task?: string };
 
 const USAGE =
   'usage: turnhelm init [--dry-run] [--project <dir>] | '
   + 'turnhelm doctor [--json] [--probe] [--project <dir>] | '
-  + 'turnhelm run [--write] [--project <dir>] [--output-schema <file>] [--] [<task>]';
+  + 'turnhelm run [--write] [--lifecycle] [--project <dir>] [--output-schema <file>] [--] [<task>]';
 
 const parse = (argv: readonly string[]): Command => {
   const [command, ...rest] = argv;
   const allowed = command === "init" ? ["--project", "--dry-run"]
     : command === "doctor" ? ["--project", "--json", "--probe"]
-    : ["--project", "--write", "--output-schema"];
+    : ["--project", "--write", "--output-schema", "--lifecycle"];
   if (command !== "init" && command !== "doctor" && command !== "run") throw new UsageError(USAGE);
   let project: string | undefined;
   let outputSchema: string | undefined;
@@ -66,7 +67,7 @@ const parse = (argv: readonly string[]): Command => {
   if (escaped && !positional) throw new UsageError(USAGE);
   if (command === "init") return { command, project, dryRun: seen.has("--dry-run") };
   if (command === "doctor") return { command, project, json: seen.has("--json"), probe: seen.has("--probe") };
-  return { command, project, write: seen.has("--write"), outputSchema, task };
+  return { command, project, write: seen.has("--write"), lifecycle: seen.has("--lifecycle"), outputSchema, task };
 };
 
 const diagnostic = (message: string): void => {
@@ -135,7 +136,7 @@ const doctorCommand = async (root: string, json: boolean, probe: boolean): Promi
   }
 };
 
-const runCommand = async (root: string, write: boolean, positionalTask: string | undefined, outputSchema?: string): Promise<number> => {
+const runCommand = async (root: string, write: boolean, positionalTask: string | undefined, outputSchema?: string, lifecycle = false): Promise<number> => {
   // Recursion is rejected before any configuration read or classification.
   if (process.env.TURNHELM_MANAGED_CHILD === "1") {
     diagnostic("this process is a Turnhelm-managed child; run must not recurse. Execute the task directly.");
@@ -248,6 +249,11 @@ const runCommand = async (root: string, write: boolean, positionalTask: string |
         model: decision.profile.model,
         effort: decision.profile.effort
       };
+      // EV-1: opt-in lifecycle evidence — the bounded ring plus one best-effort
+      // journal line per event; without the flag nothing records or journals.
+      const recorder = lifecycle
+        ? new LifecycleRecorder(event => { void appendLifecycleEvent(root, { pid: process.pid, ...event }, diagnostic); })
+        : undefined;
       const worker = await executeWorker(decision, task, {
         executable: codex.executable,
         root,
@@ -256,7 +262,8 @@ const runCommand = async (root: string, write: boolean, positionalTask: string |
         env,
         signal: controller.signal,
         output: process.stdout,
-        diagnostics: process.stderr
+        diagnostics: process.stderr,
+        ...(recorder !== undefined ? { lifecycle: recorder } : {})
       });
       // Missing usage is explicitly unreported, never zero or omitted.
       const workerReceipt: Record<string, unknown> = {
@@ -276,6 +283,7 @@ const runCommand = async (root: string, write: boolean, positionalTask: string |
       if (worker.failureClass !== undefined) workerReceipt.failureClass = worker.failureClass;
       if (worker.errorSha256 !== undefined) workerReceipt.errorSha256 = worker.errorSha256;
       if (worker.payload !== undefined) workerReceipt.payload = worker.payload;
+      if (worker.lifecycle !== undefined) workerReceipt.lifecycle = worker.lifecycle;
       receipt.worker = workerReceipt;
       exitCode = workerExit(worker, signal);
     } else {
@@ -313,7 +321,7 @@ const main = async (): Promise<number> => {
   }
   if (command.command === "init") return initCommand(root, command.dryRun);
   if (command.command === "doctor") return doctorCommand(root, command.json, command.probe);
-  return runCommand(root, command.write, command.task, command.outputSchema);
+  return runCommand(root, command.write, command.task, command.outputSchema, command.lifecycle);
 };
 
 main().then(code => {
