@@ -1168,6 +1168,10 @@ const readWorkerLifecycleJournal = async (root: string, pid: number | null): Pro
     events.push({ tMs: parsed.tMs, kind: parsed.kind });
   }
   if (events.length === 0) return undefined;
+  // The journal's line order is append-racy (the CLI's appends are
+  // fire-and-forget), so the timeline is ordered by each event's own tMs —
+  // never by file order.
+  events.sort((a, b) => a.tMs - b.tMs);
   return { events: events.slice(-64), overflow: events.length > 64 };
 };
 

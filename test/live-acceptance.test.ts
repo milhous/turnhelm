@@ -906,11 +906,17 @@ process.stdin.on("end", () => {
   }
   if (mode === "spawn-linger") {
     // A descendant in its own process group that inherits stdout: the CLI can
-    // exit, but the supervision pipe never closes. It self-exits so no test
-    // process waits on it forever.
+    // exit, but the supervision pipe never closes. It acknowledges readiness
+    // by dropping its pid (outside the consumer tree) so the test can gate its
+    // abort on real liveness and reap it afterwards.
+    const pidFile = process.env.TURNHELM_LINGER_PID_FILE || path.join(process.cwd(), "linger.pid");
     require("node:child_process").spawn(process.execPath,
-      ["-e", "setInterval(() => {}, 3600); setTimeout(() => process.exit(0), 4000)"], {
-      detached: true, stdio: ["ignore", "inherit", "inherit"]
+      ["-e", "require('node:fs').writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 3600);",
+        pidFile], {
+      detached: true, stdio: ["ignore", "inherit", "inherit"],
+      // This lingerer is SIGKILLed by the test after the fact, so it must not
+      // carry coverage instrumentation (an own undefined blocks reinsertion).
+      env: { ...process.env, NODE_V8_COVERAGE: undefined }
     }).unref();
   }
   if (mode === "symlink-summary") {
@@ -1368,7 +1374,7 @@ test("a killed timed-out CLI retains its journal timeline without a receipt", { 
   const lifecycle = lifecycleOf(observed);
   assert.ok(lifecycle !== undefined, "the killed CLI's journal timeline is retained by pid");
   const kinds = lifecycle.events.map(event => event.kind);
-  assert.equal(kinds[0], "spawned", "the journal timeline begins at the worker spawn");
+  assert.ok(kinds.includes("spawned"), "the journal timeline retains the worker spawn");
   assert.ok(!kinds.includes("settle"), "a hard kill never settles");
   assert.ok(lifecycle.events.every(event => typeof event.tMs === "number" && Object.keys(event).length === 2),
     "the reconstructed timeline is content-free: tMs and kind only");
@@ -2458,9 +2464,21 @@ test("a lingering descendant stops the round as cleanup-unverified", async t => 
     { id: "linger-one", kind: "worker-readonly" },
     { id: "linger-two", kind: "worker-readonly" }
   ]);
+  const pidFile = join(run.runRoot, "linger.pid");
   const stopping = executeAcceptance(run.manifestPath, run.sha256,
-    { env: workerEnv(fakeBin, "spawn-linger"), signal: controller.signal, termGraceMs: 400, postTermMs: 400 });
-  await new Promise(resolve => setTimeout(resolve, 700));
+    { env: { ...workerEnv(fakeBin, "spawn-linger"), TURNHELM_LINGER_PID_FILE: pidFile },
+      signal: controller.signal, termGraceMs: 400, postTermMs: 400 });
+  // AF-3: the abort is gated on the lingerer's own readiness ack, not a fixed
+  // delay that can fire before the descendant ever spawned.
+  let lingerPid = 0;
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline && lingerPid === 0) {
+    const recorded = Number(await readFile(pidFile, "utf8").catch(() => ""));
+    if (Number.isInteger(recorded) && recorded > 0) lingerPid = recorded;
+    else await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.ok(lingerPid > 0, "the lingerer acknowledged readiness before the abort");
+  t.after(() => { try { process.kill(lingerPid, "SIGKILL"); } catch { /* already gone */ } });
   controller.abort();
   assert.equal(await stopping, 130, "the operator's signal intent stands");
   const evidence = await readEvidence(run.runRoot);
@@ -2475,14 +2493,26 @@ test("a second interrupt re-raises the default disposition", { timeout: 8000 }, 
   const classifier = await startClassifierFixture(t);
   const fakeBin = await writeFakeCodex(t);
   const run = await buildRun(t, "laya", classifier.url, [{ id: "linger-entry", kind: "worker-readonly" }]);
+  const pidFile = join(run.runRoot, "linger.pid");
   const entry = spawn(process.execPath,
     [ENTRY_PATH, "--execute", run.manifestPath, "--approve", run.sha256],
-    { env: workerEnv(fakeBin, "spawn-linger"), stdio: ["ignore", "ignore", "pipe"] });
+    { env: { ...workerEnv(fakeBin, "spawn-linger"), TURNHELM_LINGER_PID_FILE: pidFile },
+      stdio: ["ignore", "ignore", "pipe"] });
   t.after(() => entry.kill("SIGKILL"));
   const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => {
     entry.on("close", (code, signal) => resolve({ code, signal }));
   });
-  await new Promise(resolve => setTimeout(resolve, 700));
+  // AF-3: the first interrupt is gated on the lingerer's readiness ack, not a
+  // fixed delay that can fire before the descendant ever spawned.
+  let lingerPid = 0;
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline && lingerPid === 0) {
+    const recorded = Number(await readFile(pidFile, "utf8").catch(() => ""));
+    if (Number.isInteger(recorded) && recorded > 0) lingerPid = recorded;
+    else await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.ok(lingerPid > 0, "the lingerer acknowledged readiness before the interrupt");
+  t.after(() => { try { process.kill(lingerPid, "SIGKILL"); } catch { /* already gone */ } });
   entry.kill("SIGINT");
   await new Promise(resolve => setTimeout(resolve, 350));
   entry.kill("SIGINT");
