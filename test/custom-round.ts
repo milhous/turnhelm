@@ -245,6 +245,7 @@ export type RosterCase = {
   scope: string;
   task: string;
   transport: "arg" | "stdin-file";
+  deadlineMs: number;
   root: string;
   allowedChanges: string[];
   allowedProfiles: string[];
@@ -403,7 +404,7 @@ const validateRoster = async (rosterPath: string): Promise<Roster> => {
     const item = raw as Record<string, unknown>;
     // outputSchema is the one optional case key: a case either carries it or
     // omits it, and anything beyond the base set is still refused.
-    const caseKeys = ["id", "kind", "scope", "task", "transport", "root", "allowedChanges", "allowedProfiles", "grading", "files"];
+    const caseKeys = ["id", "kind", "scope", "task", "transport", "deadlineMs", "root", "allowedChanges", "allowedProfiles", "grading", "files"];
     if (item.outputSchema !== undefined) caseKeys.push("outputSchema");
     expectExactKeys(item, caseKeys, "case");
     const id = item.id;
@@ -424,6 +425,13 @@ const validateRoster = async (rosterPath: string): Promise<Roster> => {
     }
     const transport = item.transport;
     if (transport !== "arg" && transport !== "stdin-file") rosterFail(where + " transport must be arg or stdin-file");
+    // DL-1: the case owns its deadline — a bounded wall-clock budget frozen
+    // with the manifest, never an execute-time knob.
+    const deadlineMs = item.deadlineMs;
+    if (typeof deadlineMs !== "number" || !Number.isInteger(deadlineMs)
+      || deadlineMs < 5000 || deadlineMs > 3_600_000) {
+      rosterFail(where + " deadlineMs must be an integer between 5000 and 3600000");
+    }
     const root = item.root;
     if (typeof root !== "string" || root === "") rosterFail(where + " root must be a nonempty string");
     await isDirectory(root, where + " root");
@@ -613,6 +621,7 @@ export async function prepareRound(
       scope: item.scope,
       task: item.task,
       transport: item.transport,
+      deadlineMs: item.deadlineMs,
       root: { canonical: await realpath(item.root), dev: rootInfo.dev, ino: rootInfo.ino },
       allowedChanges: item.allowedChanges,
       allowedProfiles: item.allowedProfiles,
@@ -649,6 +658,7 @@ type RoundCase = {
   kind: "worker-readonly" | "worker-write";
   task: string;
   transport: "arg" | "stdin-file";
+  deadlineMs: number;
   root: { canonical: string; dev: number; ino: number };
   allowedChanges: string[];
   allowedProfiles: string[];
@@ -670,7 +680,9 @@ type RoundManifest = {
 };
 
 const CLI_PATH = join(REPO_ROOT, "dist", "src", "cli.js");
-export const CASE_TIMEOUT_MS = 240_000;
+// DL-1: the default case deadline a roster may freeze when it wants the
+// standard budget; every case carries its own explicit deadlineMs either way.
+export const DEFAULT_CASE_DEADLINE_MS = 240_000;
 const CONTRACT_TIMEOUT_MS = 20_000;
 const JOURNAL_CAP_BYTES = 1 << 20;
 const SCRUBBED_ENV_KEYS = ["TURNHELM_ALLOW_HOSTED_JEV", "TYPESAFE_API_KEY", "LAYA_API_KEY", "OPENAI_API_KEY",
@@ -693,6 +705,8 @@ const parseRoundManifest = (bytes: Buffer): RoundManifest | null => {
     for (const item of value.cases) {
       if (typeof item?.id !== "string" || typeof item?.task !== "string"
         || (item.transport !== "arg" && item.transport !== "stdin-file")
+        || typeof item.deadlineMs !== "number" || !Number.isInteger(item.deadlineMs)
+        || item.deadlineMs < 5000 || item.deadlineMs > 3_600_000
         || (item.kind !== "worker-readonly" && item.kind !== "worker-write")
         || typeof item.root?.canonical !== "string"
         || !Number.isInteger(item.root?.dev) || !Number.isInteger(item.root?.ino)
@@ -946,7 +960,7 @@ const ORACLE_INPUT_CAP_BYTES = 1 << 16;
 export async function executeRound(
   manifestPath: string,
   approvedSha256: string,
-  options?: Readonly<{ env?: NodeJS.ProcessEnv; signal?: AbortSignal; sandboxExecPath?: string; caseTimeoutMs?: number }>
+  options?: Readonly<{ env?: NodeJS.ProcessEnv; signal?: AbortSignal; sandboxExecPath?: string }>
 ): Promise<number> {
   // Signal ladder (spec §3.3): the first SIGINT stops gracefully — the owned
   // CLI child is signalled through its supervision abort path and the round
@@ -1009,7 +1023,7 @@ const fileIdentityMatches = async (
 async function runGatedRound(
   manifestPath: string,
   approvedSha256: string,
-  options: Readonly<{ env?: NodeJS.ProcessEnv; sandboxExecPath?: string; caseTimeoutMs?: number }> | undefined,
+  options: Readonly<{ env?: NodeJS.ProcessEnv; sandboxExecPath?: string }> | undefined,
   signal: AbortSignal,
   terminated: () => boolean
 ): Promise<number> {
@@ -1141,9 +1155,11 @@ async function runGatedRound(
             "--project", shQuote(item.root.canonical), ...writeArgs.map(shQuote), ...schemaArgs.map(shQuote),
             "<", shQuote(taskFileEntry === undefined ? "" : taskFileEntry.path)].join(" ")]
         };
-    // caseTimeoutMs is a test knob; the production budget stays CASE_TIMEOUT_MS.
+    // DL-1: each case runs under its own frozen deadline — monotonic clock
+    // from CLI spawn to supervision settlement; the cleanup grace stays a
+    // separate budget execution can never extend.
     const observation = await superviseCli(supervision.file, supervision.args,
-      { env, timeoutMs: options?.caseTimeoutMs ?? CASE_TIMEOUT_MS, signal });
+      { env, timeoutMs: item.deadlineMs, signal });
     if (observation.aborted || signal.aborted) {
       await appendEvidence({ phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
       return terminated() ? 143 : 130;
