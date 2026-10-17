@@ -86,7 +86,11 @@ least one credential source is discoverable — the auth file at the expected so
 writes through the symlink to the real file; concurrent runs share that file exactly as they share `CODEX_HOME`
 today, so refresh and concurrency semantics are inherited, not newly introduced. Write-through and
 no-second-copy behavior are pinned offline (§4 item 3); live refresh behavior is verified only in a future
-authorized campaign, and the spec claims no more than that.
+authorized campaign, and the spec claims no more than that. *Live observation (2026-10-17):* one real run
+through a symlinked copied credential (evidence root `boundary-live-20261017-100326`) completed with the
+source file byte-identical afterward — no refresh cycle occurred in that run, so write-through remains
+offline-pinned; the mid-run home listing (no-second-copy on a real binary) was not captured and stays
+unobserved, not claimed.
 
 *Lifecycle:* creation failure fails closed with the existing `spawn` failure class — there is no fallback to the
 inherited home. The directory is removed recursively **after settlement discharge** (owned shutdown complete,
@@ -257,6 +261,17 @@ likewise), so it cannot render the enforced set of a worker argv and no behavior
 enforced set could be added. Its one offline use here is row 4's confirmation that `AGENTS.md` is a
 live model-visible source. Behavioral verification of enforced set and residuals rides the next
 authorized live campaign, as §4 already states.
+
+**§7 live verification (2026-10-17, codex-cli 0.162.1, evidence root `boundary-live-20261017-100326`):**
+two marker-probe runs through the real CLI and a real worker (both receipts `codexHomeManaged: true`,
+Laya/direct routing). Run 1 — a hostile parent `CODEX_HOME` carrying a poisoned `config.toml` (model pin)
+and an `AGENTS.md` whose mandatory instruction prefixes every reply with marker
+`TURNHELM-BOUNDARY-PROBE-hostile-7c4a91f2`: the marker appears nowhere in the worker's message or
+diagnostics and the instruction was not obeyed (rows 1–2 and 4–7 held behaviorally; a leaked channel would
+have surfaced exactly as this marker). Run 2 — the same probe with a project `AGENTS.md` marker
+(`…project-5e8b23d7`, row 5's intended channel): the marker appears in the worker's message — the probe is
+not deaf, so run 1's absence is suppression, not blindness. Both runs settled in the normal completed shape
+(`code: 143` + `ownedShutdown: true` + SIGTERM stop ladder after the terminal event).
 
 ## 8. Implementation-review record — 2026-10-16 astra re-check of the branch
 
