@@ -267,8 +267,12 @@ two marker-probe runs through the real CLI and a real worker (both receipts `cod
 Laya/direct routing). Run 1 — a hostile parent `CODEX_HOME` carrying a poisoned `config.toml` (model pin)
 and an `AGENTS.md` whose mandatory instruction prefixes every reply with marker
 `TURNHELM-BOUNDARY-PROBE-hostile-7c4a91f2`: the marker appears nowhere in the worker's message or
-diagnostics and the instruction was not obeyed (rows 1–2 and 4–7 held behaviorally; a leaked channel would
-have surfaced exactly as this marker). Run 2 — the same probe with a project `AGENTS.md` marker
+diagnostics and the instruction was not obeyed — row 4's channel held behaviorally, and a leaked
+`AGENTS.md` channel would have surfaced exactly as this marker. Rows 1–2 and 6–7 were *not* behaviorally
+probed (no profile/hooks/MCP content was planted, and turnhelm itself pins `--model` and
+`--model_reasoning_effort` in the worker argv, so a config model pin is structurally unobservable in the
+output); they share row 4's empty-managed-home mechanism and stand at mechanism level only, not as
+behavioral proof. Run 2 — the same probe with a project `AGENTS.md` marker
 (`…project-5e8b23d7`, row 5's intended channel): the marker appears in the worker's message — the probe is
 not deaf, so run 1's absence is suppression, not blindness. Both runs settled in the normal completed shape
 (`code: 143` + `ownedShutdown: true` + SIGTERM stop ladder after the terminal event).
