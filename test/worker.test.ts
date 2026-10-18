@@ -40,8 +40,10 @@ fs.writeFileSync(path.join(here, "argv.json"), JSON.stringify(process.argv.slice
 fs.writeFileSync(path.join(here, "cwd.txt"), process.cwd());
 fs.writeFileSync(path.join(here, "env.json"), JSON.stringify({
   PATH: process.env.PATH,
+  HOME: process.env.HOME,
   CODEX_HOME: process.env.CODEX_HOME,
   ZDOTDIR: process.env.ZDOTDIR,
+  XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
   TURNHELM_MANAGED_CHILD: process.env.TURNHELM_MANAGED_CHILD,
   LAYA_API_KEY: Object.hasOwn(process.env, "LAYA_API_KEY"),
   TYPESAFE_API_KEY: Object.hasOwn(process.env, "TYPESAFE_API_KEY"),
@@ -519,7 +521,7 @@ test("worker children do not inherit coverage instrumentation across the boundar
   try {
     // Negative: across the boundary the child observes nothing (not even "").
     assert.equal(
-      await run(workerEnvironment({ PATH: process.env.PATH ?? "", NODE_V8_COVERAGE: sentinel }, "/consumer/root", "/managed/home")),
+      await run(workerEnvironment({ PATH: process.env.PATH ?? "", NODE_V8_COVERAGE: sentinel }, "/managed/home")),
       "absent");
     // Positive controls: an explicit own property still forwards; and an env
     // lacking the key — the measured harness spawn shape (CG-AC-02) — still
@@ -534,10 +536,12 @@ test("worker children do not inherit coverage instrumentation across the boundar
 });
 
 test("worker environment additionally marks the managed child", () => {
-  const env = workerEnvironment({ TYPESAFE_API_KEY: "TEST_JEV_SENTINEL", CODEX_HOME: "/tmp/codex" }, "/consumer/root", "/managed/home");
+  const env = workerEnvironment({ TYPESAFE_API_KEY: "TEST_JEV_SENTINEL", CODEX_HOME: "/tmp/codex", HOME: "/tmp/host-home" }, "/managed/home");
   assert.equal(env.TURNHELM_MANAGED_CHILD, "1");
-  assert.equal(env.ZDOTDIR, join("/consumer/root", ".turnhelm"),
-    "the managed child's zsh lookup redirects to the turnhelm-owned root");
+  assert.equal(env.HOME, "/managed/home",
+    "the managed child's HOME-derived discovery resolves inside the managed home");
+  assert.equal(env.ZDOTDIR, "/managed/home",
+    "the managed child's zsh lookup redirects to the managed home, never a host ZDOTDIR");
   assert.equal(env.TYPESAFE_API_KEY, undefined);
   assert.equal(env.CODEX_HOME, "/managed/home",
     "the managed home overrides any inherited CODEX_HOME value");
@@ -554,7 +558,10 @@ finish(() => emit({ type: "turn.completed" }));
   assert.equal(JSON.parse(await fakeFile(directory, "parent-canary-present.json")), false);
   const observedEnv = JSON.parse(await fakeFile(directory, "env.json")) as Record<string, string | boolean>;
   assert.equal(observedEnv.PATH, directory);
-  assert.equal(observedEnv.ZDOTDIR, join(directory, "root", ".turnhelm"));
+  assert.equal(observedEnv.HOME, observedEnv.CODEX_HOME,
+    "HOME is the run's managed home, closing HOME-derived host dotfile discovery");
+  assert.equal(observedEnv.ZDOTDIR, observedEnv.CODEX_HOME,
+    "the zsh lookup redirects to the managed home, never the host or project root");
   assert.equal(observedEnv.TURNHELM_MANAGED_CHILD, "1");
   assert.equal(observedEnv.LAYA_API_KEY, false);
   assert.equal(observedEnv.TYPESAFE_API_KEY, false);
@@ -563,6 +570,39 @@ finish(() => emit({ type: "turn.completed" }));
   assert.equal(dirname(String(observedEnv.CODEX_HOME)), join(directory, "tmp"),
     "CODEX_HOME is a fresh managed home under tmpdir(), never the inherited value");
   assert.match(basename(String(observedEnv.CODEX_HOME)), /^turnhelm-worker-/);
+});
+
+test("hermetic HOME closes host dotfile discovery while other env passes through", { timeout: 30_000 }, async t => {
+  // The hostile host home carries dotfiles on the claimed-closed discovery
+  // paths; the worker must resolve them inside the managed home instead.
+  const hostileHome = await mkdtemp(join(tmpdir(), "turnhelm-hostile-home-"));
+  t.after(() => rm(hostileHome, { recursive: true, force: true }));
+  await mkdir(join(hostileHome, ".config", "fish"), { recursive: true });
+  await mkdir(join(hostileHome, ".agents"), { recursive: true });
+  await writeFile(join(hostileHome, ".gitconfig"), "[user]\nname = HOST_IDENTITY\n");
+  const { recorded, directory } = await runWorker(t, {
+    parentEnv: { HOME: hostileHome, XDG_CONFIG_HOME: "/tmp/host-xdg-override" },
+    script: `
+fs.writeFileSync(path.join(here, "home-resolution.json"), JSON.stringify({
+  home: process.env.HOME,
+  gitconfig: require("node:fs").existsSync(path.join(process.env.HOME ?? "", ".gitconfig")),
+  agentsDir: require("node:fs").existsSync(path.join(process.env.HOME ?? "", ".agents")),
+  xdg: process.env.XDG_CONFIG_HOME
+}));
+finish(() => emit({ type: "turn.completed" }));
+`
+  });
+  assert.equal(recorded.status, "completed");
+  const resolution = JSON.parse(await fakeFile(directory, "home-resolution.json")) as {
+    home: string; gitconfig: boolean; agentsDir: boolean; xdg: string;
+  };
+  assert.equal(dirname(resolution.home), join(directory, "tmp"),
+    "HOME is a fresh managed home under tmpdir(), never the hostile host home");
+  assert.equal(resolution.gitconfig, false, "the host .gitconfig is not reachable through $HOME");
+  assert.equal(resolution.agentsDir, false, "the host $HOME/.agents discovery path finds nothing");
+  // Scoped closure only: explicit override variables keep passing through as
+  // documented residuals — the redirect does not scrub the environment.
+  assert.equal(resolution.xdg, "/tmp/host-xdg-override");
 });
 
 test("a surviving descendant keeps the stripped key set and managed marker after leader exit", { timeout: 30_000 }, async t => {
@@ -579,7 +619,7 @@ test("a surviving descendant keeps the stripped key set and managed marker after
     parentEnv: { HOME: home, BASH_ENV: "/tmp/host-bashenv", ENV: "/tmp/host-shenv" },
     script: `
 const KEYS = ["LAYA_API_KEY", "TYPESAFE_API_KEY", "TURNHELM_ALLOW_HOSTED_JEV", "TURNHELM_CONFIG",
-  "BASH_ENV", "ENV", "TURNHELM_MANAGED_CHILD", "CODEX_HOME", "ZDOTDIR"];
+  "BASH_ENV", "ENV", "TURNHELM_MANAGED_CHILD", "CODEX_HOME", "ZDOTDIR", "HOME"];
 fs.writeFileSync(path.join(here, "leader.json"), JSON.stringify({ pid: process.pid, codexHome: process.env.CODEX_HOME }));
 const descendantSource = [
   'const fs = require("node:fs");',
@@ -634,8 +674,10 @@ descendant.unref();
     }
     assert.equal(sample.TURNHELM_MANAGED_CHILD, "1", name + " sample: the managed-child marker persists");
     assert.equal(sample.CODEX_HOME, leader.codexHome, name + " sample: the managed home is the leader's");
-    assert.equal(sample.ZDOTDIR, join(directory, "root", ".turnhelm"),
-      name + " sample: the zsh lookup stays redirected to the turnhelm-owned root");
+    assert.equal(sample.ZDOTDIR, leader.codexHome,
+      name + " sample: the zsh lookup stays redirected to the managed home");
+    assert.equal(sample.HOME, leader.codexHome,
+      name + " sample: HOME-derived discovery stays inside the managed home");
   }
 });
 

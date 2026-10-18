@@ -74,18 +74,24 @@ export function subprocessEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv
   return copy;
 }
 
-export function workerEnvironment(env: NodeJS.ProcessEnv, root: string, homeDir: string): NodeJS.ProcessEnv {
+export function workerEnvironment(env: NodeJS.ProcessEnv, homeDir: string): NodeJS.ProcessEnv {
   return {
     ...subprocessEnvironment(env),
     TURNHELM_MANAGED_CHILD: "1",
     // WB-2: the worker's CODEX_HOME is this run's managed home; whatever the
     // parent carried is overridden and never reaches the child.
     CODEX_HOME: homeDir,
+    // HOME-derived discovery (startup files, $HOME/.agents, dotfiles) resolves
+    // inside the managed home and dies with the run. Scoped closure only:
+    // explicit override variables (XDG_*, GIT_CONFIG_GLOBAL, …) and system
+    // files still pass through as documented residuals.
+    HOME: homeDir,
     // zsh sources $ZDOTDIR/.zshenv even non-interactively, falling back to HOME,
     // which let host startup files re-export stripped keys into worker
-    // descendants. Pointing ZDOTDIR at the managed root keeps those files out;
-    // a missing startup file there is zsh's skip state.
-    ZDOTDIR: join(root, ".turnhelm")
+    // descendants. Pointing ZDOTDIR at the managed home keeps those files out;
+    // a missing startup file there is zsh's skip state, and a host-exported
+    // ZDOTDIR must not win over the redirect.
+    ZDOTDIR: homeDir
   };
 }
 
@@ -213,7 +219,7 @@ export function executeWorker(
           cwd: options.root,
           detached: true,
           stdio: ["pipe", "pipe", "pipe"],
-          env: workerEnvironment(options.env, options.root, managedHome)
+          env: workerEnvironment(options.env, managedHome)
         });
       } catch {
         return undefined;
