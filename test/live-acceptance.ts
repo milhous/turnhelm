@@ -14,6 +14,7 @@ import { promisify } from "node:util";
 import { parseProjectConfig, PROFILE_IDS, type ProfileId, type ProjectConfig } from "../src/config.js";
 import { FAILURE_PHRASINGS, type FailureClass } from "../src/codex-events.js";
 import { initProject } from "../src/init.js";
+import { LIFECYCLE_CAPACITY, LIFECYCLE_HEAD_KEEP } from "../src/lifecycle.js";
 import { validateOutputSchemaBytes } from "../src/output-schema.js";
 import { envelopePayload } from "../src/payload.js";
 import { readProjectFile } from "../src/project.js";
@@ -1128,13 +1129,47 @@ const LIFECYCLE_EVENT_KIND_VALUES: ReadonlySet<string> =
 const LIFECYCLE_STATUS_VALUES: ReadonlySet<string> = new Set(["completed", "failed", "cancelled"]);
 const LIFECYCLE_SIGNAL_VALUES: ReadonlySet<string> = new Set(["SIGINT", "SIGTERM", "SIGKILL"]);
 
-const projectLifecycleDetail = (value: unknown): WorkerLifecycleDetail | undefined => {
+// The decoder's frozen activity vocabulary (spec §3.2): fixed enums plus one
+// validated numeric scalar, riding only an "event" entry whose eventKind is
+// "activity". Any process/settlement field alongside them is an inconsistent
+// combination that drops the whole detail — never a second reading of it.
+const LIFECYCLE_ACTIVITY_KEYS = ["itemKind", "itemPhase", "itemStatus", "itemExitCode"] as const;
+const LIFECYCLE_ACTIVITY_ITEM_KINDS: ReadonlySet<string> =
+  new Set(["reasoning", "command_execution", "file_change", "other"]);
+const LIFECYCLE_ACTIVITY_ITEM_PHASES: ReadonlySet<string> = new Set(["started", "updated", "completed"]);
+const LIFECYCLE_ACTIVITY_ITEM_STATUSES: ReadonlySet<string> = new Set(["in_progress", "completed", "failed"]);
+
+const projectLifecycleDetail = (value: unknown, kind: string): WorkerLifecycleDetail | undefined => {
   if (!isRecord(value)) return undefined;
-  const detail: Record<string, string | number | null> = {};
+  // The complete key set is checked before any value validation, so
+  // rejection cannot depend on insertion order (spec §3.3).
   for (const key of Object.keys(value)) {
-    if (!LIFECYCLE_DETAIL_KEYS.has(key)) {
+    if (!LIFECYCLE_DETAIL_KEYS.has(key) && !(LIFECYCLE_ACTIVITY_KEYS as readonly string[]).includes(key)) {
       throw evidenceReject("workerLifecycle detail must not contain unknown field " + JSON.stringify(key));
     }
+  }
+  if (value.eventKind === "activity" || LIFECYCLE_ACTIVITY_KEYS.some(key => key in value)) {
+    if (kind !== "event" || value.eventKind !== "activity") return undefined;
+    for (const key of LIFECYCLE_DETAIL_KEYS) {
+      if (key !== "eventKind" && key in value) return undefined;
+    }
+    if (typeof value.itemKind !== "string" || !LIFECYCLE_ACTIVITY_ITEM_KINDS.has(value.itemKind)) return undefined;
+    if (typeof value.itemPhase !== "string" || !LIFECYCLE_ACTIVITY_ITEM_PHASES.has(value.itemPhase)) return undefined;
+    const detail: Record<string, string | number> =
+      { eventKind: "activity", itemKind: value.itemKind, itemPhase: value.itemPhase };
+    if (value.itemStatus !== undefined) {
+      if (typeof value.itemStatus !== "string" || !LIFECYCLE_ACTIVITY_ITEM_STATUSES.has(value.itemStatus)) return undefined;
+      detail.itemStatus = value.itemStatus;
+    }
+    if (value.itemExitCode !== undefined) {
+      if (typeof value.itemExitCode !== "number" || !Number.isSafeInteger(value.itemExitCode)
+        || value.itemPhase !== "completed" || value.itemKind !== "command_execution") return undefined;
+      detail.itemExitCode = value.itemExitCode;
+    }
+    return detail;
+  }
+  const detail: Record<string, string | number | null> = {};
+  for (const key of Object.keys(value)) {
     const raw = value[key];
     if (key === "pid") {
       if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw <= 0) return undefined;
@@ -1182,10 +1217,16 @@ export const projectWorkerLifecycle = (value: unknown): WorkerLifecycleEvidence 
     }
     if (typeof entry.tMs !== "number" || !Number.isSafeInteger(entry.tMs) || entry.tMs < 0) return undefined;
     if (typeof entry.kind !== "string" || !LIFECYCLE_KINDS.has(entry.kind)) return undefined;
-    const detail = entry.detail === undefined ? undefined : projectLifecycleDetail(entry.detail);
+    const detail = entry.detail === undefined ? undefined : projectLifecycleDetail(entry.detail, entry.kind);
     events.push(detail === undefined ? { tMs: entry.tMs, kind: entry.kind } : { tMs: entry.tMs, kind: entry.kind, detail });
   }
-  return { events: events.slice(-64), overflow: value.overflow || events.length > 64 };
+  // The recorder's own retention split (first eight, last 56): an oversized
+  // timeline keeps both how the run began and how it settled, and truncation
+  // reports itself truthfully alongside any incoming overflow.
+  const retained = events.length > LIFECYCLE_CAPACITY
+    ? [...events.slice(0, LIFECYCLE_HEAD_KEEP), ...events.slice(-(LIFECYCLE_CAPACITY - LIFECYCLE_HEAD_KEEP))]
+    : events;
+  return { events: retained, overflow: value.overflow || events.length > LIFECYCLE_CAPACITY };
 };
 
 // EV-1 fallback: a CLI killed before it could receipt leaves only its
@@ -1199,34 +1240,45 @@ export const projectWorkerLifecycle = (value: unknown): WorkerLifecycleEvidence 
 const LIFECYCLE_JOURNAL_CAP_BYTES = 1 << 20;
 export const readWorkerLifecycleJournal = async (root: string, pid: number | null): Promise<WorkerLifecycleEvidence | undefined> => {
   if (pid === null) return undefined;
-  const journalPath = join(root, ".turnhelm", "lifecycle.jsonl");
-  const info = await stat(journalPath).catch(() => null);
-  if (info === null || !info.isFile() || info.size > LIFECYCLE_JOURNAL_CAP_BYTES) return undefined;
-  const raw = await readFile(journalPath).catch(() => null);
-  if (raw === null) return undefined;
-  const events: { tMs: number; kind: string; detail?: WorkerLifecycleDetail }[] = [];
-  for (const line of raw.toString("utf8").split("\n")) {
-    if (line === "") continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      return undefined;
+  // A best-effort boundary: an unreadable, substituted, oversized,
+  // undecodable, malformed or unprojectable journal degrades to absent
+  // evidence — never an escape into the run it explains (spec §3.3).
+  try {
+    // The descriptor-backed bounded reader refuses final-leaf symlink and
+    // non-regular substitution without blocking on a FIFO, and bounds the
+    // actual read rather than a stat racing a growing file.
+    const raw = await readProjectFile(root, ".turnhelm/lifecycle.jsonl", LIFECYCLE_JOURNAL_CAP_BYTES);
+    if (raw === undefined) return undefined;
+    const text = decodeBounded(raw);
+    if (text === null) return undefined;
+    const events: { tMs: number; kind: string; detail?: WorkerLifecycleDetail }[] = [];
+    for (const line of text.split("\n")) {
+      if (line === "") continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        return undefined;
+      }
+      if (!isRecord(parsed) || parsed.type !== "turnhelm.worker-lifecycle" || parsed.pid !== pid) continue;
+      if (typeof parsed.tMs !== "number" || !Number.isSafeInteger(parsed.tMs) || parsed.tMs < 0
+        || typeof parsed.kind !== "string" || !LIFECYCLE_KINDS.has(parsed.kind)) {
+        return undefined;
+      }
+      const detail = parsed.detail === undefined ? undefined : projectLifecycleDetail(parsed.detail, parsed.kind);
+      events.push(detail === undefined ? { tMs: parsed.tMs, kind: parsed.kind } : { tMs: parsed.tMs, kind: parsed.kind, detail });
     }
-    if (!isRecord(parsed) || parsed.type !== "turnhelm.worker-lifecycle" || parsed.pid !== pid) continue;
-    if (typeof parsed.tMs !== "number" || !Number.isSafeInteger(parsed.tMs) || parsed.tMs < 0
-      || typeof parsed.kind !== "string" || !LIFECYCLE_KINDS.has(parsed.kind)) {
-      return undefined;
-    }
-    const detail = parsed.detail === undefined ? undefined : projectLifecycleDetail(parsed.detail);
-    events.push(detail === undefined ? { tMs: parsed.tMs, kind: parsed.kind } : { tMs: parsed.tMs, kind: parsed.kind, detail });
+    if (events.length === 0) return undefined;
+    // The journal's line order is append-racy (the CLI's appends are
+    // fire-and-forget), so the timeline is ordered by each event's own tMs —
+    // never by file order; equal timestamps keep no causal claim.
+    events.sort((a, b) => a.tMs - b.tMs);
+    // Retention and overflow come from the shared projector, never a second
+    // slicing policy.
+    return projectWorkerLifecycle({ events, overflow: events.length > LIFECYCLE_CAPACITY });
+  } catch {
+    return undefined;
   }
-  if (events.length === 0) return undefined;
-  // The journal's line order is append-racy (the CLI's appends are
-  // fire-and-forget), so the timeline is ordered by each event's own tMs —
-  // never by file order.
-  events.sort((a, b) => a.tMs - b.tMs);
-  return { events: events.slice(-64), overflow: events.length > 64 };
 };
 
 // Pure, bounded transport-policy projection (spec §7), shared by both
@@ -2035,16 +2087,25 @@ export async function executeAcceptance(
               ...(worker.lastEventAgeMs !== undefined ? { lastEventAgeMs: worker.lastEventAgeMs } : {})
             })
             : undefined;
-          // EV-1: the worker timeline is retained exactly where it explains a
-          // bad outcome — a failed worker or an expired deadline. The receipt's
-          // own projection is preferred; a CLI that died before receipting is
-          // rebuilt from its append-only journal, filtered by the supervised
-          // CLI's pid.
-          const workerLifecycle = worker?.status === "failed" || supervision.timedOut
-            ? worker?.lifecycle !== undefined
-              ? projectWorkerLifecycle(worker.lifecycle)
-              : await readWorkerLifecycleJournal(item.root, supervision.pid)
-            : undefined;
+          // EV-1: the worker timeline rides every attributable observation —
+          // a completed control explains itself as much as a failure does.
+          // The receipt's own projection is preferred; a CLI that died before
+          // receipting is rebuilt from its append-only journal, filtered by
+          // the supervised CLI's pid. A not-started worker never ran, so it
+          // never gains a timeline; an unprojectable receipt timeline is
+          // omitted, never a case failure.
+          let workerLifecycle: WorkerLifecycleEvidence | undefined;
+          if (worker?.status !== "not-started") {
+            if (worker?.lifecycle !== undefined) {
+              try {
+                workerLifecycle = projectWorkerLifecycle(worker.lifecycle);
+              } catch {
+                workerLifecycle = undefined;
+              }
+            } else {
+              workerLifecycle = await readWorkerLifecycleJournal(item.root, supervision.pid);
+            }
+          }
           const claimedRoot = receiptFrame !== null && typeof receiptFrame.root === "string" ? receiptFrame.root : null;
           const rootOk = claimedRoot !== null && await realpath(claimedRoot).catch(() => "") === item.root;
           observation = {
