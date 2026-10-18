@@ -142,6 +142,33 @@ test("the packed distribution installs offline and serves the project entry end 
     ]) {
       assert.ok(readme.includes(fragment), "packed README must document the explicit Jev transport contract: " + fragment);
     }
+    // The worker-activity evidence contract: current diagnostic vocabulary,
+    // fixed activity metadata with its privacy limit, the 64-entry bound,
+    // all-outcome retention, the custom-round journal exemption, and the
+    // interpretation limits — the README and the skill stay aligned on all
+    // of these shared fragments.
+    const activityFragments = [
+      "turnhelm: worker-activity",
+      "first 8 and last 56 kept",
+      "itemKind/itemPhase/itemStatus/itemExitCode",
+      "legal only on completed command executions",
+      "the command text is never retained",
+      "on every attributable outcome",
+      "a not-started worker never gains a timeline",
+      "1 MiB cap",
+      "the supervised CLI's pid",
+      "the exact regular `.turnhelm/lifecycle.jsonl` leaf",
+      "symlink, FIFO, or directory at that path still stops the round",
+      "unknown evidence, not zero actions",
+      "no tool-call count, no exact file reads, and no causal ordering"
+    ];
+    const activityRetired = ["tool-progress", "completed runs carry none", "non-passes are fixed", "findings are resolved"];
+    for (const fragment of activityFragments) {
+      assert.ok(readme.includes(fragment), "packed README must state the activity evidence contract: " + fragment);
+    }
+    for (const retired of activityRetired) {
+      assert.ok(!readme.includes(retired), "packed README must not claim retired activity wording: " + retired);
+    }
 
     // 3. Install offline into an unrelated temporary Git project whose root
     //    path contains spaces; no registry access is possible.
@@ -174,6 +201,12 @@ test("the packed distribution installs offline and serves the project entry end 
       "node dist/test/live.integration.js --prepare jev --config ./acceptance-config.json"
     ]) {
       assert.ok(installedSkill.includes(fragment), "packed skill must state the explicit Jev transport contract: " + fragment);
+    }
+    for (const fragment of activityFragments) {
+      assert.ok(installedSkill.includes(fragment), "packed skill must state the activity evidence contract: " + fragment);
+    }
+    for (const retired of activityRetired) {
+      assert.ok(!installedSkill.includes(retired), "packed skill must not claim retired activity wording: " + retired);
     }
     assert.equal((await readdir(join(installed, "dist", "src"))).includes("cli.js"), true);
     const bin = join(consumer, "node_modules", ".bin", "turnhelm");
