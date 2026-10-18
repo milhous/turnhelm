@@ -987,6 +987,41 @@ test("the journal fallback recovers a receipt without lifecycle and filters fore
     assert.ok(!kinds.includes("abort"), "the foreign-pid line never joins the timeline");
   });
 
+test("a malformed receipt lifecycle degrades to the journal fallback, never a crash",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "stdin-file",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ]);
+    // The preload corrupts only the receipt's lifecycle snapshot with an
+    // unknown field: the projection throws inside the runner, the catch must
+    // swallow it, and the timeline comes from the journal fallback — a
+    // hostile receipt is degraded evidence, never a runner crash.
+    const hostile = join(round.base, "lifecycle-hostile.cjs");
+    await writeFile(hostile, 'if (process.argv[1] && process.argv[1].includes("cli.js")) {\n'
+      + `  const m = require(${JSON.stringify(join(import.meta.dirname, "..", "src", "lifecycle.js"))});\n`
+      + '  m.LifecycleRecorder.prototype.snapshot = function () {\n'
+      + '    return { events: [], overflow: false, bogus: "hostile-field" };\n'
+      + '  };\n'
+      + '}\n');
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: { ...round.env, NODE_OPTIONS: "--require " + hostile }, sandboxExecPath: fake });
+    assert.equal(code, 0, "a malformed receipt lifecycle is not an integrity problem");
+    assert.equal(await readFile(round.invocations, "utf8"), "1", "the worker ran exactly once");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    const record = ledger.find(r => r.phase === "case");
+    assert.equal(record?.outcome, "pass");
+    const lifecycle = record?.workerLifecycle as { events: { kind: string }[] } | undefined;
+    assert.ok(lifecycle !== undefined, "the journal fallback recovers the timeline the receipt corrupted");
+    const kinds = lifecycle.events.map(event => event.kind);
+    assert.ok(kinds.includes("spawned"), "the recovered timeline still pins the CLI pid");
+    assert.ok(kinds.includes("settle"), "the settled run explains itself");
+    assert.ok(!kinds.includes("abort"), "nothing was invented to replace the hostile snapshot");
+  });
+
 test("the exact lifecycle journal leaf is exempt from the tree budget; substitutions are refused",
   { timeout: 90_000 }, async t => {
     // Only the exact regular leaf is exempt — including an oversize one,
