@@ -15,7 +15,10 @@ import type { Readable } from "node:stream";
 import { PROFILE_IDS } from "../src/config.js";
 import { validateOutputSchema } from "../src/output-schema.js";
 import { validateTask } from "../src/task.js";
-import { envelopePayload, oracleSandboxPolicy, projectAttemptTransports, superviseCli } from "./live-acceptance.js";
+import {
+  envelopePayload, oracleSandboxPolicy, projectAttemptTransports, projectWorkerLifecycle,
+  readWorkerLifecycleJournal, superviseCli, type WorkerLifecycleEvidence
+} from "./live-acceptance.js";
 
 export type CheckOutcome =
   | { status: "pass" }
@@ -319,6 +322,13 @@ const isRegularFile = async (path: string, what: string): Promise<void> => {
 const TREE_MAX_ENTRIES = 512;
 const TREE_MAX_FILE_BYTES = 1 << 20;
 const JOURNAL_RELATIVE = ".turnhelm/routes.jsonl";
+// EV-2: the CLI-owned lifecycle journal is the one file besides the routing
+// journal the executed CLI may grow — and it may grow past the tree's own
+// file budget, because its size is bounded by the reader's cap, not by the
+// freeze. Only the exact regular-file leaf is exempt: symlink, FIFO, and
+// directory at that path stay refusals, and every other .turnhelm file is
+// still ordinary drift.
+const LIFECYCLE_JOURNAL_RELATIVE = ".turnhelm/lifecycle.jsonl";
 
 const hashTree = async (root: string): Promise<Map<string, string> | null> => {
   const files = new Map<string, string>();
@@ -331,6 +341,10 @@ const hashTree = async (root: string): Promise<Map<string, string> | null> => {
       const childRelative = relative === "" ? entry.name : relative + "/" + entry.name;
       const info = await lstat(join(root, childRelative)).catch(() => null);
       if (info === null) return false;
+      if (childRelative === LIFECYCLE_JOURNAL_RELATIVE) {
+        if (!info.isFile()) return false;
+        continue;
+      }
       if (info.isDirectory()) {
         if (!(await walk(childRelative))) return false;
       } else {
@@ -933,13 +947,6 @@ const receiptWorkerObject = (stderr: Buffer): unknown => {
   return undefined;
 };
 
-// The one extraction point for the case append and Task 2's stop records: the
-// projection exists only when exactly one receipt was emitted (spec §3.5) —
-// otherwise attribution is untrustworthy and the field is omitted, never
-// fabricated.
-const workerFailureOf = (stderr: Buffer): WorkerReceiptEvidence | undefined =>
-  receiptCount(stderr) === 1 ? projectWorkerReceipt(receiptWorkerObject(stderr)) : undefined;
-
 // The ledger carries journal values only through a fixed whitelist: a forged
 // or malformed journal line degrades to null instead of reaching the evidence
 // record. Backend ids mirror config v1's two backends.
@@ -1148,11 +1155,11 @@ async function runGatedRound(
     const schemaArgs = item.outputSchema === undefined ? [] : ["--output-schema", item.outputSchema.path];
     const taskFileEntry = item.files.find(file => file.role === "taskFile");
     const supervision = item.transport === "arg"
-      ? { file: process.execPath, args: [CLI_PATH, "run", "--project", item.root.canonical, ...writeArgs, ...schemaArgs, "--", item.task] }
+      ? { file: process.execPath, args: [CLI_PATH, "run", "--project", item.root.canonical, "--lifecycle", ...writeArgs, ...schemaArgs, "--", item.task] }
       : {
           file: "/bin/sh",
           args: ["-c", ["exec", shQuote(process.execPath), shQuote(CLI_PATH), "run",
-            "--project", shQuote(item.root.canonical), ...writeArgs.map(shQuote), ...schemaArgs.map(shQuote),
+            "--project", shQuote(item.root.canonical), "--lifecycle", ...writeArgs.map(shQuote), ...schemaArgs.map(shQuote),
             "<", shQuote(taskFileEntry === undefined ? "" : taskFileEntry.path)].join(" ")]
         };
     // DL-1: each case runs under its own frozen deadline — monotonic clock
@@ -1164,16 +1171,27 @@ async function runGatedRound(
       await appendEvidence({ phase: "stopped", caseId: null, reason: "signal" }).catch(() => {});
       return terminated() ? 143 : 130;
     }
-    // The projection for every stop this case can record, computed once:
-    // workerFailureOf omits it unless exactly one parseable receipt exists.
-    const workerFailure = workerFailureOf(observation.stderr);
+    // The projections for every stop this case can record, computed once from
+    // the lone receipt: the failure attribution, and — only for a worker that
+    // actually executed — the bounded lifecycle timeline the receipt carries.
+    const workerObject = receiptCount(observation.stderr) === 1 ? receiptWorkerObject(observation.stderr) : undefined;
+    const workerFailure = workerObject === undefined ? undefined : projectWorkerReceipt(workerObject);
+    let workerLifecycle: WorkerLifecycleEvidence | undefined;
+    if (workerFailure !== undefined && workerFailure.status !== "not-started") {
+      try {
+        workerLifecycle = projectWorkerLifecycle((workerObject as { lifecycle?: unknown } | undefined)?.lifecycle);
+      } catch {
+        workerLifecycle = undefined;
+      }
+    }
     // Unverified cleanup (spec §4): the supervisor may release the pipes
     // without a kill while the CLI still lives; a possibly-live CLI means no
     // further reservation may ever happen.
     if (!observation.cliClosed) {
       await appendEvidence({
         phase: "stopped", caseId: item.id, reason: "cleanup-unverified",
-        ...(workerFailure !== undefined ? { workerFailure } : {})
+        ...(workerFailure !== undefined ? { workerFailure } : {}),
+        ...(workerLifecycle !== undefined ? { workerLifecycle } : {})
       }).catch(() => {});
       return 1;
     }
@@ -1183,7 +1201,8 @@ async function runGatedRound(
     if (observation.outputOverflow) {
       await appendEvidence({
         phase: "stopped", caseId: item.id, reason: "output-cap",
-        ...(workerFailure !== undefined ? { workerFailure } : {})
+        ...(workerFailure !== undefined ? { workerFailure } : {}),
+        ...(workerLifecycle !== undefined ? { workerLifecycle } : {})
       }).catch(() => {});
       return 1;
     }
@@ -1201,9 +1220,17 @@ async function runGatedRound(
     if (failureClass !== null && STOP_FAILURE_CLASSES.has(failureClass)) {
       await appendEvidence({
         phase: "stopped", caseId: item.id, reason: "worker-" + failureClass,
-        ...(workerFailure !== undefined ? { workerFailure } : {})
+        ...(workerFailure !== undefined ? { workerFailure } : {}),
+        ...(workerLifecycle !== undefined ? { workerLifecycle } : {})
       }).catch(() => {});
       return 1;
+    }
+    // EV-2: the normal-path journal fallback — only past cleanup, output-cap,
+    // receipt, and stop-class gates, and only for a worker that executed. A
+    // receipt that lost its timeline (or never carried one) explains itself
+    // from the journal the CLI appended, filtered to the supervised pid.
+    if (workerLifecycle === undefined && workerFailure !== undefined && workerFailure.status !== "not-started") {
+      workerLifecycle = await readWorkerLifecycleJournal(item.root.canonical, observation.pid);
     }
     const taskHash = sha256hex(item.task);
     const journal = await readCaseJournal(item.root.canonical, taskHash);
@@ -1247,7 +1274,8 @@ async function runGatedRound(
       if (contractEntry === undefined || !(await oracleFilesMatch())) {
         await appendEvidence({
           phase: "stopped", caseId: item.id, reason: "oracle-identity",
-          ...(workerFailure !== undefined ? { workerFailure } : {})
+          ...(workerFailure !== undefined ? { workerFailure } : {}),
+          ...(workerLifecycle !== undefined ? { workerLifecycle } : {})
         }).catch(() => {});
         return 1;
       }
@@ -1270,7 +1298,8 @@ async function runGatedRound(
       if (!(await oracleFilesMatch())) {
         await appendEvidence({
           phase: "stopped", caseId: item.id, reason: "oracle-identity",
-          ...(workerFailure !== undefined ? { workerFailure } : {})
+          ...(workerFailure !== undefined ? { workerFailure } : {}),
+          ...(workerLifecycle !== undefined ? { workerLifecycle } : {})
         }).catch(() => {});
         return 1;
       }
@@ -1301,7 +1330,8 @@ async function runGatedRound(
     if (!(await rootIdentityMatches(item.root))) {
       await appendEvidence({
         phase: "stopped", caseId: item.id, reason: "root-identity",
-        ...(workerFailure !== undefined ? { workerFailure } : {})
+        ...(workerFailure !== undefined ? { workerFailure } : {}),
+        ...(workerLifecycle !== undefined ? { workerLifecycle } : {})
       }).catch(() => {});
       return 1;
     }
@@ -1309,7 +1339,8 @@ async function runGatedRound(
     if (settledTree === null || treeChangedOutside(frozenTree, settledTree, item.allowedChanges) !== null) {
       await appendEvidence({
         phase: "stopped", caseId: item.id, reason: "tree-drift",
-        ...(workerFailure !== undefined ? { workerFailure } : {})
+        ...(workerFailure !== undefined ? { workerFailure } : {}),
+        ...(workerLifecycle !== undefined ? { workerLifecycle } : {})
       }).catch(() => {});
       return 1;
     }
@@ -1325,7 +1356,8 @@ async function runGatedRound(
           phase: "case", caseId: item.id, outcome: "timeout",
           exitCode: observation.exitCode, durationMs: observation.durationMs, taskSha256: taskHash,
           backend, profileId, attemptTransports,
-          ...(workerFailure !== undefined ? { workerFailure } : {})
+          ...(workerFailure !== undefined ? { workerFailure } : {}),
+          ...(workerLifecycle !== undefined ? { workerLifecycle } : {})
         });
       } catch {
         await appendEvidence({ phase: "stopped", caseId: item.id, reason: "evidence-io" }).catch(() => {});
@@ -1345,6 +1377,7 @@ async function runGatedRound(
         backend, profileId, attemptTransports,
         ...(workerPayload !== null ? { workerPayload } : {}),
         ...(workerFailure !== undefined ? { workerFailure } : {}),
+        ...(workerLifecycle !== undefined ? { workerLifecycle } : {}),
         oracleInput: observation.stdout.subarray(0, ORACLE_INPUT_CAP_BYTES).toString("utf8")
       });
     } catch {
