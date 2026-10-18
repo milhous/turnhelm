@@ -93,11 +93,16 @@ classifier and child cannot see session context. Input is limited to
   kept, with an `overflow` marker), and each event is appended best-effort to
   `.turnhelm/lifecycle.jsonl`; a journaling failure never fails the run, though
   fire-and-forget appends may briefly hold the event loop at exit. Decoded
-  `item.started` and `item.completed` command executions join the timeline as
-  activity events carrying fixed metadata only —
-  `itemKind/itemPhase/itemStatus/itemExitCode`, where `itemExitCode` is
+  `item.started`, `item.updated`, and `item.completed`
+  frames from non-agent items join the timeline as activity events carrying
+  fixed metadata only —
+  `itemKind/itemPhase/itemStatus/itemExitCode`, where `itemKind` is
+  `reasoning`, `command_execution`, or `file_change` with any
+  other native type collapsing to `other`, and `itemExitCode` is
   legal only on completed command executions — and
-  the command text is never retained anywhere. A completed item reports one fixed diagnostic line,
+  the command text is never retained anywhere. Agent messages surface only at
+  completion, and in-flight agent frames are ignored. A completed item
+  reports one fixed diagnostic line,
   `turnhelm: worker-activity`, on stderr; started and updated items report
   none.
 - Successful classification selects among `fast`, `balanced`, `deep`, `frontier`,

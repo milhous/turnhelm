@@ -339,13 +339,17 @@ than opened.
   each event is also appended best-effort to `.turnhelm/lifecycle.jsonl` under
   the project root — the journal outlives a hard kill that prevents the
   receipt. A journaling failure never fails the run; fire-and-forget appends
-  may briefly hold the event loop at exit. Decoded `item.started` and
-  `item.completed` command executions join the timeline as activity events
-  carrying fixed metadata only — `itemKind/itemPhase/itemStatus/itemExitCode`,
-  where `itemExitCode` is legal only on completed command executions — and
-  the command text is never retained anywhere. A completed item reports one fixed
-  diagnostic line, `turnhelm: worker-activity`, on stderr; started and
-  updated items report none.
+  may briefly hold the event loop at exit. Decoded
+  `item.started`, `item.updated`, and `item.completed`
+  frames from non-agent items join the timeline as activity events carrying
+  fixed metadata only — `itemKind/itemPhase/itemStatus/itemExitCode`, where
+  `itemKind` is `reasoning`, `command_execution`, or `file_change` with any
+  other native type collapsing to `other`; `itemExitCode` is
+  legal only on completed command executions — and
+  the command text is never retained anywhere. Agent messages surface only at
+  completion, and in-flight agent frames are ignored. A completed item
+  reports one fixed diagnostic line, `turnhelm: worker-activity`, on stderr;
+  started and updated items report none.
 - **Completion is not verification.** A `completed` worker (exit 0) proves the
   child finished its turn — nothing more. Whether the task was actually done
   is judged by consumer-side gates: the output schema above, oracle and

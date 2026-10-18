@@ -150,9 +150,13 @@ test("the packed distribution installs offline and serves the project entry end 
     const activityFragments = [
       "turnhelm: worker-activity",
       "first 8 and last 56 kept",
+      "`item.started`, `item.updated`, and `item.completed`",
+      "frames from non-agent items join the timeline",
       "itemKind/itemPhase/itemStatus/itemExitCode",
+      "`reasoning`, `command_execution`, or `file_change`",
       "legal only on completed command executions",
       "the command text is never retained",
+      "in-flight agent frames are ignored",
       "on every attributable outcome",
       "a not-started worker never gains a timeline",
       "1 MiB cap",
