@@ -116,6 +116,13 @@ test("item lifecycle frames project bounded activity facts", () => {
   }
   const otherKind = decodeWorkerEvent(frame({ type: "item.completed", item: { type: "file_change", exit_code: 13 } })) as Record<string, unknown>;
   assert.equal(otherKind.itemExitCode, undefined, "only command_execution may carry an exit code");
+  // Agent messages surface only at completion as the message channel; an
+  // in-flight agent frame carries no partial-message evidence and stays
+  // ignored rather than crowding the ring as a phantom activity.
+  for (const type of ["item.started", "item.updated"]) {
+    assert.deepEqual(decodeWorkerEvent(frame({ type, item: { type: "agent_message", text: "PRIVATE_PARTIAL_TEXT" } })),
+      { kind: "ignored" }, type + " agent frames must stay ignored");
+  }
 });
 
 test("activity projections carry no native content", () => {

@@ -135,6 +135,9 @@ export function decodeWorkerEvent(frame: Uint8Array): WorkerEvent {
     // Absent or malformed item metadata keeps the ignored behavior; optional
     // evidence never creates a protocol failure.
     if (!object(event.item) || typeof event.item.type !== "string") return { kind: "ignored" };
+    // Agent messages surface only at completion; in-flight agent frames
+    // carry no partial-message evidence.
+    if (event.item.type === "agent_message") return { kind: "ignored" };
     return { kind: "activity", ...activityOf(event.item, type === "item.started" ? "started" : "updated") };
   }
   if (type === "item.completed") {
