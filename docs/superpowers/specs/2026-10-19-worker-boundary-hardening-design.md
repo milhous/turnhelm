@@ -22,9 +22,11 @@ Three recurring observation classes survive its evidence fences and are addressa
 | `30-incident` failure (and the 2026-10-17 `feature-prose` case) | A completed fast worker returned a schema-shaped **wrong refusal** claiming the read-only workspace "provides no file-reading tool" — twice observed across campaigns; readonly denies writes, never reads | An actual filesystem denial; whether a clarification changes the model's claim |
 | `37-capacity` failure | A completed fast worker returned default-filled `0/0/false` without evident input reads; repeated from the prior sealed campaign; its fixed-balanced control passes | Whether input was read; a causal model/effort effect |
 
-Alongside these, the documented worker instruction boundary leaves open residuals the report repeats
-verbatim: "other shells' startup files" and "`$HOME/.agents/skills` discovery" remain reachable
-because the child keeps the host `HOME` (only `ZDOTDIR` is redirected, which covers zsh alone).
+Alongside these, the repository's own boundary documentation (README residual list; the environment
+code itself) records that "other shells' startup files" and "`$HOME/.agents/skills` discovery"
+remain reachable because the child keeps the host `HOME` (only `ZDOTDIR` is redirected, which
+covers zsh alone) — a documentation/code finding that motivates the first change below, not a
+campaign-report observation.
 
 Reading of the current code (all at the baseline): the task is delivered verbatim on stdin
 (`src/codex.ts:44-55,178+`); the worker environment redirects `CODEX_HOME` and `ZDOTDIR` but not
@@ -100,9 +102,10 @@ wording frozen before the byte-exact tests are written:
 
 > Sandbox semantics (fixed runner note, not from the requester): a read-only sandbox denies writes,
 > not reads — read-only mode itself never prohibits reading. A workspace-write sandbox additionally
-> permits writes inside the workspace. Attempt to read every file the task references, using your
-> available tools, before answering. Distinguish an actually failed read attempt from a tool you do
-> not have, and report a read as denied only when a real read attempt failed.
+> permits writes inside the workspace. Attempt to read the files the task requires as inputs, using
+> your available tools, before answering — always respecting any read restrictions the task itself
+> states. Distinguish an actually failed read attempt from a tool you do not have, and report a
+> read as denied only when a real read attempt failed.
 
 The consumer task-size limit still gates only the consumer's bytes; validation order and rejection
 semantics are untouched. The executed-worker receipt carries the version tag
@@ -158,7 +161,9 @@ The two harnesses' projections are not shared code and stay honestly separate. C
 `projectWorkerReceipt` whitelist admits exactly two new bounded per-field values —
 `instructionNote` (fixed version-tag string) and `abortReason` (enum, `"stall"` only) — with the
 existing per-field discipline: absent, malformed, or out-of-enum values drop the field, never
-coerce, never fabricate; unknown keys keep rejecting strict ledger input. Standard acceptance's
+coerce, never fabricate; unselected keys keep being ignored exactly as that projector does today
+(no strict unknown-key rejection exists on that path — its ledger serializes the projection
+directly; the strict nested validators belong to standard acceptance's separate contract). Standard acceptance's
 `workerFailure` projection is failure-only by design and gains nothing; its observed record instead
 gains one optional bounded `instructionNote` field extracted from the receipt for every executed
 worker regardless of status (completed, failed, cancelled), because the note is always-on and its
@@ -209,7 +214,9 @@ Avoid unrelated cleanup.
 All criteria are offline; fake workers and fake classifiers make no real provider request.
 
 1. **Hermetic home, scoped claims:** spawned worker env asserts `HOME` and `ZDOTDIR` equal the
-   managed home and `CODEX_HOME`; every other inherited variable still passes through (including
+   managed home and `CODEX_HOME`; the existing `subprocessEnvironment` filtering (credential,
+   `BASH_ENV`/`ENV`, coverage suppression) and managed-child overrides remain intact — only `HOME`
+   and `ZDOTDIR` change; other inherited variables still pass through (including
    `XDG_CONFIG_HOME` when the host exports one); parent process env unchanged; teardown removes the
    home; no staged dotfiles. Synthetic hostile-host checks confirm the claimed-closed paths: a
    descendant resolving `$HOME/.config/...`, `$HOME/.agents/...`, `$HOME/.gitconfig` sees the
@@ -236,7 +243,7 @@ All criteria are offline; fake workers and fake classifiers make no real provide
    `timeout` case outcome at the existing decision position, the roster continues, no oracle or
    contract check runs; a stall receipt that is not lone/attributable follows existing stop rules.
    `projectWorkerReceipt` retains/drops `instructionNote` and `abortReason` per whitelist rules with
-   malformed and out-of-enum inputs; unknown keys still reject strict ledger input.
+   malformed and out-of-enum inputs; unselected keys keep being ignored (no new validator).
 6. **Privacy canaries:** no note prose, environment values, or path strings beyond the fixed tag
    reach journals, projections, or diagnostics beyond their defined fields; existing redaction
    surfaces unchanged.
@@ -280,6 +287,15 @@ projection) before revising.
 | `HOME` closure overstated (override env vars, system files remain) | §3.1 claim scoped to `HOME`/`ZDOTDIR`-derived discovery; overrides/system files listed as residuals; env scrubbing rejected as whack-a-mole; hostile-dotfile tests limited to claimed paths |
 | Note wording promised readability the runner cannot establish | §3.2 note reworded to mode semantics + attempt/distinguish/report-only-on-failure; wording frozen before byte-exact tests |
 
-No second independent review of this revision ran, and no native worker/provider test request was
-made. This review narrows the design; it does not establish a task-failure cause, change any
-historical grade, or authorize implementation.
+Second-round review: same worker class and harness against the revised spec (`0573fac`). Verdict:
+**PROBLEMS — 1 Important, 3 Minor**; its notes verified all seven first-round dispositions
+substantively correct and found no new blocking watchdog or timeout-order defect. Dispositions:
+the note now respects read restrictions stated in the task itself (§3.2); acceptance criterion 1
+keeps the existing `subprocessEnvironment` filtering intact so only `HOME`/`ZDOTDIR` change; the
+custom-round projection text no longer claims a strict unknown-key rejection that path never had
+(unselected keys stay ignored; §3.4/§5.5); and the residual-phrase attribution moved from the
+campaign report to the repository's own boundary documentation (§1).
+
+No native worker/provider test request was made in either round. These reviews narrow the design;
+they do not establish a task-failure cause, change any historical grade, or authorize
+implementation.
