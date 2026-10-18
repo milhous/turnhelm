@@ -1616,7 +1616,7 @@ finish(() => {
   assert.equal(stderr, "turnhelm: worker-event-error\n");
 });
 
-test("tool progress never relays commands or outputs", { timeout: 30_000 }, async t => {
+test("worker activity never relays commands or outputs", { timeout: 30_000 }, async t => {
   const { recorded, stdout, stderr } = await runWorker(t, {
     script: `
 finish(() => {
@@ -1628,7 +1628,7 @@ finish(() => {
   assert.equal(recorded.status, "completed");
   assert.deepEqual(recorded.usage, { output_tokens: 2 });
   forbid(JSON.stringify(recorded) + stdout + stderr, "TEST_PRIVATE_TOOL_SENTINEL", "TEST_PRIVATE_OUTPUT_SENTINEL");
-  assert.equal(stderr, "turnhelm: tool-progress\n");
+  assert.equal(stderr, "turnhelm: worker-activity\n");
 });
 
 test("an async diagnostics sink error is a sanitized output failure that stops the group", { timeout: 30_000 }, async t => {
@@ -2496,7 +2496,12 @@ test("an end-to-end hostile worker failure yields class-only attribution in the 
 // text doubles as the content-free canary.
 const LIFECYCLE_CANARY_TEXT = "lifecycle-canary-final-answer-4f9d2c";
 const LIFECYCLE_RATE_LIMIT_TEXT = "upstream rate limit exceeded while the caller waited";
-type FakeWorkerMode = "single-message" | "stall" | "event-flood" | "rate-fail" | "protocol-fail";
+const LIFECYCLE_ACTIVITY_REASONING = "lifecycle-activity-reasoning-9a1b";
+const LIFECYCLE_ACTIVITY_COMMAND = "lifecycle-activity-command-77c2";
+const LIFECYCLE_ACTIVITY_OUTPUT = "lifecycle-activity-output-3fd8";
+const LIFECYCLE_ACTIVITY_PATH = "/lifecycle-activity/path-5e07";
+const LIFECYCLE_ACTIVITY_MCP = "lifecycle-activity-mcp-secret-b1d4";
+type FakeWorkerMode = "single-message" | "stall" | "event-flood" | "rate-fail" | "protocol-fail" | "activity";
 
 const stageLifecycleCli = async (t: TestContext, mode: FakeWorkerMode): Promise<{ root: string; spawnCli: (args: string[]) => ChildProcess }> => {
   const directory = await mkdtemp(join(tmpdir(), "turnhelm-lifecycle-"));
@@ -2521,8 +2526,24 @@ const stageLifecycleCli = async (t: TestContext, mode: FakeWorkerMode): Promise<
   const frames: string[] = [];
   if (mode === "event-flood") {
     for (let index = 0; index < 100; index += 1) {
-      frames.push(JSON.stringify({ type: "item.completed", item: { type: "tool-call", call: "frame-" + index } }));
+      // Maximally populated valid activity details; the exit code distinguishes frames.
+      frames.push(JSON.stringify({ type: "item.completed", item: {
+        type: "command_execution", status: "completed", exit_code: index,
+        command: LIFECYCLE_ACTIVITY_COMMAND, aggregated_output: LIFECYCLE_ACTIVITY_OUTPUT
+      } }));
     }
+  }
+  if (mode === "activity") {
+    frames.push(
+      JSON.stringify({ type: "item.started", item: { type: "reasoning", summary: LIFECYCLE_ACTIVITY_REASONING } }),
+      JSON.stringify({ type: "item.updated", item: { type: "reasoning", status: "in_progress" } }),
+      JSON.stringify({ type: "item.started", item: { type: "command_execution", command: LIFECYCLE_ACTIVITY_COMMAND } }),
+      JSON.stringify({ type: "item.updated", item: { type: "command_execution", status: "in_progress", command: LIFECYCLE_ACTIVITY_COMMAND } }),
+      JSON.stringify({ type: "item.completed", item: { type: "command_execution", status: "completed", exit_code: 13, command: LIFECYCLE_ACTIVITY_COMMAND, aggregated_output: LIFECYCLE_ACTIVITY_OUTPUT } }),
+      JSON.stringify({ type: "item.completed", item: { type: "file_change", status: "completed", path: LIFECYCLE_ACTIVITY_PATH } }),
+      JSON.stringify({ type: "item.started", item: { type: "mcp_tool_call", arguments: { secret: LIFECYCLE_ACTIVITY_MCP } } }),
+      JSON.stringify({ type: "item.completed", item: { type: "mcp_tool_call", status: "failed", exit_code: 3, arguments: { secret: LIFECYCLE_ACTIVITY_MCP } } })
+    );
   }
   frames.push(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: LIFECYCLE_CANARY_TEXT } }));
   if (mode !== "stall") frames.push(JSON.stringify({ type: "turn.completed" }));
@@ -2682,12 +2703,95 @@ test("the lifecycle journal outlives an outer kill before settlement", { timeout
 });
 
 test("an event flood trips the overflow marker without losing the settlement tail", { timeout: 30_000 }, async t => {
-  const { spawnCli } = await stageLifecycleCli(t, "event-flood");
-  const run = await collectRun(spawnCli(["--lifecycle"]));
+  const { root, spawnCli } = await stageLifecycleCli(t, "event-flood");
+  const child = spawnCli(["--lifecycle"]);
+  const run = await collectRun(child);
   assert.equal(run.code, 0, "the run completes: " + run.stderr);
+  const receiptLine = run.stderr.split("\n").filter(line => line.includes("turnhelm.receipt"))[0] ?? "";
+  assert.ok(Buffer.byteLength(receiptLine, "utf8") < 65536, "the maximally populated 64-entry receipt stays under the line cap");
   const lifecycle = ((receiptOf(run.stderr).worker as Record<string, unknown>).lifecycle ?? null) as
-    { events: { kind: string }[]; overflow: boolean } | null;
+    { events: { kind: string; detail?: { itemExitCode?: number } }[]; overflow: boolean } | null;
   assert.ok(lifecycle !== null, "the receipt worker object carries a lifecycle projection");
-  assert.equal(lifecycle.overflow, true, "100 decoded frames overflow the 64-entry ring");
+  assert.equal(lifecycle.overflow, true, "the decoded frames overflow the 64-entry ring");
+  assert.equal(lifecycle.events.length, 64, "the ring keeps exactly the capacity");
+  assert.equal(lifecycle.events[0].kind, "spawned", "the head keeps the spawn");
   assert.equal(lifecycle.events.at(-1)?.kind, "settle", "the settlement tail survives the flood");
+  // One journal append per decoded frame; concurrent best-effort appends may
+  // interleave, so the counts are order-independent (the ring, recorded
+  // synchronously, is the ordered evidence — journal order is approximate).
+  const journal = await readFile(join(root, ".turnhelm", "lifecycle.jsonl"), "utf8");
+  const journaled = journal.split("\n").filter(line => line !== "")
+    .map(line => JSON.parse(line) as { type?: string; pid?: number; kind?: string; detail?: { itemExitCode?: number } })
+    .filter(entry => entry.type === "turnhelm.worker-lifecycle" && entry.pid === child.pid);
+  assert.ok(journaled.length > 64, "the journal saw every recorded event: " + journaled.length);
+  assert.equal(journaled.filter(entry => entry.kind === "event").length, 102, "one event append per decoded frame");
+  const journalCodes = journaled
+    .filter(entry => entry.kind === "event" && entry.detail?.itemExitCode !== undefined)
+    .map(entry => entry.detail?.itemExitCode).sort((a, b) => (a ?? 0) - (b ?? 0));
+  assert.deepEqual(journalCodes, Array.from({ length: 100 }, (_, index) => index),
+    "each decoded activity frame is appended exactly once");
+  // The ring is exactly head 8 (spawn, stdin delivery, frames 0-5) plus the
+  // last 56 recorded events (frames 52-99 then the settlement tail).
+  const ringCodes = lifecycle.events
+    .map(event => (event.detail as { itemExitCode?: number } | undefined)?.itemExitCode);
+  assert.deepEqual(ringCodes.slice(0, 8), [undefined, undefined, 0, 1, 2, 3, 4, 5],
+    "the head keeps spawn, stdin delivery, and the first six frames");
+  assert.deepEqual(ringCodes.slice(8, 56), Array.from({ length: 48 }, (_, index) => index + 52),
+    "the tail keeps the last 48 activity frames in decode order");
+  assert.ok(ringCodes.slice(56).every(code => code === undefined), "the final eight entries are the settlement tail");
+  const surfaces = run.stdout + run.stderr + journal;
+  forbid(surfaces, LIFECYCLE_ACTIVITY_COMMAND, LIFECYCLE_ACTIVITY_OUTPUT);
+});
+
+test("decoded activity rides the lifecycle receipt and journal without content", { timeout: 30_000 }, async t => {
+  const { root, spawnCli } = await stageLifecycleCli(t, "activity");
+  const child = spawnCli(["--lifecycle"]);
+  const run = await collectRun(child);
+  assert.equal(run.code, 0, "the run completes: " + run.stderr);
+  const receipt = receiptOf(run.stderr);
+  const lifecycle = ((receipt.worker as Record<string, unknown>).lifecycle ?? null) as
+    { events: { kind: string; detail?: Record<string, unknown> }[]; overflow: boolean } | null;
+  assert.ok(lifecycle !== null, "the receipt worker object carries a lifecycle projection");
+  const activity = lifecycle.events
+    .filter(event => event.kind === "event" && event.detail?.eventKind === "activity")
+    .map(event => event.detail);
+  assert.deepEqual(activity, [
+    { eventKind: "activity", itemKind: "reasoning", itemPhase: "started" },
+    { eventKind: "activity", itemKind: "reasoning", itemPhase: "updated", itemStatus: "in_progress" },
+    { eventKind: "activity", itemKind: "command_execution", itemPhase: "started" },
+    { eventKind: "activity", itemKind: "command_execution", itemPhase: "updated", itemStatus: "in_progress" },
+    { eventKind: "activity", itemKind: "command_execution", itemPhase: "completed", itemStatus: "completed", itemExitCode: 13 },
+    { eventKind: "activity", itemKind: "file_change", itemPhase: "completed", itemStatus: "completed" },
+    { eventKind: "activity", itemKind: "other", itemPhase: "started" },
+    { eventKind: "activity", itemKind: "other", itemPhase: "completed", itemStatus: "failed" }
+  ], "the sanitized activity projections match the spec exactly");
+  // Only completed non-agent items report the fixed diagnostic; started/updated stay silent.
+  assert.equal(run.stderr.split("\n").filter(line => line === "turnhelm: worker-activity").length, 3,
+    "exactly the three completed non-agent items report worker-activity");
+  assert.ok(!run.stderr.includes("tool-progress"), "the retired diagnostic category is gone");
+  assert.equal(run.stdout, LIFECYCLE_CANARY_TEXT + "\n", "stdout still carries exactly the final message");
+  const surfaces = run.stdout + run.stderr + JSON.stringify(receipt);
+  forbid(surfaces, LIFECYCLE_ACTIVITY_REASONING, LIFECYCLE_ACTIVITY_COMMAND, LIFECYCLE_ACTIVITY_OUTPUT,
+    LIFECYCLE_ACTIVITY_PATH, LIFECYCLE_ACTIVITY_MCP);
+  const journal = await readFile(join(root, ".turnhelm", "lifecycle.jsonl"), "utf8");
+  const journaledActivity = journal.split("\n").filter(line => line !== "")
+    .map(line => JSON.parse(line) as { type?: string; pid?: number; kind?: string; detail?: Record<string, unknown> })
+    .filter(entry => entry.type === "turnhelm.worker-lifecycle" && entry.pid === child.pid
+      && entry.kind === "event" && entry.detail?.eventKind === "activity")
+    .map(entry => JSON.stringify(entry.detail)).sort();
+  assert.equal(journaledActivity.length, 8, "one journal append per decoded activity frame");
+  assert.deepEqual(journaledActivity, activity.map(detail => JSON.stringify(detail)).sort(),
+    "the journal carries the same sanitized projections, order-independent");
+  forbid(journal, LIFECYCLE_ACTIVITY_COMMAND, LIFECYCLE_ACTIVITY_REASONING, LIFECYCLE_ACTIVITY_MCP);
+});
+
+test("without the lifecycle flag no lifecycle receipt or journal exists", { timeout: 30_000 }, async t => {
+  const { root, spawnCli } = await stageLifecycleCli(t, "activity");
+  const run = await collectRun(spawnCli([]));
+  assert.equal(run.code, 0, "the run completes: " + run.stderr);
+  const receipt = receiptOf(run.stderr);
+  assert.equal((receipt.worker as Record<string, unknown>).lifecycle, undefined,
+    "no lifecycle projection rides the receipt without the flag");
+  assert.equal(await readFile(join(root, ".turnhelm", "lifecycle.jsonl"), "utf8").catch(() => ""), "",
+    "no lifecycle journal is written without the flag");
 });

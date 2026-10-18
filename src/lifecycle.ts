@@ -8,12 +8,18 @@
 export type LifecycleKind = "spawned" | "stdin-delivered" | "event" | "completion" | "failure"
   | "abort" | "shutdown-term" | "shutdown-kill" | "shutdown-discharged" | "stdout-end" | "close" | "settle";
 
+import type { WorkerActivity } from "./codex-events.js";
+
+// A lifecycle detail is either a process/settlement observation or a decoded
+// activity projection — never a mix of the two field families.
 export type LifecycleEvent = Readonly<{ tMs: number; kind: LifecycleKind;
-  detail?: Readonly<{ eventKind?: string; pid?: number; exitCode?: number | null; signal?: string; status?: string; class?: string }> }>;
+  detail?:
+    | Readonly<{ eventKind?: string; pid?: number; exitCode?: number | null; signal?: string; status?: string; class?: string }>
+    | Readonly<{ eventKind: "activity" } & WorkerActivity> }>;
 
 export const LIFECYCLE_CAPACITY = 64;
-const HEAD_KEEP = 8;
-const TAIL_KEEP = LIFECYCLE_CAPACITY - HEAD_KEEP;
+export const LIFECYCLE_HEAD_KEEP = 8;
+const TAIL_KEEP = LIFECYCLE_CAPACITY - LIFECYCLE_HEAD_KEEP;
 
 export class LifecycleRecorder {
   private readonly append: (event: LifecycleEvent) => void;
@@ -36,7 +42,7 @@ export class LifecycleRecorder {
     };
     this.total += 1;
     this.append(event);
-    if (this.head.length < HEAD_KEEP) this.head.push(event);
+    if (this.head.length < LIFECYCLE_HEAD_KEEP) this.head.push(event);
     else if (this.tail.push(event) > TAIL_KEEP) this.tail.shift();
   }
 

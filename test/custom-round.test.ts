@@ -544,7 +544,11 @@ test("a roster contract that cannot load is refused at prepare, not frozen", asy
 // stallMs holds the FIRST execution's turn open so a signal or timeout test
 // can land mid-case (a roster's later cases run the fake unstalled), and a
 // rebuildRoot swaps the case root for a byte-identical rebuild mid-run.
-const fakeCodexBody = (options: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string; rebuildRoot?: boolean; recordArgv?: string; rebindFile?: { path: string; bytes: string } }> = {}): string => `
+const fakeCodexBody = (options: Readonly<{
+  failureMessage?: string; stallMs?: number; extraWrite?: string; rebuildRoot?: boolean; recordArgv?: string;
+  rebindFile?: { path: string; bytes: string };
+  activityFrames?: boolean; lifecycleLeaf?: "fat" | "dir" | "symlink" | "fifo";
+}> = {}): string => `
 const argv = process.argv.slice(2);
 if (argv[0] === "--version") { process.stdout.write("codex-cli 0.160.2\\n"); process.exit(0); }
 if (argv[0] === "exec" && argv[1] === "--help") { process.stdout.write("--json\\n--ephemeral\\n--sandbox <MODE>\\n-\\n--ignore-user-config\\n--ignore-rules\\n--output-schema <FILE>\\n"); process.exit(0); }
@@ -579,7 +583,27 @@ process.stdin.on("end", () => {
 `
     : "") + (options.extraWrite !== undefined
     ? `  fs.writeFileSync(path.join(process.cwd(), ${JSON.stringify(options.extraWrite)}), "unauthorized outside allowedChanges\\n");\n`
-    : "") + (options.rebindFile !== undefined
+    : "") + (options.lifecycleLeaf !== undefined
+    ? `  // The exact lifecycle journal leaf, planted by the worker before it
+  // finishes: the round's settled-tree gate must permit the regular leaf
+  // (fat included) and refuse every substitution at that exact path.
+  {
+    const leaf = path.join(process.cwd(), ".turnhelm", "lifecycle.jsonl");
+` + (options.lifecycleLeaf === "fat"
+      ? `    fs.mkdirSync(path.dirname(leaf), { recursive: true });
+    fs.appendFileSync(leaf, "x".repeat((1 << 20) + 4096));`
+      : options.lifecycleLeaf === "dir"
+        ? `    fs.rmSync(leaf, { force: true });
+    fs.mkdirSync(leaf);`
+        : options.lifecycleLeaf === "symlink"
+          ? `    fs.rmSync(leaf, { force: true });
+    fs.writeFileSync(path.join(path.dirname(leaf), "journal.real"), "stolen\\n");
+    fs.symlinkSync("journal.real", leaf);`
+          : `    fs.rmSync(leaf, { force: true });
+    require("node:child_process").execFileSync("/usr/bin/mkfifo", [leaf]);`) + `
+  }
+`
+      : "") + (options.rebindFile !== undefined
     ? `  // OR-1: a mid-run rebind of a frozen oracle input — new bytes over the
   // frozen path while the worker executes, exactly the window between the
   // pre-reservation identity gate and the grading-time bracket.
@@ -611,7 +635,11 @@ process.stdin.on("end", () => {
   }
 `
     : "") + `  const finish = () => {
-` + (options.failureMessage !== undefined
+` + (options.activityFrames === true
+    ? `    process.stdout.write(JSON.stringify({ type: "item.started", item: { type: "command_execution", status: "in_progress" } }) + "\\n");
+    process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "command_execution", status: "completed", exit_code: 0, command: "activity-round-secret-command-5f0a" } }) + "\\n");
+`
+    : "") + (options.failureMessage !== undefined
     ? `    process.stdout.write(JSON.stringify({ type: "turn.failed", message: ${JSON.stringify(options.failureMessage)} }) + "\\n");\n    process.exit(9);`
     : `    const lines = fs.readFileSync(path.join(process.cwd(), "codex-output.txt"), "utf8").split("\\n").filter(Boolean);\n    process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: lines.join("\\n") } }) + "\\n");\n    process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1 } }) + "\\n");\n    process.exit(0);`)
   + `
@@ -657,7 +685,11 @@ const scratchExecuteRound = async (
   options?: Readonly<{
     caps?: { classifierRequests: number; workerExecutions: number };
     choice?: string;
-    codex?: Readonly<{ failureMessage?: string; stallMs?: number; extraWrite?: string; rebuildRoot?: boolean; recordArgv?: string; rebindFile?: { path: string; bytes: string } }>;
+    codex?: Readonly<{
+      failureMessage?: string; stallMs?: number; extraWrite?: string; rebuildRoot?: boolean; recordArgv?: string;
+      rebindFile?: { path: string; bytes: string };
+      activityFrames?: boolean; lifecycleLeaf?: "fat" | "dir" | "symlink" | "fifo";
+    }>;
     poisonJournal?: boolean;
     journalAttempts?: unknown;
     baselineFiles?: readonly string[];
@@ -823,10 +855,215 @@ test("execute runs both transports, grades both cases, and exits zero with an ev
       { mode: "extracted", trailerBytes: "trailer: inert footer".length });
     assert.ok(!ledger.some(r => r.phase === "stopped"), "no stop record on the happy path");
     assert.equal(await readFile(round.invocations, "utf8"), "11", "exactly one worker execution per case");
+    // Both transports carry the bounded lifecycle timeline the CLI records:
+    // an executed worker's receipt explains itself on the arg path and the
+    // shell-exec stdin path alike.
+    for (const row of caseRecords) {
+      assert.ok(row.workerLifecycle !== undefined,
+        "an executed worker's case record retains its lifecycle projection");
+      const events = (row.workerLifecycle as { events: { kind: string }[] }).events;
+      assert.equal(events[0]?.kind, "spawned", "the timeline begins at the spawn");
+      assert.equal(events.at(-1)?.kind, "settle", "the timeline ends at settlement");
+    }
     for (const root of round.roots) {
       await readFile(join(root, ".turnhelm", "routes.jsonl"), "utf8");
       assert.equal(await readFile(join(root, "worker-task.txt"), "utf8"),
         "Sum the ledger rows and print the JSON result.", "the task text reaches the worker via " + root);
+    }
+  });
+
+test("activity frames ride a passing case without leaking the command text",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ], {}, { codex: { activityFrames: true } });
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 0, "an activity-bearing pass is still a pass");
+    const ledgerPath = join(round.evidenceRoot, "custom-round-evidence.jsonl");
+    const ledger = await readLedger(ledgerPath);
+    const record = ledger.find(r => r.phase === "case");
+    assert.equal(record?.outcome, "pass");
+    const lifecycle = record?.workerLifecycle as { events: { kind: string; detail?: unknown }[] } | undefined;
+    assert.ok(lifecycle !== undefined, "the case record carries the timeline");
+    const activity = lifecycle.events
+      .find(event => (event.detail as { eventKind?: string; itemPhase?: string } | undefined)?.eventKind === "activity"
+        && (event.detail as { itemPhase?: string }).itemPhase === "completed");
+    assert.deepEqual(activity?.detail,
+      { eventKind: "activity", itemKind: "command_execution", itemPhase: "completed",
+        itemStatus: "completed", itemExitCode: 0 },
+      "the completed command's sanitized activity projection rides the case record");
+    assert.ok(!(await readFile(ledgerPath, "utf8")).includes("activity-round-secret-command-5f0a"),
+      "the native command text never reaches the evidence");
+  });
+
+test("a completed wrong answer retains its lifecycle in the case record",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":4,"sum":9}']
+      }
+    ]);
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 4, "a wrong answer fails its case without stopping the roster");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    const record = ledger.find(r => r.phase === "case");
+    assert.equal(record?.outcome, "failed");
+    assert.equal((record?.workerFailure as Record<string, unknown> | undefined)?.status, "completed");
+    const lifecycle = record?.workerLifecycle as { events: { kind: string }[] } | undefined;
+    assert.ok(lifecycle !== undefined, "a completed wrong answer keeps its timeline");
+    assert.equal(lifecycle.events.at(-1)?.kind, "settle", "the worker settled normally");
+  });
+
+test("a not-started worker never gains a lifecycle timeline in the custom round",
+  { timeout: 90_000 }, async t => {
+    // The classifier answers with a profile the config does not define, so
+    // routing fails before any spawn: the receipt says not-started and no
+    // journal can exist for a fallback to read.
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ], {}, { choice: "no-such-profile" });
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.ok(code === 1 || code === 4, "a routing failure stops or fails the case; it never passes");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    for (const row of ledger) {
+      assert.ok(!("workerLifecycle" in row),
+        "a worker that never ran carries no timeline anywhere in the ledger");
+    }
+  });
+
+test("the journal fallback recovers a receipt without lifecycle and filters foreign pids",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "stdin-file",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ]);
+    // The preload lands inside the CLI only: it blinds the receipt (snapshot
+    // returns undefined, so the receipt omits lifecycle) while the CLI still
+    // appends the journal, and it plants one foreign-pid line the fallback
+    // must filter out. The case's timeline can then come only from the
+    // journal fallback on the normal path.
+    const blind = join(round.base, "lifecycle-blind.cjs");
+    await writeFile(blind, 'if (process.argv[1] && process.argv[1].includes("cli.js")) {\n'
+      + `  const m = require(${JSON.stringify(join(import.meta.dirname, "..", "src", "lifecycle.js"))});\n`
+      + '  m.LifecycleRecorder.prototype.snapshot = function () { return undefined; };\n'
+      + '  const fs = require("node:fs");\n'
+      + '  const path = require("node:path");\n'
+      + '  const project = process.argv[process.argv.indexOf("--project") + 1];\n'
+      + '  const dir = path.join(project, ".turnhelm");\n'
+      + '  fs.mkdirSync(dir, { recursive: true });\n'
+      + '  fs.appendFileSync(path.join(dir, "lifecycle.jsonl"),\n'
+      + '    JSON.stringify({ type: "turnhelm.worker-lifecycle", pid: 424242, tMs: 0, kind: "abort" }) + "\\n");\n'
+      + '}\n');
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: { ...round.env, NODE_OPTIONS: "--require " + blind }, sandboxExecPath: fake });
+    assert.equal(code, 0, "a blinded receipt is not an integrity problem on the normal path");
+    assert.equal(await readFile(round.invocations, "utf8"), "1", "the worker ran exactly once");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    const record = ledger.find(r => r.phase === "case");
+    assert.equal(record?.outcome, "pass");
+    const lifecycle = record?.workerLifecycle as { events: { kind: string }[] } | undefined;
+    assert.ok(lifecycle !== undefined, "the journal fallback recovers the timeline the receipt lost");
+    const kinds = lifecycle.events.map(event => event.kind);
+    // Membership, not order: the journal projection sorts by tMs and equal
+    // timestamps carry no causal claim — settle may tie the shutdown record.
+    assert.ok(kinds.includes("spawned"), "the shell-exec stdin path still pins the CLI pid");
+    assert.ok(kinds.includes("settle"), "the settled run explains itself end to end");
+    assert.ok(!kinds.includes("abort"), "the foreign-pid line never joins the timeline");
+  });
+
+test("a malformed receipt lifecycle degrades to the journal fallback, never a crash",
+  { timeout: 90_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-a", kind: "worker-readonly", transport: "stdin-file",
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      }
+    ]);
+    // The preload corrupts only the receipt's lifecycle snapshot with an
+    // unknown field: the projection throws inside the runner, the catch must
+    // swallow it, and the timeline comes from the journal fallback — a
+    // hostile receipt is degraded evidence, never a runner crash.
+    const hostile = join(round.base, "lifecycle-hostile.cjs");
+    await writeFile(hostile, 'if (process.argv[1] && process.argv[1].includes("cli.js")) {\n'
+      + `  const m = require(${JSON.stringify(join(import.meta.dirname, "..", "src", "lifecycle.js"))});\n`
+      + '  m.LifecycleRecorder.prototype.snapshot = function () {\n'
+      + '    return { events: [], overflow: false, bogus: "hostile-field" };\n'
+      + '  };\n'
+      + '}\n');
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: { ...round.env, NODE_OPTIONS: "--require " + hostile }, sandboxExecPath: fake });
+    assert.equal(code, 0, "a malformed receipt lifecycle is not an integrity problem");
+    assert.equal(await readFile(round.invocations, "utf8"), "1", "the worker ran exactly once");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    const record = ledger.find(r => r.phase === "case");
+    assert.equal(record?.outcome, "pass");
+    const lifecycle = record?.workerLifecycle as { events: { kind: string }[] } | undefined;
+    assert.ok(lifecycle !== undefined, "the journal fallback recovers the timeline the receipt corrupted");
+    const kinds = lifecycle.events.map(event => event.kind);
+    assert.ok(kinds.includes("spawned"), "the recovered timeline still pins the CLI pid");
+    assert.ok(kinds.includes("settle"), "the settled run explains itself");
+    assert.ok(!kinds.includes("abort"), "nothing was invented to replace the hostile snapshot");
+  });
+
+test("the exact lifecycle journal leaf is exempt from the tree budget; substitutions are refused",
+  { timeout: 90_000 }, async t => {
+    // Only the exact regular leaf is exempt — including an oversize one,
+    // because the CLI owns its growth — while anything else at that path, or
+    // any other new file under .turnhelm, is still drift.
+    const scenarios: readonly {
+      name: string; leaf?: "fat" | "dir" | "symlink" | "fifo"; extraWrite?: string;
+      expect: "pass" | "tree-drift";
+    }[] = [
+      { name: "an oversize regular journal", leaf: "fat", expect: "pass" },
+      { name: "an empty directory at the journal path", leaf: "dir", expect: "tree-drift" },
+      { name: "a symlink at the journal path", leaf: "symlink", expect: "tree-drift" },
+      { name: "a FIFO at the journal path", leaf: "fifo", expect: "tree-drift" },
+      { name: "another new .turnhelm file", extraWrite: ".turnhelm/evil.txt", expect: "tree-drift" }
+    ];
+    for (const scenario of scenarios) {
+      const round = await scratchExecuteRound(t, [
+        {
+          id: "case-a", kind: "worker-readonly", transport: "arg",
+          grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+        }
+      ], {}, {
+        codex: scenario.leaf === undefined
+          ? { extraWrite: scenario.extraWrite }
+          : { lifecycleLeaf: scenario.leaf }
+      });
+      const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+      const code = await executeRound(round.manifestPath, round.approvalSha256,
+        { env: round.env, sandboxExecPath: fake });
+      const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+      const last = ledger.at(-1);
+      if (scenario.expect === "pass") {
+        assert.equal(code, 0, scenario.name + " is permitted");
+        const record = ledger.find(r => r.phase === "case");
+        assert.equal(record?.outcome, "pass");
+        assert.ok(record?.workerLifecycle !== undefined,
+          scenario.name + ": the timeline still rides the case record");
+      } else {
+        assert.equal(code, 1, scenario.name + " stops the round");
+        assert.equal(last?.phase, "stopped", scenario.name + " never grades");
+        assert.equal(last?.reason, "tree-drift", scenario.name + " is refused as drift");
+      }
     }
   });
 
@@ -939,6 +1176,8 @@ test("a frozen hook rebound during the worker run stops as oracle-identity at gr
     assert.equal(ledger.at(-1)?.phase, "stopped");
     assert.equal(ledger.at(-1)?.caseId, "case-a");
     assert.equal(ledger.at(-1)?.reason, "oracle-identity");
+    assert.ok(ledger.at(-1)?.workerLifecycle !== undefined,
+      "the oracle-identity stop reuses the completed run's timeline");
   });
 
 test("a copied manifest outside the evidence root is refused without a claim",
@@ -1358,6 +1597,8 @@ test("a worker writing outside its allowedChanges stops the round", { timeout: 9
   assert.equal(stop?.reason, "tree-drift");
   assert.equal((stop?.workerFailure as Record<string, unknown> | undefined)?.status, "completed",
     "a post-CLI stop record carries the projection of its lone receipt");
+  assert.ok(stop?.workerLifecycle !== undefined,
+    "a late integrity stop reuses the normal-path lifecycle evidence it already collected");
 });
 
 test("a CLI run that receipts nothing is an integrity stop", { timeout: 90_000 }, async t => {
@@ -1398,6 +1639,8 @@ test("a selection outside the case's allowed profiles fails the case", { timeout
   const record = ledger.find(r => r.phase === "case");
   assert.equal(record?.outcome, "failed");
   assert.equal(record?.profileId, "frontier", "the selection is recorded even as it fails the case");
+  assert.ok(record?.workerLifecycle !== undefined,
+    "a completed worker's failed case keeps its timeline");
 });
 
 test("a reserved-record append failure stops before the next spend", { timeout: 90_000 }, async t => {
@@ -1621,6 +1864,8 @@ test("an auth-class worker failure stops the round",
     assert.equal(stop?.reason, "worker-auth");
     assert.equal((stop?.workerFailure as Record<string, unknown> | undefined)?.failureClass, "auth",
       "the stop record carries the projection, never the failure text");
+    assert.ok(stop?.workerLifecycle !== undefined,
+      "a stopping failure class still explains itself with its timeline");
   });
 
 // ---------- FE-2 (spec §4): fixed decision order, cleanup gate, settled-tree identity ----------
@@ -1676,6 +1921,8 @@ test("an overflowing CLI run stops as output-cap even though the timeout flag is
     assert.equal(stop?.phase, "stopped");
     assert.equal(stop?.caseId, "case-a");
     assert.equal(stop?.reason, "output-cap", "overflow outranks the timeout flag it also set");
+    assert.ok(!("workerLifecycle" in (stop ?? {})),
+      "no journal fallback runs ahead of the output-cap gate");
     assert.ok(!ledger.some(r => r.phase === "case"), "a capped stream never grades, as a case or a timeout");
   });
 
@@ -1751,6 +1998,8 @@ test("a worker rebuilding its own case root byte-identically stops the settled-t
     assert.equal(stop?.reason, "root-identity", "hash equality never proves identity");
     assert.equal((stop?.workerFailure as Record<string, unknown> | undefined)?.status, "completed",
       "the lone receipt's projection rides the stop record");
+    assert.ok(stop?.workerLifecycle !== undefined,
+      "the root-identity stop reuses the normal-path lifecycle evidence");
     assert.ok(!ledger.some(r => r.phase === "case"), "a replaced root never grades");
   });
 
@@ -1788,6 +2037,10 @@ test("a timed-out case records an unjudged timeout outcome and the roster contin
     assert.equal(workerFailure?.ownedShutdown, true);
     assert.ok(!Object.hasOwn(record ?? {}, "oracleInput"), "nothing was judged, so no oracle input is retained");
     assert.ok(!Object.hasOwn(record ?? {}, "workerPayload"), "a cancelled worker carries no payload projection");
+    assert.ok(record?.workerLifecycle !== undefined,
+      "the clean timeout keeps its lifecycle timeline, unjudged as it is");
+    const timeline = (record?.workerLifecycle as { events: { kind: string }[] }).events;
+    assert.equal(timeline[0]?.kind, "spawned");
     assert.deepEqual(ledger.filter(r => r.phase === "case").map(r => [r.caseId, r.outcome]).sort(),
       [["case-a", "timeout"], ["case-b", "pass"]], "case-b still grades pass");
     assert.ok(!ledger.some(r => r.phase === "stopped"), "no stop record on a timeout-outcome round");
@@ -1838,6 +2091,8 @@ test("a timed-out case that wrote outside its allowance stops as tree-drift",
     assert.equal(stop?.reason, "tree-drift");
     assert.equal((stop?.workerFailure as Record<string, unknown> | undefined)?.status, "cancelled",
       "the cancelled receipt's projection rides the stop record");
+    assert.ok(stop?.workerLifecycle !== undefined,
+      "the drift stop reuses the timeline the cancelled run already collected");
     assert.ok(!ledger.some(r => r.phase === "case"), "a drifted timeout case never records an outcome");
   });
 
@@ -1865,6 +2120,8 @@ test("a timed-out case that rebuilt its root byte-identically stops as root-iden
     assert.equal(stop?.reason, "root-identity", "hash equality never proves identity, timeout or not");
     assert.equal((stop?.workerFailure as Record<string, unknown> | undefined)?.status, "cancelled",
       "the cancelled receipt's projection rides the stop record");
+    assert.ok(stop?.workerLifecycle !== undefined,
+      "the identity stop reuses the timeline the cancelled run already collected");
     assert.ok(!ledger.some(r => r.phase === "case"), "a replaced root never records an outcome");
   });
 

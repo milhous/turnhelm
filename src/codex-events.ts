@@ -6,12 +6,22 @@ export type WorkerUsage = Readonly<{
   reasoning_output_tokens?: number;
 }>;
 
+// The bounded activity projection of a native item lifecycle frame: fixed
+// enums plus one validated optional numeric scalar. Never the native type
+// name, command, output, path, item ID, or reasoning text.
+export type WorkerActivity = Readonly<{
+  itemKind: "reasoning" | "command_execution" | "file_change" | "other";
+  itemPhase: "started" | "updated" | "completed";
+  itemStatus?: "in_progress" | "completed" | "failed";
+  itemExitCode?: number;
+}>;
+
 export type WorkerEvent =
   | Readonly<{ kind: "message"; text: string }>
   | Readonly<{ kind: "completed"; usage?: WorkerUsage }>
   | Readonly<{ kind: "failed"; failureClass: FailureClass; errorSha256?: string }>
   | Readonly<{ kind: "diagnostic"; category: "worker-event-error"; failureClass: FailureClass; errorSha256?: string }>
-  | Readonly<{ kind: "diagnostic"; category: "tool-progress" }>
+  | Readonly<{ kind: "activity" } & WorkerActivity>
   | Readonly<{ kind: "ignored" }>;
 
 // Native error text is never retained: a message reduces to one frozen class
@@ -80,6 +90,28 @@ const usageSnapshot = (value: unknown): WorkerUsage | undefined => {
 // One raw frame in, one sanitized event out. Fatal on invalid transport, never on
 // an unknown but well-formed type; usage fields are validated individually and
 // never merged into overlapping totals.
+// Item lifecycle frames project bounded activity facts: the phase comes only
+// from the root event type, the kind only from an exact native type match, the
+// status only from a three-value whitelist, and the exit code only as a signed
+// safe integer on a completed command. Every other native field is discarded
+// here, never forwarded to lifecycle or evidence parsers.
+const ACTIVITY_ITEM_KINDS = new Set(["reasoning", "command_execution", "file_change"]);
+
+const activityOf = (item: Record<string, unknown>, phase: "started" | "updated" | "completed"): WorkerActivity => {
+  const itemKind = ACTIVITY_ITEM_KINDS.has(item.type as string) ? item.type as WorkerActivity["itemKind"] : "other";
+  const status = item.status;
+  const itemStatus = status === "in_progress" || status === "completed" || status === "failed" ? status : undefined;
+  const exitCode = item.exit_code;
+  const itemExitCode = phase === "completed" && itemKind === "command_execution"
+    && typeof exitCode === "number" && Number.isSafeInteger(exitCode) ? exitCode : undefined;
+  return {
+    itemKind,
+    itemPhase: phase,
+    ...(itemStatus === undefined ? {} : { itemStatus }),
+    ...(itemExitCode === undefined ? {} : { itemExitCode })
+  };
+};
+
 export function decodeWorkerEvent(frame: Uint8Array): WorkerEvent {
   if (frame.byteLength > MAX_EVENT_BYTES) throw new Error("worker event exceeds 1 MiB");
   let event: unknown;
@@ -99,6 +131,15 @@ export function decodeWorkerEvent(frame: Uint8Array): WorkerEvent {
   }
   if (type === "turn.failed") return { kind: "failed", ...failureOf(event) };
   if (type === "error") return { kind: "diagnostic", category: "worker-event-error", ...failureOf(event) };
+  if (type === "item.started" || type === "item.updated") {
+    // Absent or malformed item metadata keeps the ignored behavior; optional
+    // evidence never creates a protocol failure.
+    if (!object(event.item) || typeof event.item.type !== "string") return { kind: "ignored" };
+    // Agent messages surface only at completion; in-flight agent frames
+    // carry no partial-message evidence.
+    if (event.item.type === "agent_message") return { kind: "ignored" };
+    return { kind: "activity", ...activityOf(event.item, type === "item.started" ? "started" : "updated") };
+  }
   if (type === "item.completed") {
     if (!object(event.item) || typeof event.item.type !== "string") {
       throw new Error("completed item is not well-formed");
@@ -107,7 +148,7 @@ export function decodeWorkerEvent(frame: Uint8Array): WorkerEvent {
       if (typeof event.item.text !== "string") throw new Error("agent message text must be a string");
       return { kind: "message", text: event.item.text };
     }
-    return { kind: "diagnostic", category: "tool-progress" };
+    return { kind: "activity", ...activityOf(event.item, "completed") };
   }
   return { kind: "ignored" };
 }

@@ -339,7 +339,17 @@ than opened.
   each event is also appended best-effort to `.turnhelm/lifecycle.jsonl` under
   the project root — the journal outlives a hard kill that prevents the
   receipt. A journaling failure never fails the run; fire-and-forget appends
-  may briefly hold the event loop at exit.
+  may briefly hold the event loop at exit. Decoded
+  `item.started`, `item.updated`, and `item.completed`
+  frames from non-agent items join the timeline as activity events carrying
+  fixed metadata only — `itemKind/itemPhase/itemStatus/itemExitCode`, where
+  `itemKind` is `reasoning`, `command_execution`, or `file_change` with any
+  other native type collapsing to `other`; `itemExitCode` is
+  legal only on completed command executions — and
+  the command text is never retained anywhere. Agent messages surface only at
+  completion, and in-flight agent frames are ignored. A completed item
+  reports one fixed diagnostic line, `turnhelm: worker-activity`, on stderr;
+  started and updated items report none.
 - **Completion is not verification.** A `completed` worker (exit 0) proves the
   child finished its turn — nothing more. Whether the task was actually done
   is judged by consumer-side gates: the output schema above, oracle and
@@ -512,13 +522,18 @@ the frozen failure class plus the `ownedShutdown` action boolean, with an
 optional correlation hash and observed death signal; no failure text —
 plus `workerProgress`, the receipt's decoded-event count and, when one
 decoded, the last decode's age at settlement, the same parent-observed
-projection that never claims liveness. A failed or timed-out case additionally
+projection that never claims liveness. Every attributable outcome also
 carries `workerLifecycle` — the bounded content-free worker timeline (`tMs`
-and `kind`, plus at most a fixed-vocabulary `detail` such as the observed
-failure class; at most 64 events) projected from the receipt's `lifecycle`
-field, or rebuilt from the best-effort `.turnhelm/lifecycle.jsonl` journal by
-the supervised CLI's pid when the CLI died before receipting; completed runs
-carry none. Observed and case records also carry
+and `kind`, plus at most a fixed-vocabulary `detail`: process and settlement
+facts, or a decoded activity item's `itemKind/itemPhase/itemStatus/itemExitCode`
+where `itemExitCode` is legal only on completed command executions; at most
+64 events, first 8 and last 56 kept) projected from the receipt's `lifecycle`
+field, or rebuilt from the best-effort `.turnhelm/lifecycle.jsonl` journal
+(a 1 MiB cap) by the supervised CLI's pid when the receipt carries none —
+an executed worker retains its timeline on every attributable outcome,
+pass and wrong answer included, while a projection or journal fault
+degrades to absent evidence and a not-started worker never gains a timeline.
+Observed and case records also carry
 `attemptTransports`, a bounded projection of the per-attempt backend and
 transport mode — at most two entries in a Laya-then-Jev subsequence with Laya
 always direct; missing, duplicate, reversed, oversized, or otherwise invalid
@@ -561,8 +576,11 @@ child that still does not close stops the round as `cleanup-unverified` rather
 than hanging. Do not use `test:live`, help/health, or a short `1+1` smoke prompt
 as acceptance of the actual documentation or implementation task. Receipt
 request counts are client attempts, not proof of server receipt or billed
-requests; generic tool-progress lines are not a count of the worker's internal
-calls.
+requests; worker-activity lines are not a count of the worker's internal tool
+calls. The timeline carries
+no tool-call count, no exact file reads, and no causal ordering — equal
+timestamps carry no order claim — and absence or
+overflow of activity events is unknown evidence, not zero actions.
 
 ## Agent skills (Codex CLI + Claude Code)
 
@@ -637,7 +655,8 @@ file stops `case-files`. A timeout is an unjudged per-case outcome, not a stop
 settled-tree gate its case record is appended and the roster continues to the
 next reservation. Every case record (pass, failed, or timeout) and the
 post-CLI stop records (`cleanup-unverified`, `output-cap`, `worker-<class>`,
-`tree-drift`, `root-identity`; not the `receipt` stop, which has no single
+`tree-drift`, `root-identity`, the pre-/post-contract `oracle-identity`
+stops; not the `receipt` stop, which has no single
 receipt to project) carry a `workerFailure` whenever the lone receipt's
 worker object is projectable (absent, non-record, or an out-of-enum status
 omits the field, never fabricates it): a per-field projection of the
@@ -649,7 +668,17 @@ dropped individually and never coerced, and `errorSha256` is correlation-only
 — no error text or stderr bytes are retained; zero-valued counters stay as
 observations (`progressEvents:0` means zero decoded frames). These are
 parent-observed counts and ages and an action record for `ownedShutdown` — no
-liveness, stall, or causation claims ride them. Terminal evidence appends are
+liveness, stall, or causation claims ride them. The same attributable records
+also carry `workerLifecycle` under the same lone-receipt rule for an executed
+worker — projected from the receipt, or by the normal-path journal fallback
+past the cleanup, output-cap, receipt, and stop-class gates, filtered to the
+supervised CLI's pid — while contract-infrastructure, signal, and pre-spend
+stops carry none, and a not-started worker never gains a timeline. Both CLI
+transports launch with `--lifecycle`, and the settled-tree freeze exempts
+the exact regular `.turnhelm/lifecycle.jsonl` leaf from size and hash
+accounting (the CLI owns its growth; the reader caps it) — but
+symlink, FIFO, or directory at that path still stops the round as drift, and
+any other new `.turnhelm` file still drifts. Terminal evidence appends are
 load-bearing: a case record the ledger cannot take stops the round
 (`stopped {reason:"evidence-io"}`, exit `1`), and after the last case a
 `completed` record (`{phase:"completed", outcome:"pass"|"fail", cases, failed,

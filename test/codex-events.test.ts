@@ -45,15 +45,16 @@ test("usage counters are validated per field and never summed", () => {
 
 test("unknown well-formed event types are ignored without schema guessing", () => {
   assert.deepEqual(decodeWorkerEvent(frame({ type: "thread.started", thread_id: "t" })), { kind: "ignored" });
-  assert.deepEqual(decodeWorkerEvent(frame({
-    type: "item.started", item: { type: "command_execution", command: "ls" }
-  })), { kind: "ignored" });
+  // Started/updated items with absent or malformed metadata keep the ignored behavior.
+  assert.deepEqual(decodeWorkerEvent(frame({ type: "item.started" })), { kind: "ignored" });
+  assert.deepEqual(decodeWorkerEvent(frame({ type: "item.updated", item: "text" })), { kind: "ignored" });
+  assert.deepEqual(decodeWorkerEvent(frame({ type: "item.started", item: { type: 42 } })), { kind: "ignored" });
   assert.deepEqual(decodeWorkerEvent(frame({
     type: "turn.completed", usage: { input_tokens: 1 }, extra_field: { nested: true }
   })), { kind: "completed", usage: { input_tokens: 1 } });
 });
 
-test("error and tool progress events reduce to fixed categories", () => {
+test("error events reduce to a fixed category; completed items project activity", () => {
   assert.deepEqual(decodeWorkerEvent(frame({
     type: "error", message: "TEST_PRIVATE_ERROR_SENTINEL", stack: "TEST_PRIVATE_STACK_SENTINEL"
   })), {
@@ -63,7 +64,76 @@ test("error and tool progress events reduce to fixed categories", () => {
   assert.deepEqual(decodeWorkerEvent(frame({
     type: "item.completed",
     item: { type: "command_execution", command: "cat TEST_PRIVATE_TOOL_SENTINEL", aggregated_output: "TEST_PRIVATE_OUTPUT_SENTINEL", exit_code: 0 }
-  })), { kind: "diagnostic", category: "tool-progress" });
+  })), { kind: "activity", itemKind: "command_execution", itemPhase: "completed", itemExitCode: 0 });
+});
+
+test("item lifecycle frames project bounded activity facts", () => {
+  // All three phases come only from the root event type, never from item status.
+  for (const [type, phase] of [["item.started", "started"], ["item.updated", "updated"], ["item.completed", "completed"]] as const) {
+    // Exact known item kinds map to their fixed enums; native extra fields are discarded.
+    assert.deepEqual(decodeWorkerEvent(frame({ type, item: { type: "reasoning", summary: "PRIVATE_REASONING_TEXT", id: "item_PRIVATE_ID" } })),
+      { kind: "activity", itemKind: "reasoning", itemPhase: phase });
+    assert.deepEqual(decodeWorkerEvent(frame({ type, item: { type: "command_execution", command: "PRIVATE_COMMAND_TEXT", aggregated_output: "PRIVATE_OUTPUT_TEXT" } })),
+      { kind: "activity", itemKind: "command_execution", itemPhase: phase });
+    assert.deepEqual(decodeWorkerEvent(frame({ type, item: { type: "file_change", path: "/private/path" } })),
+      { kind: "activity", itemKind: "file_change", itemPhase: phase });
+    // Any other non-agent string item type collapses to "other"; the native name is not preserved.
+    for (const nativeType of ["mcp_tool_call", "web_search", "todo_list"]) {
+      assert.deepEqual(decodeWorkerEvent(frame({ type, item: { type: nativeType, arguments: { secret: "PRIVATE_MCP_TEXT" } } })),
+        { kind: "activity", itemKind: "other", itemPhase: phase });
+    }
+    // Status is an independent observation copied only from the exact three-value whitelist.
+    assert.deepEqual(decodeWorkerEvent(frame({ type, item: { type: "reasoning", status: "in_progress" } })),
+      { kind: "activity", itemKind: "reasoning", itemPhase: phase, itemStatus: "in_progress" });
+    assert.deepEqual(decodeWorkerEvent(frame({ type, item: { type: "web_search", status: "failed", query: "PRIVATE_QUERY_TEXT" } })),
+      { kind: "activity", itemKind: "other", itemPhase: phase, itemStatus: "failed" });
+    // Missing, null, or unknown status stays absent and is never replaced by the phase.
+    for (const status of [undefined, null, "queued", "succeeded", 7]) {
+      const projected = decodeWorkerEvent(frame({ type, item: { type: "reasoning", status } })) as Record<string, unknown>;
+      assert.equal(projected.itemStatus, undefined, `status ${JSON.stringify(status)} must stay absent`);
+    }
+  }
+  // A completed command carries its native exit code as a signed safe integer, zero included.
+  assert.deepEqual(decodeWorkerEvent(frame({
+    type: "item.completed", item: { type: "command_execution", status: "completed", exit_code: 13, command: "PRIVATE_COMMAND_TEXT", aggregated_output: "PRIVATE_OUTPUT_TEXT" }
+  })), { kind: "activity", itemKind: "command_execution", itemPhase: "completed", itemStatus: "completed", itemExitCode: 13 });
+  assert.deepEqual(decodeWorkerEvent(frame({ type: "item.completed", item: { type: "command_execution", exit_code: 0 } })),
+    { kind: "activity", itemKind: "command_execution", itemPhase: "completed", itemExitCode: 0 });
+  assert.deepEqual(decodeWorkerEvent(frame({ type: "item.completed", item: { type: "command_execution", exit_code: -2 } })),
+    { kind: "activity", itemKind: "command_execution", itemPhase: "completed", itemExitCode: -2 });
+  // A failed command observation keeps both facts; the status is never normalized.
+  assert.deepEqual(decodeWorkerEvent(frame({ type: "item.completed", item: { type: "command_execution", status: "failed", exit_code: 1 } })),
+    { kind: "activity", itemKind: "command_execution", itemPhase: "completed", itemStatus: "failed", itemExitCode: 1 });
+  // Invalid exit codes are omitted, never coerced or zero-filled.
+  for (const exit_code of [null, "13", 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN]) {
+    const projected = decodeWorkerEvent(frame({ type: "item.completed", item: { type: "command_execution", exit_code } })) as Record<string, unknown>;
+    assert.equal(projected.itemExitCode, undefined, `exit code ${JSON.stringify(exit_code)} must be omitted`);
+  }
+  // Exit codes ride completed commands only — never another kind or an earlier phase.
+  for (const type of ["item.started", "item.updated"]) {
+    const projected = decodeWorkerEvent(frame({ type, item: { type: "command_execution", exit_code: 13 } })) as Record<string, unknown>;
+    assert.equal(projected.itemExitCode, undefined, `${type} must not carry an exit code`);
+  }
+  const otherKind = decodeWorkerEvent(frame({ type: "item.completed", item: { type: "file_change", exit_code: 13 } })) as Record<string, unknown>;
+  assert.equal(otherKind.itemExitCode, undefined, "only command_execution may carry an exit code");
+  // Agent messages surface only at completion as the message channel; an
+  // in-flight agent frame carries no partial-message evidence and stays
+  // ignored rather than crowding the ring as a phantom activity.
+  for (const type of ["item.started", "item.updated"]) {
+    assert.deepEqual(decodeWorkerEvent(frame({ type, item: { type: "agent_message", text: "PRIVATE_PARTIAL_TEXT" } })),
+      { kind: "ignored" }, type + " agent frames must stay ignored");
+  }
+});
+
+test("activity projections carry no native content", () => {
+  const serialized = JSON.stringify([
+    decodeWorkerEvent(frame({ type: "item.started", item: { type: "command_execution", command: "PRIVATE_COMMAND_TEXT" } })),
+    decodeWorkerEvent(frame({ type: "item.completed", item: { type: "reasoning", summary: "PRIVATE_REASONING_TEXT" } })),
+    decodeWorkerEvent(frame({ type: "item.completed", item: { type: "mcp", id: "item_PRIVATE_ID", arguments: { secret: "PRIVATE_MCP_TEXT" } } }))
+  ]);
+  for (const canary of ["PRIVATE_COMMAND_TEXT", "PRIVATE_REASONING_TEXT", "PRIVATE_MCP_TEXT", "item_PRIVATE_ID", "mcp"]) {
+    assert.ok(!serialized.includes(canary), "canary leaked: " + canary);
+  }
 });
 
 test("each frozen taxonomy phrase maps to its failure class on both frame kinds", () => {

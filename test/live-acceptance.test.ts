@@ -848,6 +848,29 @@ process.stdin.on("end", () => {
       return;
     }
   }
+  if (mode === "mutiny-hostile-journal") {
+    // EV-2: the first invocation plants a hostile journal line (an unknown
+    // detail key) under the CLI's own pid, then hangs to its deadline and
+    // hard-kills the CLI — no receipt exists, so the fallback must read the
+    // journal. The planted line must degrade the whole fallback to absent
+    // evidence without disturbing the stop record.
+    const log = process.env.TURNHELM_TEST_INVOCATIONS;
+    const prior = log !== undefined && fs.existsSync(log)
+      ? fs.readFileSync(log, "utf8").split("\\n").filter(line => line !== "").length : 0;
+    if (prior <= 1) {
+      fs.appendFileSync(path.join(process.cwd(), ".turnhelm", "lifecycle.jsonl"),
+        JSON.stringify({ type: "turnhelm.worker-lifecycle", pid: process.ppid, tMs: 1, kind: "failure",
+          detail: { class: "rate-limit", evilKey: "PRIVATE" } }) + "\\n");
+      const mutiny = () => {
+        try { process.kill(process.ppid, "SIGKILL"); } catch {}
+        process.exit(0);
+      };
+      process.on("SIGINT", mutiny);
+      process.on("SIGTERM", mutiny);
+      setInterval(() => {}, 3600);
+      return;
+    }
+  }
   if (mode === "emit-then-hang") {
     // One decoded event, then a gate file once it has flushed, then idle: the
     // caller aborts after the gate, cancelling a run that already decoded.
@@ -976,6 +999,17 @@ process.stdin.on("end", () => {
   if (mode === "usage-invalid") {
     emit({ type: "item.completed", item: { type: "agent_message", text: answer } });
     emit({ type: "turn.completed", usage: { input_tokens: -5, output_tokens: 1.5 } });
+    process.exit(0);
+  }
+  if (mode === "activity-ok") {
+    // Bounded item lifecycle frames ahead of a clean completion: the retained
+    // timeline must carry the sanitized activity projection on a pass, and the
+    // native command text must never reach the evidence.
+    emit({ type: "item.started", item: { type: "command_execution", status: "in_progress" } });
+    emit({ type: "item.completed", item: { type: "command_execution", status: "completed", exit_code: 0,
+      command: "activity-e2e-secret-command-8c31" } });
+    emit({ type: "item.completed", item: { type: "agent_message", text: answer } });
+    emit({ type: "turn.completed" });
     process.exit(0);
   }
   if (mode === "linger-forever") {
@@ -1461,6 +1495,90 @@ test("a reported failure killed before receipt keeps its class on the retained t
   assert.equal(evidence.at(-1)?.reason, "receipt", "the round stops on the receipt gate");
 });
 
+test("a passing control retains its lifecycle projection with activity facts", { timeout: 120_000 }, async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  const run = await buildRun(t, "laya", classifier.url, [{ id: "passes-quietly", kind: "worker-readonly" }]);
+  await executeAcceptance(run.manifestPath, run.sha256, { env: workerEnv(fakeBin, "activity-ok") });
+  const evidence = await readEvidence(run.runRoot);
+  assert.equal(evidence.find(line => line.phase === "verified" && line.caseId === "passes-quietly")?.verdict,
+    "pass", "the case passes");
+  const observed = evidence.find(line => line.phase === "observed" && line.caseId === "passes-quietly");
+  const lifecycle = lifecycleOf(observed);
+  assert.ok(lifecycle !== undefined, "a successful control explains itself with its timeline too");
+  const kinds = lifecycle.events.map(event => event.kind);
+  assert.equal(kinds[0], "spawned", "the timeline begins at the worker spawn");
+  assert.equal(kinds.at(-1), "settle", "the timeline ends at settlement");
+  assert.equal(lifecycle.overflow, false);
+  const activity = lifecycle.events
+    .find(event => (event as { detail?: { eventKind?: string } }).detail?.eventKind === "activity"
+      && (event as { detail?: { itemPhase?: string } }).detail?.itemPhase === "completed");
+  assert.deepEqual((activity as { detail?: unknown } | undefined)?.detail,
+    { eventKind: "activity", itemKind: "command_execution", itemPhase: "completed",
+      itemStatus: "completed", itemExitCode: 0 },
+    "the completed command's sanitized activity projection rides the pass");
+  assert.ok(!JSON.stringify(evidence).includes("activity-e2e-secret-command-8c31"),
+    "the native command text never reaches the evidence");
+});
+
+test("a completed wrong answer retains its lifecycle projection", { timeout: 120_000 }, async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  const run = await buildRun(t, "laya", classifier.url, [{ id: "answers-wrongly", kind: "worker-readonly" }]);
+  await executeAcceptance(run.manifestPath, run.sha256, { env: workerEnv(fakeBin, "wrong-output") });
+  const evidence = await readEvidence(run.runRoot);
+  assert.equal(evidence.find(line => line.phase === "verified" && line.caseId === "answers-wrongly")?.verdict,
+    "fail", "the wrong answer fails the oracle");
+  const observed = evidence.find(line => line.phase === "observed" && line.caseId === "answers-wrongly");
+  const lifecycle = lifecycleOf(observed);
+  assert.ok(lifecycle !== undefined, "a completed wrong answer keeps its timeline");
+  assert.equal(lifecycle.events.at(-1)?.kind, "settle", "the worker settled normally");
+  assert.equal(lifecycle.overflow, false);
+});
+
+test("a not-started worker never gains a lifecycle timeline", { timeout: 120_000 }, async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  // Routing fails before any spawn: the receipt says not-started and no
+  // journal can exist. A worker that never ran must not gain a timeline —
+  // not from the receipt, and not from a journal fallback either.
+  classifier.scripted.push("not-json");
+  const run = await buildRun(t, "laya", classifier.url, [{ id: "route-fail", kind: "worker-readonly" }]);
+  assert.equal(await executeAcceptance(run.manifestPath, run.sha256,
+    { env: workerEnv(fakeBin, "ok-readonly") }), 1);
+  const evidence = await readEvidence(run.runRoot);
+  const observed = evidence.find(line => line.phase === "observed");
+  assert.ok(observed, "the not-started run still lands its observation");
+  assert.ok(!("workerLifecycle" in (observed as Record<string, unknown>)),
+    "a not-started worker carries no lifecycle timeline");
+  assert.equal(evidence.find(line => line.phase === "stopped")?.reason, "verdict");
+});
+
+test("a hostile journal cannot disturb the receiptless stop record", { timeout: 120_000 }, async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  // The first case plants a hostile journal line (unknown detail key) under
+  // the CLI's pid, then kills the CLI from the shutdown ladder — no receipt,
+  // so the fallback must read the journal. The planted line degrades the
+  // fallback to absent evidence; the stop record and its reason are
+  // untouched, and the planted prose never reaches the evidence.
+  const run = await buildRun(t, "laya", classifier.url, [
+    { id: "dies-hostile", kind: "worker-readonly", deadlineMs: 5000 }
+  ]);
+  const invocations = join(run.runRoot, "fake-worker-invocations.log");
+  const code = await executeAcceptance(run.manifestPath, run.sha256,
+    { env: workerEnv(fakeBin, "mutiny-hostile-journal", invocations) });
+  assert.equal(code, 1, "the receiptless kill still stops the round");
+  const evidence = await readEvidence(run.runRoot);
+  const observed = evidence.find(line => line.phase === "observed" && line.caseId === "dies-hostile");
+  assert.ok(observed, "the observation survives the hostile journal");
+  assert.ok(!("workerLifecycle" in (observed as Record<string, unknown>)),
+    "an unprojectable journal degrades to absent evidence");
+  assert.equal(evidence.at(-1)?.phase, "stopped", "the original stop record stands");
+  assert.equal(evidence.at(-1)?.reason, "receipt", "the stop reason is unchanged");
+  assert.ok(!JSON.stringify(evidence).includes("PRIVATE"), "no planted prose reaches the evidence");
+});
+
 test("hostile lifecycle detail values degrade, never retain prose", async () => {
   const CANARY = "raw-prose-canary-trust-me";
   const projected = projectWorkerLifecycle({
@@ -1513,6 +1631,225 @@ test("hostile journal detail values degrade the same way", async t => {
   assert.ok(byKey.get("failure:1") !== undefined, "the entry itself survives");
   assert.equal(byKey.get("spawned:3")?.detail, undefined, "an unsafe pid degrades to no detail");
   assert.ok(!JSON.stringify(rebuilt).includes(CANARY), "no prose reaches the rebuilt evidence");
+});
+
+test("activity details project under fixed enums and drop inconsistent detail", () => {
+  const entryOf = (detail: unknown, kind = "event") =>
+    projectWorkerLifecycle({ overflow: false, events: [{ tMs: 0, kind, detail }] })?.events[0];
+  // Valid activity rows survive exactly as the decoder emits them.
+  assert.deepEqual(entryOf({ eventKind: "activity", itemKind: "command_execution", itemPhase: "completed",
+    itemStatus: "completed", itemExitCode: 0 }),
+    { tMs: 0, kind: "event", detail: { eventKind: "activity", itemKind: "command_execution",
+      itemPhase: "completed", itemStatus: "completed", itemExitCode: 0 } }, "zero exit codes are retained");
+  assert.deepEqual(entryOf({ eventKind: "activity", itemKind: "command_execution", itemPhase: "completed",
+    itemStatus: "failed", itemExitCode: 13 })?.detail,
+    { eventKind: "activity", itemKind: "command_execution", itemPhase: "completed",
+      itemStatus: "failed", itemExitCode: 13 }, "a failed status and its exit code are both observations");
+  assert.deepEqual(entryOf({ eventKind: "activity", itemKind: "command_execution", itemPhase: "completed",
+    itemExitCode: -2 })?.detail,
+    { eventKind: "activity", itemKind: "command_execution", itemPhase: "completed", itemExitCode: -2 },
+    "signed exit codes are retained without zero-filling");
+  assert.deepEqual(entryOf({ eventKind: "activity", itemKind: "reasoning", itemPhase: "started",
+    itemStatus: "in_progress" })?.detail,
+    { eventKind: "activity", itemKind: "reasoning", itemPhase: "started", itemStatus: "in_progress" });
+  assert.deepEqual(entryOf({ eventKind: "activity", itemKind: "file_change", itemPhase: "updated" })?.detail,
+    { eventKind: "activity", itemKind: "file_change", itemPhase: "updated" }, "optional fields stay absent");
+  assert.deepEqual(entryOf({ eventKind: "activity", itemKind: "other", itemPhase: "completed",
+    itemStatus: "failed" })?.detail,
+    { eventKind: "activity", itemKind: "other", itemPhase: "completed", itemStatus: "failed" },
+    "a non-native item kind is other, never the native type name");
+  // Invalid values or inconsistent combinations drop the entire detail,
+  // preserving the valid envelope.
+  const dropped = (detail: unknown, kind = "event"): boolean =>
+    entryOf(detail, kind)?.detail === undefined && entryOf(detail, kind)?.kind === kind;
+  const CANARY = "activity-prose-canary-trust-me";
+  for (const detail of [
+    { eventKind: "activity", itemPhase: "completed" },
+    { eventKind: "activity", itemKind: "reasoning" },
+    { eventKind: "activity", itemKind: "mcp_tool_call", itemPhase: "started" },
+    { eventKind: "activity", itemKind: "reasoning", itemPhase: "finished" },
+    { eventKind: "activity", itemKind: "reasoning", itemPhase: "started", itemStatus: "queued" },
+    { eventKind: "activity", itemKind: "reasoning", itemPhase: "started", itemStatus: CANARY },
+    { eventKind: "activity", itemKind: "command_execution", itemPhase: "started", itemExitCode: 0 },
+    { eventKind: "activity", itemKind: "reasoning", itemPhase: "completed", itemExitCode: 0 },
+    { eventKind: "activity", itemKind: "command_execution", itemPhase: "completed", itemExitCode: "13" },
+    { eventKind: "activity", itemKind: "command_execution", itemPhase: "completed", itemExitCode: 1.5 },
+    { eventKind: "activity", itemKind: "command_execution", itemPhase: "completed",
+      itemExitCode: Number.MAX_SAFE_INTEGER + 1 },
+    { eventKind: "activity", itemKind: "reasoning", itemPhase: "started", pid: 4242 },
+    { eventKind: "activity", itemKind: "reasoning", itemPhase: "started", status: "completed" },
+    { eventKind: "message", itemKind: "reasoning", itemPhase: "started" }
+  ]) {
+    assert.ok(dropped(detail), JSON.stringify(detail) + " drops its detail, keeping the envelope");
+  }
+  // Activity facts are legal only on an event entry: on any other kind the
+  // same fields are an inconsistent combination.
+  for (const kind of ["spawned", "failure", "settle", "close"]) {
+    assert.ok(dropped({ eventKind: "activity", itemKind: "reasoning", itemPhase: "started" }, kind),
+      "an activity detail on kind " + kind + " is inconsistent");
+  }
+  // Existing non-activity validation is untouched.
+  assert.deepEqual(entryOf({ eventKind: "message" }), { tMs: 0, kind: "event", detail: { eventKind: "message" } });
+  assert.deepEqual(entryOf({ pid: 4242 }, "spawned"), { tMs: 0, kind: "spawned", detail: { pid: 4242 } });
+});
+
+test("unknown projected detail keys reject before value validation in either order", () => {
+  for (const detail of [
+    { itemStatus: "bad", unknownKey: "PRIVATE" },
+    { unknownKey: "PRIVATE", itemStatus: "bad" }
+  ]) {
+    assert.throws(() => projectWorkerLifecycle({
+      events: [{ tMs: 0, kind: "event", detail }], overflow: false
+    }));
+  }
+  // The complete key set is checked before any value validation, so a
+  // legal-but-invalid value ahead of the unknown key still rejects, never
+  // degrades to a dropped detail.
+  for (const detail of [
+    { itemKind: "reasoning", itemPhase: "started", itemStatus: "bad", unknownKey: "PRIVATE" },
+    { unknownKey: "PRIVATE", itemStatus: "bad", itemKind: "reasoning", itemPhase: "started" }
+  ]) {
+    assert.throws(() => projectWorkerLifecycle({
+      events: [{ tMs: 0, kind: "event", detail }], overflow: false
+    }));
+  }
+});
+
+test("the lifecycle projection keeps the recorder's head-eight and last-56 retention", () => {
+  const events = Array.from({ length: 80 }, (_, index) => ({ tMs: index, kind: "event" }));
+  const projected = projectWorkerLifecycle({ events, overflow: false });
+  assert.ok(projected !== undefined);
+  assert.deepEqual(projected.events.map(event => event.tMs),
+    [...Array.from({ length: 8 }, (_, index) => index),
+      ...Array.from({ length: 56 }, (_, index) => 24 + index)],
+    "an oversized timeline keeps the first eight and the last 56 entries");
+  assert.equal(projected.overflow, true, "truncation reports itself");
+  // Re-projecting valid evidence is idempotent.
+  assert.deepEqual(projectWorkerLifecycle(projected), projected);
+  // One past the capacity drops exactly the ninth entry.
+  const sixtyFive = projectWorkerLifecycle({
+    events: Array.from({ length: 65 }, (_, index) => ({ tMs: index, kind: "event" })), overflow: false
+  });
+  assert.deepEqual(sixtyFive?.events.map(event => event.tMs),
+    [...Array.from({ length: 8 }, (_, index) => index),
+      ...Array.from({ length: 56 }, (_, index) => 9 + index)]);
+  // A short timeline stays whole; an incoming overflow flag survives.
+  const short = projectWorkerLifecycle({
+    events: Array.from({ length: 10 }, (_, index) => ({ tMs: index, kind: "event" })), overflow: true
+  });
+  assert.equal(short?.events.length, 10);
+  assert.equal(short?.overflow, true, "an incoming overflow is preserved, not recomputed away");
+});
+
+const journalRoot = async (t: TestContext, lines: readonly string[] | Buffer): Promise<string> => {
+  const directory = await mkdtemp(join(tmpdir(), "turnhelm-lifecycle-journal-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await mkdir(join(directory, ".turnhelm"));
+  const content = Buffer.isBuffer(lines) ? lines : lines.join("\n") + "\n";
+  await writeFile(join(directory, ".turnhelm", "lifecycle.jsonl"), content);
+  return directory;
+};
+
+const journalLine = (event: Record<string, unknown>, pid = 4242): string =>
+  JSON.stringify({ type: "turnhelm.worker-lifecycle", pid, ...event });
+
+test("journal reconstruction applies the shared retention and the exact 1 MiB cap", async t => {
+  const directory = await journalRoot(t,
+    Array.from({ length: 80 }, (_, index) => journalLine({ tMs: index, kind: "event" })));
+  const rebuilt = await readWorkerLifecycleJournal(directory, 4242);
+  assert.ok(rebuilt !== undefined);
+  assert.deepEqual(rebuilt.events.map(event => event.tMs),
+    [...Array.from({ length: 8 }, (_, index) => index),
+      ...Array.from({ length: 56 }, (_, index) => 24 + index)],
+    "the journal timeline keeps the recorder's head and tail, not a flat tail");
+  assert.equal(rebuilt.overflow, true);
+  // The cap is exact: a padded journal of exactly 1048576 bytes still reads;
+  // one byte more is treated as missing. journalRoot joins with one trailing
+  // newline, so the padding stops one byte short of the cap.
+  const line = journalLine({ tMs: 0, kind: "spawned", detail: { pid: 4242 } });
+  const exact = await journalRoot(t, [line + " ".repeat(1048576 - line.length - 1)]);
+  const exactRead = await readWorkerLifecycleJournal(exact, 4242);
+  assert.deepEqual(exactRead?.events, [{ tMs: 0, kind: "spawned", detail: { pid: 4242 } }],
+    "a journal of exactly the cap reads in full");
+  const over = await journalRoot(t, [line + " ".repeat(1048577 - line.length - 1)]);
+  assert.equal(await readWorkerLifecycleJournal(over, 4242), undefined,
+    "one byte past the cap is absent evidence");
+});
+
+test("journal read faults degrade to absent evidence, never a crash", async t => {
+  // An unknown detail key rejects inside the projection; at this best-effort
+  // boundary the whole fallback degrades to undefined instead of throwing.
+  const hostile = await journalRoot(t, [
+    journalLine({ tMs: 0, kind: "spawned", detail: { pid: 4242 } }),
+    journalLine({ tMs: 1, kind: "failure", detail: { class: "rate-limit", evilKey: "PRIVATE" } })
+  ]);
+  assert.equal(await readWorkerLifecycleJournal(hostile, 4242), undefined,
+    "a projection fault degrades to absent evidence");
+  // Malformed JSON anywhere in the journal makes the whole journal unusable.
+  const malformed = await journalRoot(t, [journalLine({ tMs: 0, kind: "spawned" }), "not json"]);
+  assert.equal(await readWorkerLifecycleJournal(malformed, 4242), undefined);
+  // Invalid UTF-8 is not decoded leniently.
+  const invalid = await journalRoot(t,
+    Buffer.concat([Buffer.from(journalLine({ tMs: 0, kind: "spawned" }) + "\n"), Buffer.from([0xff, 0xfe])]));
+  assert.equal(await readWorkerLifecycleJournal(invalid, 4242), undefined);
+  // A directory at the journal leaf is not a journal.
+  const directoryLeaf = await mkdtemp(join(tmpdir(), "turnhelm-lifecycle-leaf-"));
+  t.after(() => rm(directoryLeaf, { recursive: true, force: true }));
+  await mkdir(join(directoryLeaf, ".turnhelm", "lifecycle.jsonl"), { recursive: true });
+  assert.equal(await readWorkerLifecycleJournal(directoryLeaf, 4242), undefined);
+  // A missing journal fabricates nothing.
+  const empty = await mkdtemp(join(tmpdir(), "turnhelm-lifecycle-missing-"));
+  t.after(() => rm(empty, { recursive: true, force: true }));
+  assert.equal(await readWorkerLifecycleJournal(empty, 4242), undefined);
+});
+
+test("the journal leaf is read descriptor-bound: substitution refused, growth re-read", { timeout: 20_000 }, async t => {
+  const lines = [journalLine({ tMs: 0, kind: "spawned", detail: { pid: 4242 } })];
+  // A symlinked leaf is refused — the reader must not follow it.
+  const linked = await mkdtemp(join(tmpdir(), "turnhelm-lifecycle-link-"));
+  t.after(() => rm(linked, { recursive: true, force: true }));
+  await mkdir(join(linked, ".turnhelm"));
+  await writeFile(join(linked, ".turnhelm", "journal.real"), lines.join("\n") + "\n");
+  await symlink("journal.real", join(linked, ".turnhelm", "lifecycle.jsonl"));
+  assert.equal(await readWorkerLifecycleJournal(linked, 4242), undefined,
+    "a symlinked journal leaf is absent evidence");
+  // A FIFO leaf is refused promptly instead of blocking the read.
+  const piped = await mkdtemp(join(tmpdir(), "turnhelm-lifecycle-fifo-"));
+  t.after(() => rm(piped, { recursive: true, force: true }));
+  await mkdir(join(piped, ".turnhelm"));
+  await execute("mkfifo", [join(piped, ".turnhelm", "lifecycle.jsonl")]);
+  assert.equal(await readWorkerLifecycleJournal(piped, 4242), undefined,
+    "a FIFO journal leaf is absent evidence");
+  // A journal that grows between reads is re-read in full.
+  const growing = await journalRoot(t, [journalLine({ tMs: 0, kind: "spawned" })]);
+  assert.equal((await readWorkerLifecycleJournal(growing, 4242))?.events.length, 1);
+  await writeFile(join(growing, ".turnhelm", "lifecycle.jsonl"), [
+    journalLine({ tMs: 0, kind: "spawned" }),
+    journalLine({ tMs: 1, kind: "settle", detail: { status: "completed" } })
+  ].join("\n") + "\n");
+  assert.deepEqual((await readWorkerLifecycleJournal(growing, 4242))?.events,
+    [{ tMs: 0, kind: "spawned" }, { tMs: 1, kind: "settle", detail: { status: "completed" } }],
+    "the second read sees every appended event");
+});
+
+test("journal reconstruction filters to the supervised pid and tolerates equal timestamps", async t => {
+  const directory = await journalRoot(t, [
+    journalLine({ tMs: 2, kind: "spawned", detail: { pid: 4242 } }),
+    journalLine({ tMs: 1, kind: "spawned" }, 999),
+    journalLine({ tMs: 5, kind: "settle", detail: { status: "completed" } }),
+    journalLine({ tMs: 5, kind: "spawned", detail: { pid: 4242 } })
+  ]);
+  const rebuilt = await readWorkerLifecycleJournal(directory, 4242);
+  assert.ok(rebuilt !== undefined);
+  assert.equal(rebuilt.events.length, 3, "another pid's events never enter the timeline");
+  assert.equal(rebuilt.events[0]?.tMs, 2, "the distinct timestamp sorts first");
+  // Equal rounded timestamps carry no exact native order: both survive, in
+  // some order, without inventing a causal trace.
+  const tied = rebuilt.events.slice(1).map(event => event.kind).sort();
+  assert.deepEqual(tied, ["settle", "spawned"], "equal-timestamp events are all retained");
+  // A journal with no events for the pid fabricates nothing.
+  const foreign = await journalRoot(t, [journalLine({ tMs: 0, kind: "spawned" }, 999)]);
+  assert.equal(await readWorkerLifecycleJournal(foreign, 4242), undefined);
 });
 
 test("first real failure stops remaining cases", async t => {

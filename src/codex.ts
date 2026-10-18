@@ -627,7 +627,7 @@ export function executeWorker(
     // output, stderr, or native error text behind it. While the sink is
     // blocked, at most the latest new event's line is retained — the queue
     // cannot grow with the event count, and accepted lines are never rewritten.
-    const reportDiagnostic = (category: "worker-event-error" | "tool-progress"): void => {
+    const reportDiagnostic = (category: "worker-event-error" | "worker-activity"): void => {
       if (shutdownStarted || finished) return;
       const line = "turnhelm: " + category + "\n";
       if (cancelDiagWait !== undefined) { diagLine = line; return; }
@@ -679,6 +679,12 @@ export function executeWorker(
           }
           reportDiagnostic(event.category);
           return;
+        case "activity":
+          // An observation only: never a completion, failure, or output fact.
+          // Only a completed item reports the fixed diagnostic; started and
+          // updated items stay silent under the same lossy discipline.
+          if (event.itemPhase === "completed") reportDiagnostic("worker-activity");
+          return;
         default:
           return; // Unknown well-formed events are ignored.
       }
@@ -703,7 +709,11 @@ export function executeWorker(
         }
         progressEvents += 1;
         lastEventAt = performance.now();
-        options.lifecycle?.record("event", { eventKind: event.kind });
+        options.lifecycle?.record("event", event.kind === "activity"
+          ? { eventKind: "activity", itemKind: event.itemKind, itemPhase: event.itemPhase,
+              ...(event.itemStatus === undefined ? {} : { itemStatus: event.itemStatus }),
+              ...(event.itemExitCode === undefined ? {} : { itemExitCode: event.itemExitCode }) }
+          : { eventKind: event.kind });
         dispatch(event);
         if (cancelDrainWait !== undefined) return; // Sink blocked; the drain resumes the loop.
       }
