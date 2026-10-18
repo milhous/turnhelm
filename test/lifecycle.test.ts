@@ -3,7 +3,24 @@
 // run produces, and the append sink sees every event as it occurs.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { LIFECYCLE_CAPACITY, LifecycleRecorder, type LifecycleEvent } from "../src/lifecycle.js";
+import { LIFECYCLE_CAPACITY, LIFECYCLE_HEAD_KEEP, LifecycleRecorder, type LifecycleEvent } from "../src/lifecycle.js";
+import type { WorkerActivity } from "../src/codex-events.js";
+
+test("the retention split is the exported head constant over the fixed capacity", () => {
+  assert.equal(LIFECYCLE_CAPACITY, 64);
+  assert.equal(LIFECYCLE_HEAD_KEEP, 8);
+  const recorder = new LifecycleRecorder(() => {});
+  recorder.record("spawned", { pid: 4242 });
+  const activity: WorkerActivity = {
+    itemKind: "command_execution", itemPhase: "completed", itemStatus: "failed", itemExitCode: 13
+  };
+  recorder.record("event", { eventKind: "activity", ...activity });
+  const snapshot = recorder.snapshot();
+  assert.equal(snapshot.overflow, false);
+  assert.equal(snapshot.events.length, 2);
+  assert.deepEqual(snapshot.events[1].detail,
+    { eventKind: "activity", itemKind: "command_execution", itemPhase: "completed", itemStatus: "failed", itemExitCode: 13 });
+});
 
 test("ring keeps the head, the tail, and an overflow marker", () => {
   const persisted: LifecycleEvent[] = [];
