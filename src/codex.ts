@@ -32,6 +32,11 @@ export type WorkerResult = Readonly<{
   // was appended to the written instruction. A mechanism attestation in the
   // same honesty class as codexHomeManaged — never a claim the worker obeyed.
   instructionNote?: string;
+  // The generation tag of the worker environment boundary (the frozen
+  // host-pointer scrub), present iff the instruction was written — a
+  // mechanism attestation in the instructionNote honesty class, never a
+  // claim the worker environment was fully closed.
+  envBoundary?: string;
   // Present iff the opt-in stall watchdog fired: decoded-frame silence met
   // the caller's threshold and the owned shutdown ladder ended the run.
   abortReason?: "stall";
@@ -55,6 +60,13 @@ export type WorkerResult = Readonly<{
 // restrictions the task itself states. The classifier and routes.jsonl still
 // see the bare task; receipts carry the tag, never this prose.
 export const SANDBOX_SEMANTICS_NOTE = "Sandbox semantics (fixed runner note, not from the requester): a read-only sandbox denies writes, not reads — read-only mode itself never prohibits reading. A workspace-write sandbox additionally permits writes inside the workspace. Attempt to read the files the task requires as inputs, using your available tools, before answering — always respecting any read restrictions the task itself states. Distinguish an actually failed read attempt from a tool you do not have, and report a read as denied only when a real read attempt failed.";
+
+// The generation tag of the worker environment boundary: the frozen
+// host-pointer scrub (HOST_POINTER_KEYS at the boundary below) plus the
+// managed overrides.
+// Receipts carry this exact literal — a change to the scrub list is a new
+// tag, never a silent edit — and it attests the mechanism, never obedience.
+export const ENV_BOUNDARY_TAG = "host-pointers-v1";
 
 export function buildWorkerArgs(decision: TaskDecision, write: boolean, schemaPath?: string): string[] {
   return ["exec", "--ephemeral", "--json",
@@ -393,10 +405,13 @@ export function executeWorker(
         durationMs: Math.round(performance.now() - started),
         progressEvents,
         usageScope: "unverified"
-      } as { code: number; status: WorkerResult["status"]; durationMs: number; progressEvents: number; usageScope: "unverified"; ownedShutdown: boolean; codexHomeManaged?: true; instructionNote?: string; abortReason?: "stall"; usage?: WorkerUsage; error?: WorkerResult["error"]; signal?: "SIGINT" | "SIGTERM" | "SIGKILL"; failureClass?: FailureClass; errorSha256?: string; lastEventAgeMs?: number; payload?: WorkerResult["payload"]; lifecycle?: WorkerResult["lifecycle"] };
+      } as { code: number; status: WorkerResult["status"]; durationMs: number; progressEvents: number; usageScope: "unverified"; ownedShutdown: boolean; codexHomeManaged?: true; instructionNote?: string; envBoundary?: string; abortReason?: "stall"; usage?: WorkerUsage; error?: WorkerResult["error"]; signal?: "SIGINT" | "SIGTERM" | "SIGKILL"; failureClass?: FailureClass; errorSha256?: string; lastEventAgeMs?: number; payload?: WorkerResult["payload"]; lifecycle?: WorkerResult["lifecycle"] };
       result.ownedShutdown = ownedShutdown;
       result.codexHomeManaged = true;
-      if (noteAppended) result.instructionNote = "sandbox-semantics-v1";
+      if (noteAppended) {
+        result.instructionNote = "sandbox-semantics-v1";
+        result.envBoundary = ENV_BOUNDARY_TAG;
+      }
       if (stallAbort) result.abortReason = "stall";
       if (lastEventAt !== undefined) result.lastEventAgeMs = Math.round(performance.now() - lastEventAt);
       if (usage) result.usage = usage;

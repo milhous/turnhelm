@@ -130,6 +130,7 @@ type Recorded = {
   lastEventAgeMs?: number;
   codexHomeManaged?: boolean;
   instructionNote?: string;
+  envBoundary?: string;
   abortReason?: string;
 };
 
@@ -859,6 +860,7 @@ finish(() => {
     ownedShutdown: true,
     codexHomeManaged: true,
     instructionNote: "sandbox-semantics-v1",
+    envBoundary: "host-pointers-v1",
     payload: { mode: "unstructured" }
   });
   assert.ok(code === 0 || (code === 143 && signal === "SIGTERM"),
