@@ -475,6 +475,41 @@ test("prepare refuses a roster case with an out-of-bounds deadlineMs", async t =
   assert.deepEqual(await readdir(scratch.evidenceRoot), [], "no refusal path leaves manifest artifacts");
 });
 
+test("prepare refuses a roster case with a malformed stallAbortMs", async t => {
+  const scratch = await scratchRoster(t);
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  for (const value of [4999, 3_600_001, 5000.5] as const) {
+    const rosterPath = scratch.write(roster => {
+      (roster as { cases: [{ stallAbortMs?: number }] }).cases[0].stallAbortMs = value;
+    });
+    await assert.rejects(prepareRound(rosterPath, { sandboxExecPath: fake }),
+      messageStartingWith('roster: case "case-a" stallAbortMs must be an integer between 5000 and 3600000'),
+      "stallAbortMs " + JSON.stringify(value) + " is refused");
+    assert.deepEqual(await readdir(scratch.evidenceRoot), [], "no refusal path leaves manifest artifacts");
+  }
+});
+
+test("prepare freezes a valid stallAbortMs into the manifest case and refuses a mutated one at execute", async t => {
+  const scratch = await scratchRoster(t);
+  const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+  const rosterPath = scratch.write(roster => {
+    (roster as { cases: [{ stallAbortMs?: number }] }).cases[0].stallAbortMs = 5000;
+  });
+  const { approvalSha256 } = await prepareRound(rosterPath, { sandboxExecPath: fake });
+  const manifestPath = join(scratch.evidenceRoot, "custom-round-manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+    cases: [{ stallAbortMs?: number }, Record<string, unknown>];
+  };
+  assert.equal(manifest.cases[0].stallAbortMs, 5000, "the flag freezes as a plain integer in its case");
+  assert.equal("stallAbortMs" in manifest.cases[1], false, "a flag-less case freezes no entry");
+  // A post-prepare edit of the frozen flag is a manifest-bytes mismatch: the
+  // approval hash refuses it before any launch.
+  manifest.cases[0].stallAbortMs = 6000;
+  await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+  assert.equal(await executeRound(manifestPath, approvalSha256, { sandboxExecPath: fake }), 1,
+    "a mutated stallAbortMs never reaches a launch");
+});
+
 test("a preflight whose reference machinery misgrades is refused, not silently frozen", async t => {
   const scratch = await scratchRoster(t);
   const fake = await writeFakeSandboxExec(t, PREPARE_ALL_FAIL);
@@ -543,10 +578,12 @@ test("a roster contract that cannot load is refused at prepare, not frozen", asy
 // root's codex-output.txt lines and completes, a failureMessage emits one
 // turn.failed frame and exits 9 (the CLI classifies and receipts it), a
 // stallMs holds the FIRST execution's turn open so a signal or timeout test
-// can land mid-case (a roster's later cases run the fake unstalled), and a
+// can land mid-case (a roster's later cases run the fake unstalled), a
+// stallAfterFrameMs emits one progress frame on that first execution and then
+// holds finish — the armed silence the stall-abort watchdog polices — and a
 // rebuildRoot swaps the case root for a byte-identical rebuild mid-run.
 const fakeCodexBody = (options: Readonly<{
-  failureMessage?: string; stallMs?: number; extraWrite?: string; rebuildRoot?: boolean; recordArgv?: string;
+  failureMessage?: string; stallMs?: number; stallAfterFrameMs?: number; extraWrite?: string; rebuildRoot?: boolean; recordArgv?: string;
   rebindFile?: { path: string; bytes: string };
   activityFrames?: boolean; lifecycleLeaf?: "fat" | "dir" | "symlink" | "fifo";
 }> = {}): string => `
@@ -645,7 +682,12 @@ process.stdin.on("end", () => {
     : `    const lines = fs.readFileSync(path.join(process.cwd(), "codex-output.txt"), "utf8").split("\\n").filter(Boolean);\n    process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: lines.join("\\n") } }) + "\\n");\n    process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1 } }) + "\\n");\n    process.exit(0);`)
   + `
   };
-` + (options.stallMs !== undefined
+` + (options.stallAfterFrameMs !== undefined
+    ? `  if (firstRun) {
+    process.stdout.write(JSON.stringify({ type: "item.started", item: { type: "command_execution", status: "in_progress" } }) + "\\n");
+    setTimeout(finish, ${options.stallAfterFrameMs});
+  } else finish();`
+    : options.stallMs !== undefined
     ? `  if (firstRun) setTimeout(finish, ${options.stallMs}); else finish();`
     : "  finish();") + `
 });
@@ -672,6 +714,7 @@ type ExecuteCaseSpec = {
   grading: Record<string, unknown>;
   outputLines: readonly string[];
   deadlineMs?: number;
+  stallAbortMs?: number;
   contractSource?: string;
   contractDir?: string;
   allowedChanges?: readonly string[];
@@ -687,7 +730,7 @@ const scratchExecuteRound = async (
     caps?: { classifierRequests: number; workerExecutions: number };
     choice?: string;
     codex?: Readonly<{
-      failureMessage?: string; stallMs?: number; extraWrite?: string; rebuildRoot?: boolean; recordArgv?: string;
+      failureMessage?: string; stallMs?: number; stallAfterFrameMs?: number; extraWrite?: string; rebuildRoot?: boolean; recordArgv?: string;
       rebindFile?: { path: string; bytes: string };
       activityFrames?: boolean; lifecycleLeaf?: "fat" | "dir" | "symlink" | "fifo";
     }>;
@@ -792,7 +835,8 @@ const scratchExecuteRound = async (
       allowedProfiles: ["fast", "balanced"],
       grading: spec.grading,
       files: hooks.length > 0 ? { ...frozenFiles, hooks } : frozenFiles,
-      ...(outputSchema !== undefined ? { outputSchema } : {})
+      ...(outputSchema !== undefined ? { outputSchema } : {}),
+      ...(spec.stallAbortMs !== undefined ? { stallAbortMs: spec.stallAbortMs } : {})
     });
   }
   const rosterPath = join(base, "roster.json");
@@ -922,6 +966,62 @@ test("a completed wrong answer retains its lifecycle in the case record",
     const lifecycle = record?.workerLifecycle as { events: { kind: string }[] } | undefined;
     assert.ok(lifecycle !== undefined, "a completed wrong answer keeps its timeline");
     assert.equal(lifecycle.events.at(-1)?.kind, "settle", "the worker settled normally");
+  });
+
+test("a stall-aborted case settles as the unjudged timeout and the roster continues",
+  { timeout: 120_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-stall", kind: "worker-readonly", transport: "arg",
+        stallAbortMs: 5000, deadlineMs: 60_000,
+        grading: { mode: "strict-equal", expected: { count: 3, sum: 6 } }, outputLines: ['{"count":3,"sum":6}']
+      },
+      {
+        id: "case-after", kind: "worker-readonly", transport: "arg",
+        grading: { mode: "strict-equal", expected: { count: 1, sum: 2 } }, outputLines: ['{"count":1,"sum":2}']
+      }
+    ], {}, { codex: { stallAfterFrameMs: 20_000 } });
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    assert.equal(code, 4, "a stall-aborted case contributes a timeout, never a pass");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    assert.deepEqual(ledger.filter(r => r.phase === "case").map(r => [r.caseId, r.outcome]),
+      [["case-stall", "timeout"], ["case-after", "pass"]],
+      "the stall settles unjudged and the next case still runs");
+    const stalled = ledger.find(r => r.phase === "case" && r.caseId === "case-stall");
+    const workerFailure = stalled?.workerFailure as Record<string, unknown> | undefined;
+    assert.equal(workerFailure?.abortReason, "stall", "the stall reason rides the frozen failure projection");
+    assert.equal(workerFailure?.instructionNote, "sandbox-semantics-v1", "the note tag rides the projection");
+    assert.ok(!("oracleInput" in (stalled ?? {})), "an unjudged stall retains no oracle input");
+    const lifecycle = stalled?.workerLifecycle as { events: { kind: string }[] } | undefined;
+    assert.ok(lifecycle?.events.some(event => event.kind === "stall-abort"),
+      "the watchdog's lifecycle event rides the case record");
+    const completed = ledger.find(r => r.phase === "completed");
+    assert.deepEqual([completed?.outcome, completed?.cases, completed?.failed, completed?.timedOut],
+      ["fail", 2, 0, 1], "the reconciliation counts the stall in timedOut");
+  });
+
+test("the stdin-file transport carries the stall-abort flag through the sh wrapper",
+  { timeout: 120_000 }, async t => {
+    const round = await scratchExecuteRound(t, [
+      {
+        id: "case-stdin", kind: "worker-readonly", transport: "stdin-file",
+        stallAbortMs: 5000, deadlineMs: 60_000,
+        grading: { mode: "strict-equal", expected: { count: 1, sum: 2 } }, outputLines: ['{"count":1,"sum":2}']
+      }
+    ], {}, { codex: { stallAfterFrameMs: 20_000 } });
+    const fake = await writeFakeSandboxExec(t, PREPARE_PASSTHROUGH);
+    const code = await executeRound(round.manifestPath, round.approvalSha256,
+      { env: round.env, sandboxExecPath: fake });
+    // With the flag carried the watchdog fires at ~5s; without it the fake
+    // completes at 20s and passes — the outcome distinguishes the two.
+    assert.equal(code, 4, "the stall abort reaches the stdin-transport run and settles unjudged");
+    const ledger = await readLedger(join(round.evidenceRoot, "custom-round-evidence.jsonl"));
+    const record = ledger.find(r => r.phase === "case");
+    assert.equal(record?.outcome, "timeout");
+    const workerFailure = record?.workerFailure as Record<string, unknown> | undefined;
+    assert.equal(workerFailure?.abortReason, "stall", "the sh-wrapped run reports the stall reason");
   });
 
 test("a not-started worker never gains a lifecycle timeline in the custom round",
@@ -1408,6 +1508,8 @@ const FULL_WORKER = {
   errorSha256: "a".repeat(64),
   signal: "SIGTERM",
   lastEventAgeMs: 42,
+  instructionNote: "sandbox-semantics-v1",
+  abortReason: "stall",
   payload: { mode: "strict" }
 };
 
@@ -1421,7 +1523,9 @@ const FULL_PROJECTION = {
   failureClass: "stream-disconnected",
   errorSha256: "a".repeat(64),
   signal: "SIGTERM",
-  lastEventAgeMs: 42
+  lastEventAgeMs: 42,
+  instructionNote: "sandbox-semantics-v1",
+  abortReason: "stall"
 };
 
 test("a full worker object projects every whitelisted field and ignores unselected receipt keys", () => {
@@ -1455,6 +1559,12 @@ test("a malformed field drops alone; the rest of the projection survives", () =>
     "a non-64-hex errorSha256 drops alone");
   assert.deepEqual(projectWorkerReceipt({ ...FULL_WORKER, signal: "SIGHUP" }), without("signal"),
     "an out-of-set signal drops alone");
+  assert.deepEqual(projectWorkerReceipt({ ...FULL_WORKER, instructionNote: 42 }), without("instructionNote"),
+    "a non-string instructionNote drops alone");
+  assert.deepEqual(projectWorkerReceipt({ ...FULL_WORKER, instructionNote: "" }), without("instructionNote"),
+    "an empty instructionNote drops alone");
+  assert.deepEqual(projectWorkerReceipt({ ...FULL_WORKER, abortReason: "bored" }), without("abortReason"),
+    "an out-of-enum abortReason drops alone");
   assert.deepEqual(
     projectWorkerReceipt({ ...FULL_WORKER, usage: { input_tokens: -3, output_tokens: 8 } }),
     { ...FULL_PROJECTION, usage: { output_tokens: 8 } },

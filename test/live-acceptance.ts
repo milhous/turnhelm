@@ -1110,7 +1110,7 @@ const projectWorkerProgress = (value: unknown): WorkerProgressEvidence | undefin
 // The recorder's frozen kind taxonomy, hand-copied like FAILURE_SIGNALS: a
 // kind outside it is not lifecycle evidence and drops the projection.
 const LIFECYCLE_KINDS: ReadonlySet<string> = new Set(["spawned", "stdin-delivered", "event", "completion", "failure",
-  "abort", "shutdown-term", "shutdown-kill", "shutdown-discharged", "stdout-end", "close", "settle"]);
+  "abort", "stall-abort", "shutdown-term", "shutdown-kill", "shutdown-discharged", "stdout-end", "close", "settle"]);
 
 // The recorder's frozen detail vocabulary, same hand-copied discipline as the
 // kinds — and every value is validated against the vocabulary it came from:
