@@ -1313,6 +1313,12 @@ export function projectAttemptTransports(value: unknown): AttemptTransportEviden
   return projected;
 }
 
+// The observed record's boundary-generation extraction (spec §3.2): the exact
+// literal from an executed worker, nothing else — exported for direct pinning.
+export const workerEnvBoundary = (worker: Record<string, unknown> | null): string | undefined =>
+  worker !== null && worker.status !== "not-started" && worker.envBoundary === ENV_BOUNDARY_TAG
+    ? worker.envBoundary : undefined;
+
 const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
   const raw = record as unknown as Record<string, unknown>;
   switch (raw.phase) {
@@ -2130,8 +2136,7 @@ export async function executeAcceptance(
             ? worker.instructionNote : undefined;
           // The boundary generation rides the same executed-worker receipts,
           // exact literal only — never a shape (spec §3.2).
-          const envBoundary = worker !== null && worker.status !== "not-started"
-            && worker.envBoundary === ENV_BOUNDARY_TAG ? worker.envBoundary : undefined;
+          const envBoundary = workerEnvBoundary(worker);
           observation = {
             phase: "observed", caseId: item.id, backend, profileId, rootMatches,
             exitCode: supervision.exitCode, durationMs: supervision.durationMs, attempts,

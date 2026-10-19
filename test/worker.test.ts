@@ -1768,6 +1768,11 @@ test("a pre-start abort carries zero decoded events and no age", { timeout: 30_0
   assert.equal(recorded.status, "cancelled");
   assert.equal(recorded.progressEvents, 0);
   assert.equal(recorded.lastEventAgeMs, undefined);
+  // A worker that never spawned carries none of the executed-worker
+  // attestation fields.
+  assert.equal(recorded.codexHomeManaged, undefined);
+  assert.equal(recorded.instructionNote, undefined);
+  assert.equal(recorded.envBoundary, undefined);
 });
 
 test("a sink error after the abort cannot relabel the cancelled run", { timeout: 30_000 }, async t => {

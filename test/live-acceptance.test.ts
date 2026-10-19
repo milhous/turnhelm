@@ -18,6 +18,7 @@ import { readProjectFile } from "../src/project.js";
 import {
   appendEvidence, claimAcceptance, envelopePayload, executeAcceptance, findOnPath, oracleSandboxPolicy,
   prepareAcceptance, projectAttemptTransports, projectWorkerLifecycle, readWorkerLifecycleJournal, superviseCli,
+  workerEnvBoundary,
   type AcceptanceManifest, type AttemptTransportEvidence, type ClaimedRun, type SafeEvidence
 } from "./live-acceptance.js";
 
@@ -1582,6 +1583,19 @@ test("a stall-abort lifecycle event survives the receipt and journal projections
   const rebuilt = await readWorkerLifecycleJournal(directory, 4242);
   assert.deepEqual(rebuilt?.events.map(event => event.kind), ["spawned", "stall-abort", "settle"],
     "the journal fallback rebuilds the stall milestone the same way");
+});
+
+test("the construction-stage boundary rule is exact-literal on executed workers", () => {
+  const executed = { status: "completed", code: 0 };
+  assert.equal(workerEnvBoundary({ ...executed, envBoundary: "host-pointers-v1" }), "host-pointers-v1",
+    "today's tag is extracted from an executed worker");
+  for (const bad of ["", "host-pointers-v2", "x".repeat(4096), "host-pointers-v1\n", 42]) {
+    assert.equal(workerEnvBoundary({ ...executed, envBoundary: bad }), undefined,
+      "the malformed value " + JSON.stringify(bad) + " never reaches the observed record");
+  }
+  assert.equal(workerEnvBoundary({ status: "not-started", envBoundary: "host-pointers-v1" }), undefined,
+    "a not-started worker never gains the field");
+  assert.equal(workerEnvBoundary(null), undefined, "no receipt worker means no field");
 });
 
 test("the observed record retains the note tag and drops the stall reason and unknown neighbors", async t => {

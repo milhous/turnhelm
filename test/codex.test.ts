@@ -60,9 +60,12 @@ const HOST_POINTERS: Readonly<Record<string, string>> = {
   XDG_STATE_HOME: "/tmp/host-pointer-canary/state"
 };
 // npm documents case-insensitive environment configuration for both settings,
-// so the two npm keys are the only ones with a case rule.
+// so the two npm keys are the only ones with a case rule — each key pinned in
+// both lowercase and mixed-case forms, planted simultaneously.
 const NPM_CASE_VARIANTS: Readonly<Record<string, string>> = {
-  npm_config_userconfig: "/tmp/host-pointer-canary/.npmrc-lower",
+  npm_config_userconfig: "/tmp/host-pointer-canary/.npmrc-user-lower",
+  npm_config_globalconfig: "/tmp/host-pointer-canary/npmrc-global-lower",
+  Npm_Config_UserConfig: "/tmp/host-pointer-canary/.npmrc-user-mixed",
   Npm_Config_GlobalConfig: "/tmp/host-pointer-canary/npmrc-global-mixed"
 };
 
