@@ -291,6 +291,8 @@ const runCommand = async (root: string, write: boolean, positionalTask: string |
       // The fixed note's version tag rides the same executed-worker paths;
       // absent means no note was appended (spec §3.2).
       if (worker.instructionNote !== undefined) workerReceipt.instructionNote = worker.instructionNote;
+      // The environment-boundary generation tag rides the same paths.
+      if (worker.envBoundary !== undefined) workerReceipt.envBoundary = worker.envBoundary;
       // The stall watchdog's reason, iff it fired (spec §3.3).
       if (worker.abortReason !== undefined) workerReceipt.abortReason = worker.abortReason;
       if (worker.signal !== undefined) workerReceipt.signal = worker.signal;

@@ -12,6 +12,7 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { parseProjectConfig, PROFILE_IDS, type ProfileId, type ProjectConfig } from "../src/config.js";
+import { ENV_BOUNDARY_TAG } from "../src/codex.js";
 import { FAILURE_PHRASINGS, type FailureClass } from "../src/codex-events.js";
 import { initProject } from "../src/init.js";
 import { LIFECYCLE_CAPACITY, LIFECYCLE_HEAD_KEEP } from "../src/lifecycle.js";
@@ -119,7 +120,7 @@ export type AttemptTransportEvidence =
 export type SafeEvidence =
   | Readonly<{ phase: "prepared"; suite: LiveSuite; manifestSha256: string; startedAt: string }>
   | Readonly<{ phase: "reserved"; caseId: string; worker: number; backends: readonly AcceptanceBackend[] }>
-  | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number; attemptTransports?: AttemptTransportEvidence; workerUsage?: WorkerUsageEvidence; workerFailure?: WorkerFailureEvidence; workerProgress?: WorkerProgressEvidence; workerLifecycle?: WorkerLifecycleEvidence; instructionNote?: string }>
+  | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number; attemptTransports?: AttemptTransportEvidence; workerUsage?: WorkerUsageEvidence; workerFailure?: WorkerFailureEvidence; workerProgress?: WorkerProgressEvidence; workerLifecycle?: WorkerLifecycleEvidence; instructionNote?: string; envBoundary?: string }>
   | Readonly<{ phase: "verified"; caseId: string; verdict: "pass" | "fail" | "timeout"; policy: "match" | "mismatch" | "not-applicable"; checks: Readonly<Record<string, boolean>>; oracleInput?: OracleInputEvidence }>
   | Readonly<{ phase: "completed"; outcome: "pass" | "policy-mismatch"; cases: number; policyMatches: number; policyMismatches: number }>
   | Readonly<{ phase: "completed"; outcome: "pass" | "fail"; cases: number; failed: number; timedOut: number }>
@@ -1312,6 +1313,12 @@ export function projectAttemptTransports(value: unknown): AttemptTransportEviden
   return projected;
 }
 
+// The observed record's boundary-generation extraction (spec §3.2): the exact
+// literal from an executed worker, nothing else — exported for direct pinning.
+export const workerEnvBoundary = (worker: Record<string, unknown> | null): string | undefined =>
+  worker !== null && worker.status !== "not-started" && worker.envBoundary === ENV_BOUNDARY_TAG
+    ? worker.envBoundary : undefined;
+
 const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
   const raw = record as unknown as Record<string, unknown>;
   switch (raw.phase) {
@@ -1351,9 +1358,11 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
         ...(workerLifecycle !== undefined ? { workerLifecycle } : {}),
         // The fixed note's version tag (spec §3.2), as-is when it matches the
         // tag shape — the stall watchdog's abortReason, by contrast,
-        // is not live-acceptance evidence and never enters.
+        // is not live-acceptance evidence and never enters. The boundary
+        // generation keeps the construction stage's exact-literal rule.
         ...(typeof raw.instructionNote === "string" && INSTRUCTION_NOTE_PATTERN.test(raw.instructionNote)
-          ? { instructionNote: raw.instructionNote } : {})
+          ? { instructionNote: raw.instructionNote } : {}),
+        ...(raw.envBoundary === ENV_BOUNDARY_TAG ? { envBoundary: raw.envBoundary } : {})
       };
     }
     case "verified": {
@@ -2125,6 +2134,9 @@ export async function executeAcceptance(
           const instructionNote = worker !== null && worker.status !== "not-started"
             && typeof worker.instructionNote === "string" && INSTRUCTION_NOTE_PATTERN.test(worker.instructionNote)
             ? worker.instructionNote : undefined;
+          // The boundary generation rides the same executed-worker receipts,
+          // exact literal only — never a shape (spec §3.2).
+          const envBoundary = workerEnvBoundary(worker);
           observation = {
             phase: "observed", caseId: item.id, backend, profileId, rootMatches,
             exitCode: supervision.exitCode, durationMs: supervision.durationMs, attempts,
@@ -2136,7 +2148,8 @@ export async function executeAcceptance(
             ...(workerFailure !== undefined ? { workerFailure } : {}),
             ...(workerProgress !== undefined ? { workerProgress } : {}),
             ...(workerLifecycle !== undefined ? { workerLifecycle } : {}),
-            ...(instructionNote !== undefined ? { instructionNote } : {})
+            ...(instructionNote !== undefined ? { instructionNote } : {}),
+            ...(envBoundary !== undefined ? { envBoundary } : {})
           };
 
           // The observation is persisted before any fallible verification read

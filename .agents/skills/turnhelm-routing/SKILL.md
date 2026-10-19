@@ -153,10 +153,24 @@ that resolves startup files, agent-skill directories, or dotfiles through
 `$HOME` finds the run's empty managed home instead of the host's (a write-mode
 task that must create commits now needs the identity stated in the task; a
 worker's registry-authenticated installs must arrive through the task's own
-inputs). This is still not host filesystem secret isolation: explicit override
-variables (`XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL`, `NPM_CONFIG_USERCONFIG`),
-system-level startup files outside any home, absolute reads of host files, or
-a key exported by another mechanism remain outside this boundary. Do not read
+inputs). The child's environment also drops a frozen list of host
+data/config/credential discovery and action-capable pointers —
+`AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`,
+`AWS_WEB_IDENTITY_TOKEN_FILE`, `DOCKER_CERT_PATH`, `DOCKER_CONFIG`,
+`DOCKER_CONTEXT`, `DOCKER_HOST`, `GIT_CONFIG`, `GIT_CONFIG_GLOBAL`,
+`GIT_CONFIG_SYSTEM`, `KUBECONFIG`, `NPM_CONFIG_GLOBALCONFIG`,
+`NPM_CONFIG_USERCONFIG`, `SSH_AUTH_SOCK`, and the `XDG_*` home/dir pointers
+(`XDG_CACHE_HOME`, `XDG_CONFIG_DIRS`, `XDG_CONFIG_HOME`, `XDG_DATA_DIRS`,
+`XDG_DATA_HOME`, `XDG_RUNTIME_DIR`, `XDG_STATE_HOME`);
+the two npm keys match case-insensitively, every other key exactly;
+executed-worker receipts carry
+`envBoundary: "host-pointers-v1"` — the generation tag of this scrub, so a
+list change is a new tag, never a silent edit. Consequence class: host
+configuration reachable only through a listed pointer must arrive through the
+task's own inputs. This is still not host filesystem secret isolation:
+unlisted environment pointers (for example `AWS_CA_BUNDLE`), system-level
+startup files outside any home, absolute reads of host files, or a key
+exported by another mechanism remain outside this boundary. Do not read
 key values or change authentication/shell settings to make a check pass.
 
 Every run also builds a worker instruction boundary on the codex side: a fresh
@@ -176,9 +190,8 @@ codex itself may add scratch there);
 executed-worker receipts carry `codexHomeManaged: true` as a mechanism
 attestation, not an isolation claim. A run with no discoverable credential
 (no `auth.json` at the parent-derived source, no exported `OPENAI_API_KEY`)
-is refused before classification. Enforced ≠ exhaustive: explicit override
-variables such as `XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL`, or
-`NPM_CONFIG_USERCONFIG`, system-level startup files outside any home,
+is refused before classification. Enforced ≠ exhaustive:
+unlisted environment pointers such as `AWS_CA_BUNDLE`, system-level startup files outside any home,
 managed/admin hook layers outside `CODEX_HOME`, a project
 `AGENTS.override.md`, and absolute reads of host files by an authorized worker
 remain residuals outside this boundary — documented, not closed. Hermetic

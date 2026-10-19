@@ -164,6 +164,19 @@ if (fault === "symlink") {
     }
     return real(...args);
   };
+} else if (fault === "spawn-async") {
+  const cp = require("node:child_process");
+  const real = cp.spawn;
+  cp.spawn = (...args) => {
+    const argv = args[1] ?? [];
+    if (String(args[0]).endsWith("codex") && argv[0] === "exec" && !argv.includes("--help")) {
+      cp.spawn = real;
+      // The pipes exist and ENOENT arrives as a later error event, so the
+      // runner is past the spawn call: an executed-worker receipt path.
+      return real("turnhelm-missing-worker-binary", argv, args[2]);
+    }
+    return real(...args);
+  };
 }
 require("node:module").syncBuiltinESMExports();
 `;
@@ -494,7 +507,7 @@ test("run routes once, executes one read-only worker, and emits one accurate rec
   assert.deepEqual(routing.requestCounts, { laya: 1, jev: 0 });
   assert.deepEqual(receipt.selection, { backend: "laya", profileId: "balanced", model: "gpt-6.1-sol", effort: "medium" });
   const worker = receipt.worker as { status: string; code: number; durationMs: number; usage?: Record<string, number>;
-    payload?: { mode: string; trailerBytes?: number }; instructionNote?: string };
+    payload?: { mode: string; trailerBytes?: number }; instructionNote?: string; envBoundary?: string };
   assert.equal(worker.status, "completed");
   // The terminal event starts the owned ladder; the fake's voluntary exit
   // races the TERM, and the observed code is never a status input (TS-8).
@@ -504,11 +517,13 @@ test("run routes once, executes one read-only worker, and emits one accurate rec
   assert.deepEqual(worker.payload, { mode: "unstructured" });
   // The receipt carries the note's version tag, never its prose.
   assert.equal(worker.instructionNote, "sandbox-semantics-v1");
+  // And the environment-boundary generation tag beside it.
+  assert.equal(worker.envBoundary, "host-pointers-v1");
   // WB-4: the executed-worker receipt key set, with the managed-home
   // attestation, pinned exactly — modulo the voluntary-exit/TERM race that
   // conditionally adds "signal" (the code pin above allows both outcomes).
   assert.deepEqual(Object.keys(receipt.worker as object).sort().filter(key => key !== "signal"),
-    ["code", "codexHomeManaged", "durationMs", "instructionNote",
+    ["code", "codexHomeManaged", "durationMs", "envBoundary", "instructionNote",
       "lastEventAgeMs", "ownedShutdown", "payload", "progressEvents", "status", "usage"]);
   assert.equal(receipt.classifierUsage, "unreported");
   assert.equal(receipt.wholeRunUsageScope, "unverified");
@@ -649,6 +664,9 @@ test("a credential-symlink setup fault fails the run closed", async t => {
   assert.equal((receipt.worker as { status: string }).status, "failed");
   assert.equal(await workerRecords(f).then(records => records.runs), 0, "no worker may launch without its credential link");
   assert.equal(f.requests.length, 1, "classification already spent; only the worker is refused");
+  const worker = receipt.worker as { instructionNote?: string; envBoundary?: string };
+  assert.equal(worker.instructionNote, undefined);
+  assert.equal(worker.envBoundary, undefined);
 });
 
 test("a schema-staging fault fails closed and leaves no managed home", async t => {
@@ -663,6 +681,9 @@ test("a schema-staging fault fails closed and leaves no managed home", async t =
   assert.equal((parseReceipt(result.stderr).worker as { status: string }).status, "failed");
   assert.equal(await workerRecords(f).then(records => records.runs), 0, "no worker launched");
   assert.deepEqual(await readdir(leakDir), [], "the partial home is removed, never leaked");
+  const staged = parseReceipt(result.stderr).worker as { instructionNote?: string; envBoundary?: string };
+  assert.equal(staged.instructionNote, undefined);
+  assert.equal(staged.envBoundary, undefined);
 });
 
 test("a synchronous worker-spawn fault settles as one failed receipt with no home leaked", async t => {
@@ -674,6 +695,23 @@ test("a synchronous worker-spawn fault settles as one failed receipt with no hom
   const receipt = parseReceipt(result.stderr);
   assert.equal((receipt.worker as { status: string }).status, "failed");
   assert.deepEqual(await readdir(leakDir), [], "the managed home is destroyed on the spawn-fault path");
+  // The worker never reached its stdin, so no instruction or boundary attestation.
+  const worker = receipt.worker as { instructionNote?: string; envBoundary?: string };
+  assert.equal(worker.instructionNote, undefined);
+  assert.equal(worker.envBoundary, undefined);
+});
+
+test("an asynchronous worker-spawn fault is an executed worker carrying both attestations", async t => {
+  const f = await fixture(t, { choice: "balanced" });
+  const result = await f.run(["run", TASK], { input: "", env: await faultEnv(f, "spawn-async") });
+  assert.equal(result.code, 1, result.stderr);
+  const receipt = parseReceipt(result.stderr);
+  const worker = receipt.worker as { status: string; instructionNote?: string; envBoundary?: string; failureClass?: string };
+  assert.equal(worker.status, "failed");
+  // Pipes existed and the instruction was written before ENOENT arrived, so
+  // both mechanism attestations ride the executed-worker receipt.
+  assert.equal(worker.instructionNote, "sandbox-semantics-v1");
+  assert.equal(worker.envBoundary, "host-pointers-v1");
 });
 
 test("a schema read fault is the fixed usage error, not an internal failure", async t => {
@@ -933,6 +971,7 @@ test("a worker terminal failure fails the run despite exit zero", async t => {
     ownedShutdown: false,
     codexHomeManaged: true,
     instructionNote: "sandbox-semantics-v1",
+    envBoundary: "host-pointers-v1",
     failureClass: "unknown"
   });
 });
@@ -1028,7 +1067,8 @@ test("a completed run without usage reports it explicitly unreported", async t =
     payload: { mode: "unstructured" },
     ownedShutdown: true,
     codexHomeManaged: true,
-    instructionNote: "sandbox-semantics-v1"
+    instructionNote: "sandbox-semantics-v1",
+    envBoundary: "host-pointers-v1"
   });
   assert.ok(code === 0 || (code === 143 && signal === "SIGTERM"),
     "voluntary exit zero or the ladder's TERM, saw " + code + "/" + String(signal));
@@ -1045,7 +1085,7 @@ test("a completed run settles at the terminal event with an unchanged receipt sh
   const worker = receipt.worker as Record<string, unknown>;
   // The key set is pinned exactly: terminal-event settlement adds no field (TS-7).
   assert.deepEqual(Object.keys(worker).sort(),
-    ["code", "codexHomeManaged", "durationMs", "instructionNote", "lastEventAgeMs", "ownedShutdown", "payload", "progressEvents", "signal", "status", "usage"]);
+    ["code", "codexHomeManaged", "durationMs", "envBoundary", "instructionNote", "lastEventAgeMs", "ownedShutdown", "payload", "progressEvents", "signal", "status", "usage"]);
   assert.equal(worker.status, "completed");
   assert.equal(worker.ownedShutdown, true, "the terminal event starts the owned ladder");
   assert.equal(worker.signal, "SIGTERM");
@@ -1088,6 +1128,7 @@ for (const [name, expectedCode] of [["SIGINT", 130], ["SIGTERM", 143]] as const)
       ownedShutdown: true,
       codexHomeManaged: true,
       instructionNote: "sandbox-semantics-v1",
+      envBoundary: "host-pointers-v1",
       signal: "SIGTERM"
     });
     assert.equal((await workerRecords(f)).runs, 1);

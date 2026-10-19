@@ -221,6 +221,12 @@ test("the packed distribution installs offline and serves the project entry end 
       "closes default discovery paths, not the host filesystem boundary",
       "`sandbox-semantics-v1`",
       "the bare consumer task",
+      // The frozen host-pointer scrub and its generation tag (spec §3.1).
+      "`NPM_CONFIG_USERCONFIG`, `SSH_AUTH_SOCK`",
+      "the two npm keys match case-insensitively",
+      "`envBoundary: \"host-pointers-v1\"`",
+      "unlisted environment pointers (for example `AWS_CA_BUNDLE`)",
+      "unlisted environment pointers such as `AWS_CA_BUNDLE`",
       "--stall-abort-ms <ms>",
       "never stall-aborts",
       "an optional `stallAbortMs`",

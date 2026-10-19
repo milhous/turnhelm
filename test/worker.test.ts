@@ -130,6 +130,7 @@ type Recorded = {
   lastEventAgeMs?: number;
   codexHomeManaged?: boolean;
   instructionNote?: string;
+  envBoundary?: string;
   abortReason?: string;
 };
 
@@ -594,28 +595,92 @@ test("hermetic HOME closes host dotfile discovery while other env passes through
   await mkdir(join(hostileHome, ".agents"), { recursive: true });
   await writeFile(join(hostileHome, ".gitconfig"), "[user]\nname = HOST_IDENTITY\n");
   const { recorded, directory } = await runWorker(t, {
-    parentEnv: { HOME: hostileHome, XDG_CONFIG_HOME: "/tmp/host-xdg-override" },
+    parentEnv: { HOME: hostileHome, XDG_CONFIG_HOME: "/tmp/host-xdg-override", AWS_CA_BUNDLE: "/tmp/host-aws-ca-bundle" },
     script: `
 fs.writeFileSync(path.join(here, "home-resolution.json"), JSON.stringify({
   home: process.env.HOME,
   gitconfig: require("node:fs").existsSync(path.join(process.env.HOME ?? "", ".gitconfig")),
   agentsDir: require("node:fs").existsSync(path.join(process.env.HOME ?? "", ".agents")),
-  xdg: process.env.XDG_CONFIG_HOME
+  xdg: process.env.XDG_CONFIG_HOME,
+  awsCaBundle: process.env.AWS_CA_BUNDLE
 }));
 finish(() => emit({ type: "turn.completed" }));
 `
   });
   assert.equal(recorded.status, "completed");
   const resolution = JSON.parse(await fakeFile(directory, "home-resolution.json")) as {
-    home: string; gitconfig: boolean; agentsDir: boolean; xdg: string;
+    home: string; gitconfig: boolean; agentsDir: boolean; xdg: string; awsCaBundle: string;
   };
   assert.equal(dirname(resolution.home), join(directory, "tmp"),
     "HOME is a fresh managed home under tmpdir(), never the hostile host home");
   assert.equal(resolution.gitconfig, false, "the host .gitconfig is not reachable through $HOME");
   assert.equal(resolution.agentsDir, false, "the host $HOME/.agents discovery path finds nothing");
-  // Scoped closure only: explicit override variables keep passing through as
-  // documented residuals — the redirect does not scrub the environment.
-  assert.equal(resolution.xdg, "/tmp/host-xdg-override");
+  // XDG_CONFIG_HOME is on the frozen host-pointer list, so the override dies at
+  // the boundary; unlisted pointer variables (AWS_CA_BUNDLE here) keep passing
+  // through as documented residuals.
+  assert.equal(resolution.xdg, undefined,
+    "the listed XDG_CONFIG_HOME pointer is scrubbed, not redirected");
+  assert.equal(resolution.awsCaBundle, "/tmp/host-aws-ca-bundle",
+    "an unlisted pointer variable still passes through as a documented residual");
+});
+
+test("the frozen host-pointer scrub holds across a real spawned worker", { timeout: 30_000 }, async t => {
+  const planted: Record<string, string> = {
+    AWS_CONFIG_FILE: "/tmp/host-pointer-canary/aws-config",
+    AWS_SHARED_CREDENTIALS_FILE: "/tmp/host-pointer-canary/aws-credentials",
+    AWS_WEB_IDENTITY_TOKEN_FILE: "/tmp/host-pointer-canary/aws-web-identity",
+    DOCKER_CERT_PATH: "/tmp/host-pointer-canary/docker-certs",
+    DOCKER_CONFIG: "/tmp/host-pointer-canary/docker-config",
+    DOCKER_CONTEXT: "host-canary-context",
+    DOCKER_HOST: "unix:///tmp/host-pointer-canary/docker.sock",
+    GIT_CONFIG: "/tmp/host-pointer-canary/git-config",
+    GIT_CONFIG_GLOBAL: "/tmp/host-pointer-canary/.gitconfig",
+    GIT_CONFIG_SYSTEM: "/tmp/host-pointer-canary/gitconfig-system",
+    KUBECONFIG: "/tmp/host-pointer-canary/kubeconfig",
+    NPM_CONFIG_GLOBALCONFIG: "/tmp/host-pointer-canary/npmrc-global",
+    NPM_CONFIG_USERCONFIG: "/tmp/host-pointer-canary/.npmrc",
+    SSH_AUTH_SOCK: "/tmp/host-pointer-canary/agent.sock",
+    XDG_CACHE_HOME: "/tmp/host-pointer-canary/cache",
+    XDG_CONFIG_DIRS: "/tmp/host-pointer-canary/config-dirs",
+    XDG_CONFIG_HOME: "/tmp/host-pointer-canary/config",
+    XDG_DATA_DIRS: "/tmp/host-pointer-canary/data-dirs",
+    XDG_DATA_HOME: "/tmp/host-pointer-canary/data",
+    XDG_RUNTIME_DIR: "/tmp/host-pointer-canary/run",
+    XDG_STATE_HOME: "/tmp/host-pointer-canary/state",
+    npm_config_userconfig: "/tmp/host-pointer-canary/.npmrc-lower",
+    Npm_Config_GlobalConfig: "/tmp/host-pointer-canary/npmrc-global-mixed",
+    AWS_CA_BUNDLE: "/tmp/host-pointer-canary/aws-ca-bundle",
+    XDG_SENTINEL: "/tmp/host-pointer-canary/xdg-sentinel",
+    ssh_auth_sock: "/tmp/host-pointer-canary/agent-lower.sock"
+  };
+  const outerBefore = { ...process.env };
+  const { recorded, stdout, stderr, directory } = await runWorker(t, {
+    parentEnv: planted,
+    script: `
+const KEYS = ${JSON.stringify(Object.keys(planted))};
+fs.writeFileSync(path.join(here, "pointers.json"), JSON.stringify(
+  Object.fromEntries(KEYS.map(key => [key, Object.hasOwn(process.env, key) ? process.env[key] : null]))));
+finish(() => emit({ type: "turn.completed" }));
+`
+  });
+  assert.equal(recorded.status, "completed");
+  const observed = JSON.parse(await fakeFile(directory, "pointers.json")) as Record<string, string | null>;
+  for (const key of Object.keys(planted)) {
+    const scrubbed = key === "AWS_CA_BUNDLE" || key === "XDG_SENTINEL" || key === "ssh_auth_sock";
+    assert.equal(observed[key], scrubbed ? planted[key] : null,
+      key + (scrubbed ? " passes through as an unlisted residual" : " is absent in the worker environment"));
+  }
+  assert.deepEqual({ ...process.env }, outerBefore, "the parent process environment is unchanged by the run");
+  // Privacy canary: the planted values reach no run output — worker stdout,
+  // harness stderr, or the settled result record — and no journal appears.
+  const resultRaw = await fakeFile(directory, "result.json");
+  for (const value of Object.values(planted)) {
+    forbid(stdout, value);
+    forbid(stderr, value);
+    forbid(resultRaw, value);
+  }
+  await assert.rejects(readFile(join(directory, "root", ".turnhelm", "routes.jsonl")), { code: "ENOENT" },
+    "the worker boundary writes no routes journal");
 });
 
 test("a surviving descendant keeps the stripped key set and managed marker after leader exit", { timeout: 30_000 }, async t => {
@@ -627,12 +692,20 @@ test("a surviving descendant keeps the stripped key set and managed marker after
   t.after(() => rm(home, { recursive: true, force: true }));
   await writeFile(join(home, ".zshenv"), "export TURNHELM_TEST_SENTINEL_MARKER=leaked\n");
   const { recorded, directory } = await runWorker(t, {
-    // The startup-file keys ride the parent env so their null samples below
-    // demonstrate stripping in-chain, not mere absence.
-    parentEnv: { HOME: home, BASH_ENV: "/tmp/host-bashenv", ENV: "/tmp/host-shenv" },
+    // The startup-file keys and planted host pointers ride the parent env so
+    // their null samples below demonstrate stripping in-chain, not mere absence.
+    parentEnv: {
+      HOME: home, BASH_ENV: "/tmp/host-bashenv", ENV: "/tmp/host-shenv",
+      SSH_AUTH_SOCK: "/tmp/host-pointer-canary/agent.sock",
+      DOCKER_HOST: "unix:///tmp/host-pointer-canary/docker.sock",
+      XDG_CONFIG_HOME: "/tmp/host-pointer-canary/config",
+      GIT_CONFIG_GLOBAL: "/tmp/host-pointer-canary/.gitconfig",
+      npm_config_userconfig: "/tmp/host-pointer-canary/.npmrc-lower"
+    },
     script: `
 const KEYS = ["LAYA_API_KEY", "TYPESAFE_API_KEY", "TURNHELM_ALLOW_HOSTED_JEV", "TURNHELM_CONFIG",
-  "BASH_ENV", "ENV", "TURNHELM_MANAGED_CHILD", "CODEX_HOME", "ZDOTDIR", "HOME"];
+  "BASH_ENV", "ENV", "TURNHELM_MANAGED_CHILD", "CODEX_HOME", "ZDOTDIR", "HOME",
+  "SSH_AUTH_SOCK", "DOCKER_HOST", "XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "npm_config_userconfig"];
 fs.writeFileSync(path.join(here, "leader.json"), JSON.stringify({ pid: process.pid, codexHome: process.env.CODEX_HOME }));
 const descendantSource = [
   'const fs = require("node:fs");',
@@ -682,7 +755,8 @@ descendant.unref();
   const samples = JSON.parse(samplesRaw) as { before: Record<string, string | null>; after: Record<string, string | null> };
   assert.notEqual(descendant.pid, leader.pid, "the survivor is a separate process");
   for (const [name, sample] of [["before", samples.before], ["after", samples.after]] as const) {
-    for (const key of ["LAYA_API_KEY", "TYPESAFE_API_KEY", "TURNHELM_ALLOW_HOSTED_JEV", "TURNHELM_CONFIG", "BASH_ENV", "ENV"]) {
+    for (const key of ["LAYA_API_KEY", "TYPESAFE_API_KEY", "TURNHELM_ALLOW_HOSTED_JEV", "TURNHELM_CONFIG", "BASH_ENV", "ENV",
+      "SSH_AUTH_SOCK", "DOCKER_HOST", "XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "npm_config_userconfig"]) {
       assert.equal(sample[key], null, name + " sample: " + key + " stays stripped");
     }
     assert.equal(sample.TURNHELM_MANAGED_CHILD, "1", name + " sample: the managed-child marker persists");
@@ -786,6 +860,7 @@ finish(() => {
     ownedShutdown: true,
     codexHomeManaged: true,
     instructionNote: "sandbox-semantics-v1",
+    envBoundary: "host-pointers-v1",
     payload: { mode: "unstructured" }
   });
   assert.ok(code === 0 || (code === 143 && signal === "SIGTERM"),
@@ -1693,6 +1768,11 @@ test("a pre-start abort carries zero decoded events and no age", { timeout: 30_0
   assert.equal(recorded.status, "cancelled");
   assert.equal(recorded.progressEvents, 0);
   assert.equal(recorded.lastEventAgeMs, undefined);
+  // A worker that never spawned carries none of the executed-worker
+  // attestation fields.
+  assert.equal(recorded.codexHomeManaged, undefined);
+  assert.equal(recorded.instructionNote, undefined);
+  assert.equal(recorded.envBoundary, undefined);
 });
 
 test("a sink error after the abort cannot relabel the cancelled run", { timeout: 30_000 }, async t => {

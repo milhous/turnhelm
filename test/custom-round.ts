@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { Readable } from "node:stream";
 import { PROFILE_IDS } from "../src/config.js";
+import { ENV_BOUNDARY_TAG } from "../src/codex.js";
 import { validateOutputSchema } from "../src/output-schema.js";
 import { validateTask } from "../src/task.js";
 import {
@@ -884,6 +885,7 @@ export type WorkerReceiptEvidence = Readonly<{
   signal?: "SIGINT" | "SIGTERM" | "SIGKILL";
   lastEventAgeMs?: number;
   instructionNote?: string;
+  envBoundary?: string;
   abortReason?: "stall";
 }>;
 
@@ -923,10 +925,11 @@ export function projectWorkerReceipt(worker: unknown): WorkerReceiptEvidence | u
     signal?: NonNullable<WorkerReceiptEvidence["signal"]>;
     lastEventAgeMs?: number;
     instructionNote?: string;
+    envBoundary?: string;
     abortReason?: NonNullable<WorkerReceiptEvidence["abortReason"]>;
   } = { status: record.status as WorkerReceiptEvidence["status"], usage: workerUsageEvidence(record.usage) };
   const { code, durationMs, progressEvents, ownedShutdown, failureClass, errorSha256, signal, lastEventAgeMs,
-    instructionNote, abortReason } = record;
+    instructionNote, envBoundary, abortReason } = record;
   // Zeros are observations, not placeholders: a run that decoded no frames
   // keeps its progressEvents: 0 — distinguishable from an absent count, the
   // distinction spec §4's adjudication leans on.
@@ -954,6 +957,9 @@ export function projectWorkerReceipt(worker: unknown): WorkerReceiptEvidence | u
   if (typeof instructionNote === "string" && INSTRUCTION_NOTE_PATTERN.test(instructionNote)) {
     projection.instructionNote = instructionNote;
   }
+  // The boundary generation is the one exact-literal field: today's tag only,
+  // never a shape — a versioned pattern would admit a trailing newline (spec §3.2).
+  if (envBoundary === ENV_BOUNDARY_TAG) projection.envBoundary = envBoundary;
   if (abortReason === "stall") projection.abortReason = abortReason;
   return projection;
 }
