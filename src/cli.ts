@@ -18,21 +18,22 @@ class UsageError extends Error {}
 type Command =
   | { command: "init"; project?: string; dryRun: boolean }
   | { command: "doctor"; project?: string; json: boolean; probe: boolean }
-  | { command: "run"; project?: string; write: boolean; lifecycle: boolean; outputSchema?: string; task?: string };
+  | { command: "run"; project?: string; write: boolean; lifecycle: boolean; outputSchema?: string; stallAbortMs?: number; task?: string };
 
 const USAGE =
   'usage: turnhelm init [--dry-run] [--project <dir>] | '
   + 'turnhelm doctor [--json] [--probe] [--project <dir>] | '
-  + 'turnhelm run [--write] [--lifecycle] [--project <dir>] [--output-schema <file>] [--] [<task>]';
+  + 'turnhelm run [--write] [--lifecycle] [--project <dir>] [--output-schema <file>] [--stall-abort-ms <ms>] [--] [<task>]';
 
 const parse = (argv: readonly string[]): Command => {
   const [command, ...rest] = argv;
   const allowed = command === "init" ? ["--project", "--dry-run"]
     : command === "doctor" ? ["--project", "--json", "--probe"]
-    : ["--project", "--write", "--output-schema", "--lifecycle"];
+    : ["--project", "--write", "--output-schema", "--lifecycle", "--stall-abort-ms"];
   if (command !== "init" && command !== "doctor" && command !== "run") throw new UsageError(USAGE);
   let project: string | undefined;
   let outputSchema: string | undefined;
+  let stallAbortMs: number | undefined;
   let task: string | undefined;
   let positional = false;
   let escaped = false;
@@ -49,11 +50,18 @@ const parse = (argv: readonly string[]): Command => {
       if (!allowed.includes(name)) throw new UsageError(USAGE);
       if (seen.has(name)) throw new UsageError(USAGE);
       seen.add(name);
-      if (name === "--project" || name === "--output-schema") {
+      if (name === "--project" || name === "--output-schema" || name === "--stall-abort-ms") {
         const value = equals === -1 ? rest[++index] : arg.slice(equals + 1);
         if (value === undefined || value === "") throw new UsageError(USAGE);
         if (name === "--project") project = value;
-        else outputSchema = value;
+        else if (name === "--output-schema") outputSchema = value;
+        else {
+          // Same bounds as a roster deadlineMs: a real integer window, never a
+          // free-form duration.
+          const ms = Number(value);
+          if (!Number.isInteger(ms) || ms < 5000 || ms > 3600000) throw new UsageError(USAGE);
+          stallAbortMs = ms;
+        }
       } else if (equals !== -1) {
         throw new UsageError(USAGE);
       }
@@ -67,7 +75,7 @@ const parse = (argv: readonly string[]): Command => {
   if (escaped && !positional) throw new UsageError(USAGE);
   if (command === "init") return { command, project, dryRun: seen.has("--dry-run") };
   if (command === "doctor") return { command, project, json: seen.has("--json"), probe: seen.has("--probe") };
-  return { command, project, write: seen.has("--write"), lifecycle: seen.has("--lifecycle"), outputSchema, task };
+  return { command, project, write: seen.has("--write"), lifecycle: seen.has("--lifecycle"), outputSchema, stallAbortMs, task };
 };
 
 const diagnostic = (message: string): void => {
@@ -136,7 +144,7 @@ const doctorCommand = async (root: string, json: boolean, probe: boolean): Promi
   }
 };
 
-const runCommand = async (root: string, write: boolean, positionalTask: string | undefined, outputSchema?: string, lifecycle = false): Promise<number> => {
+const runCommand = async (root: string, write: boolean, positionalTask: string | undefined, outputSchema?: string, lifecycle = false, stallAbortMs?: number): Promise<number> => {
   // Recursion is rejected before any configuration read or classification.
   if (process.env.TURNHELM_MANAGED_CHILD === "1") {
     diagnostic("this process is a Turnhelm-managed child; run must not recurse. Execute the task directly.");
@@ -263,7 +271,8 @@ const runCommand = async (root: string, write: boolean, positionalTask: string |
         signal: controller.signal,
         output: process.stdout,
         diagnostics: process.stderr,
-        ...(recorder !== undefined ? { lifecycle: recorder } : {})
+        ...(recorder !== undefined ? { lifecycle: recorder } : {}),
+        ...(stallAbortMs !== undefined ? { stallAbortMs } : {})
       });
       // Missing usage is explicitly unreported, never zero or omitted.
       const workerReceipt: Record<string, unknown> = {
@@ -279,6 +288,11 @@ const runCommand = async (root: string, write: boolean, positionalTask: string |
       if (worker.lastEventAgeMs !== undefined) workerReceipt.lastEventAgeMs = worker.lastEventAgeMs;
       // WB-4: the managed-home attestation rides executed-worker receipts only.
       if (worker.codexHomeManaged === true) workerReceipt.codexHomeManaged = true;
+      // The fixed note's version tag rides the same executed-worker paths;
+      // absent means no note was appended (spec §3.2).
+      if (worker.instructionNote !== undefined) workerReceipt.instructionNote = worker.instructionNote;
+      // The stall watchdog's reason, iff it fired (spec §3.3).
+      if (worker.abortReason !== undefined) workerReceipt.abortReason = worker.abortReason;
       if (worker.signal !== undefined) workerReceipt.signal = worker.signal;
       if (worker.failureClass !== undefined) workerReceipt.failureClass = worker.failureClass;
       if (worker.errorSha256 !== undefined) workerReceipt.errorSha256 = worker.errorSha256;
@@ -321,7 +335,7 @@ const main = async (): Promise<number> => {
   }
   if (command.command === "init") return initCommand(root, command.dryRun);
   if (command.command === "doctor") return doctorCommand(root, command.json, command.probe);
-  return runCommand(root, command.write, command.task, command.outputSchema, command.lifecycle);
+  return runCommand(root, command.write, command.task, command.outputSchema, command.lifecycle, command.stallAbortMs);
 };
 
 main().then(code => {

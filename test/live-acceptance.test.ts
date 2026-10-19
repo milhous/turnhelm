@@ -1554,6 +1554,98 @@ test("a not-started worker never gains a lifecycle timeline", { timeout: 120_000
   assert.equal(evidence.find(line => line.phase === "stopped")?.reason, "verdict");
 });
 
+test("a stall-abort lifecycle event survives the receipt and journal projections", async t => {
+  // The watchdog's own milestone is ordinary lifecycle evidence: the whole
+  // timeline a stall-aborted worker carries must project, never drop on the
+  // unknown kind.
+  const projected = projectWorkerLifecycle({
+    overflow: false,
+    events: [
+      { tMs: 0, kind: "spawned", detail: { pid: 4242 } },
+      { tMs: 10, kind: "event", detail: { eventKind: "activity" } },
+      { tMs: 5010, kind: "stall-abort" },
+      { tMs: 5012, kind: "shutdown-term" },
+      { tMs: 5015, kind: "settle", detail: { status: "cancelled" } }
+    ]
+  });
+  assert.deepEqual(projected?.events.map(event => event.kind),
+    ["spawned", "event", "stall-abort", "shutdown-term", "settle"],
+    "the stall-abort milestone projects with the timeline it stopped");
+  const directory = await mkdtemp(join(tmpdir(), "turnhelm-lifecycle-stall-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await mkdir(join(directory, ".turnhelm"));
+  await writeFile(join(directory, ".turnhelm", "lifecycle.jsonl"), [
+    JSON.stringify({ type: "turnhelm.worker-lifecycle", pid: 4242, tMs: 0, kind: "spawned" }),
+    JSON.stringify({ type: "turnhelm.worker-lifecycle", pid: 4242, tMs: 3000, kind: "stall-abort" }),
+    JSON.stringify({ type: "turnhelm.worker-lifecycle", pid: 4242, tMs: 3001, kind: "settle" })
+  ].join("\n") + "\n");
+  const rebuilt = await readWorkerLifecycleJournal(directory, 4242);
+  assert.deepEqual(rebuilt?.events.map(event => event.kind), ["spawned", "stall-abort", "settle"],
+    "the journal fallback rebuilds the stall milestone the same way");
+});
+
+test("the observed record retains the note tag and drops the stall reason and unknown neighbors", async t => {
+  const prepared = await prepareJev(t);
+  const run = await claimAcceptance(prepared.manifestPath, prepared.sha256);
+  t.after(() => run.handle.close());
+  const CANARY = "worker-prose-canary-trust-me";
+  await appendEvidence(run, {
+    phase: "observed", caseId: "jev-default-readonly", backend: "jev", profileId: "default",
+    rootMatches: true, exitCode: 0, durationMs: 5, attempts: 1,
+    instructionNote: "sandbox-semantics-v1",
+    abortReason: "stall",
+    noteProse: CANARY
+  } as unknown as SafeEvidence);
+  await appendEvidence(run, {
+    phase: "observed", caseId: "jev-default-readonly", backend: "jev", profileId: "default",
+    rootMatches: true, exitCode: 0, durationMs: 5, attempts: 1,
+    instructionNote: ""
+  } as unknown as SafeEvidence);
+  await appendEvidence(run, {
+    phase: "observed", caseId: "jev-default-readonly", backend: "jev", profileId: "default",
+    rootMatches: true, exitCode: 0, durationMs: 5, attempts: 1,
+    instructionNote: "sandbox-semantics-prose-canary"
+  } as unknown as SafeEvidence);
+  const lines = (await readFile(run.evidencePath, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+  assert.equal(lines[0].instructionNote, "sandbox-semantics-v1", "the version tag is retained as-is");
+  assert.ok(!Object.hasOwn(lines[0], "abortReason"), "the stall reason is not live-acceptance evidence");
+  assert.ok(!Object.hasOwn(lines[0], "noteProse"), "an unknown neighbor of the note drops");
+  assert.ok(!JSON.stringify(lines[0]).includes(CANARY), "no prose rides the note field");
+  assert.ok(!Object.hasOwn(lines[1], "instructionNote"), "an empty tag drops alone");
+  assert.ok(!Object.hasOwn(lines[2], "instructionNote"), "an out-of-shape tag drops alone");
+});
+
+test("executed workers retain the note tag in observed records, not-started never does", { timeout: 120_000 }, async t => {
+  const classifier = await startClassifierFixture(t);
+  const fakeBin = await writeFakeCodex(t);
+  const noteOf = async (run: { runRoot: string }, caseId: string): Promise<unknown> => {
+    const observed = (await readEvidence(run.runRoot)).find(line => line.phase === "observed" && line.caseId === caseId);
+    return (observed as { instructionNote?: unknown } | undefined)?.instructionNote;
+  };
+  // A completing worker: the tag rides the executed-worker receipt.
+  const completed = await buildRun(t, "laya", classifier.url, [{ id: "completes", kind: "worker-readonly" }]);
+  await executeAcceptance(completed.manifestPath, completed.sha256, { env: workerEnv(fakeBin, "ok-readonly") });
+  assert.equal(await noteOf(completed, "completes"), "sandbox-semantics-v1",
+    "a completed worker's observed record carries the note tag");
+  // A failed worker: the tag rides failure observations too.
+  const failed = await buildRun(t, "laya", classifier.url, [{ id: "fails-rated", kind: "worker-readonly" }]);
+  await executeAcceptance(failed.manifestPath, failed.sha256, { env: workerEnv(fakeBin, "rate-fail") });
+  assert.equal(await noteOf(failed, "fails-rated"), "sandbox-semantics-v1",
+    "a failed worker's observed record carries the note tag");
+  // A cancelled worker (deadline kill after spawn): still an executed worker.
+  const cancelled = await buildRun(t, "laya", classifier.url, [{ id: "times-out", kind: "worker-readonly", deadlineMs: 5000 }]);
+  await executeAcceptance(cancelled.manifestPath, cancelled.sha256, { env: workerEnv(fakeBin, "hang") });
+  assert.equal(await noteOf(cancelled, "times-out"), "sandbox-semantics-v1",
+    "a cancelled worker's observed record carries the note tag");
+  // A worker that never ran: no tag is fabricated.
+  classifier.scripted.push("not-json");
+  const notStarted = await buildRun(t, "laya", classifier.url, [{ id: "route-fail", kind: "worker-readonly" }]);
+  await executeAcceptance(notStarted.manifestPath, notStarted.sha256, { env: workerEnv(fakeBin, "ok-readonly") });
+  const observed = (await readEvidence(notStarted.runRoot)).find(line => line.phase === "observed");
+  assert.ok(!("instructionNote" in (observed as Record<string, unknown>)),
+    "a not-started worker carries no note tag");
+});
+
 test("a hostile journal cannot disturb the receiptless stop record", { timeout: 120_000 }, async t => {
   const classifier = await startClassifierFixture(t);
   const fakeBin = await writeFakeCodex(t);

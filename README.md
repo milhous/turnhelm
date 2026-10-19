@@ -292,21 +292,31 @@ than opened.
   environment passed when spawning the Codex worker — a non-interactive
   bash or POSIX-shell descendant would otherwise source them at startup and
   re-import stripped material, the same route zsh's startup files used —
-  and `ZDOTDIR` is redirected to the managed `.turnhelm` root so a zsh
-  descendant no longer sources the host `~/.zshenv` that reintroduced the
-  Jev key (a missing startup file there is zsh's skip state). This is still
-  not host filesystem secret isolation: other shells' startup files, absolute
-  reads of host files, or a key already exported by another mechanism remain
-  outside this boundary. Keep secrets out of tasks, logs, diffs and config;
-  do not read key values or change host authentication/startup files to make
-  a check pass.
+  and the run redirects `HOME`, `ZDOTDIR`, and `CODEX_HOME` to the run's
+  managed per-run home, so a worker shell or descendant that resolves
+  startup files, agent-skill directories, or dotfiles through `$HOME` finds
+  the run's empty managed home instead of the host's (a write-mode task
+  that must create commits now needs the identity stated in the task;
+  registry-authenticated installs inside a worker must arrive through the
+  task's own inputs). This is still not host filesystem secret isolation:
+  explicit override variables (`XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL`,
+  `NPM_CONFIG_USERCONFIG`), system-level startup files outside any home,
+  absolute reads of host files, or a key already exported by another
+  mechanism remain outside this boundary. Keep secrets out of tasks, logs,
+  diffs and config; do not read key values or change host
+  authentication/startup files to make a check pass.
 - **Worker instruction boundary.** Every run creates a fresh per-run
   `CODEX_HOME` (a `mkdtemp` directory under the system temp dir) and passes
   `--ignore-user-config --ignore-rules --ephemeral`, which suppress the ambient
   codex channels rooted in `CODEX_HOME` and the user profile (`config.toml`,
   `-p` profiles, `.rules` files, the home's `AGENTS.md`, hooks and persisted
   hook trust, MCP servers, sessions). The remaining instruction surface is the
-  task, the cwd project tree, and Turnhelm's explicit argv. The managed home
+  task, the cwd project tree, and Turnhelm's explicit argv — plus one fixed
+  sandbox-semantics note (version tag `sandbox-semantics-v1`) the runner
+  appends after the task on the worker's stdin; the classifier and the routes
+  journal still see the bare consumer task, and executed-worker receipts carry
+  `instructionNote: "sandbox-semantics-v1"` as a mechanism attestation, not a
+  claim the worker obeyed the note. The managed home
   is initialized with only the staged output schema (when one was given) and,
   when a credential source exists, a symlink to the parent's `auth.json` — the
   native codex runtime may add its own scratch there; the link is reached by
@@ -316,10 +326,14 @@ than opened.
   parent-derived source and no exported `OPENAI_API_KEY`) is refused before
   classification. Executed-worker receipts carry `codexHomeManaged: true` — a
   mechanism attestation that this machinery ran, not an isolation claim. The
-  enforced set does not reach HOME-rooted channels: `$HOME/.agents/skills`
-  discovery, managed/admin hook layers outside `CODEX_HOME`, other shells'
-  startup files, and a project `AGENTS.override.md` remain residuals outside
-  this boundary, stated as residuals. The home is destroyed after settlement
+  enforced set is scoped to HOME-derived discovery: explicit override
+  variables such as `XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL`, or
+  `NPM_CONFIG_USERCONFIG`, system-level startup files outside any home,
+  managed/admin hook layers outside `CODEX_HOME`, a project
+  `AGENTS.override.md`, and absolute reads of host files by an authorized
+  worker remain residuals outside this boundary, stated as residuals —
+  hermetic `HOME` closes default discovery paths, not the host filesystem boundary.
+  The home is destroyed after settlement
   discharge on every path; a boundary-machinery failure fails closed (the run
   is refused) rather than running with an inherited home.
 - **Opt-in output schema.** `run --output-schema <file>` passes a JSON Schema
@@ -350,6 +364,18 @@ than opened.
   completion, and in-flight agent frames are ignored. A completed item
   reports one fixed diagnostic line, `turnhelm: worker-activity`, on stderr;
   started and updated items report none.
+- **Opt-in stall abort.** `run --stall-abort-ms <ms>` (integer 5000–3600000)
+  arms a stall watchdog inside the run: once at least one frame has decoded,
+  no terminal event has arrived, and no further frame decodes for the given
+  span, the runner records one `stall-abort` lifecycle event and drives the
+  existing owned TERM→KILL shutdown ladder unchanged. The run settles as a
+  cancelled run does and the receipt adds `abortReason: "stall"` beside the
+  existing `ownedShutdown`/`progressEvents`/`lastEventAgeMs` observations;
+  the CLI exit follows the ordinary worker-exit rules (typically 143, or 137
+  after the grace), with no stall-specific normalization. A run with zero
+  decoded frames never stall-aborts — absent evidence is unknown, and a
+  silent-from-birth worker stays under the ordinary deadline. It is a
+  parent-observed action record, never a liveness or causation claim.
 - **Completion is not verification.** A `completed` worker (exit 0) proves the
   child finished its turn — nothing more. Whether the task was actually done
   is judged by consumer-side gates: the output schema above, oracle and
@@ -620,7 +646,13 @@ data-only JSON roster: nothing executable is trusted from it, and every
 referenced file is hashed into a frozen manifest as data, alongside a per-case
 snapshot of the whole consumer tree. Each roster case carries a required
 integer `deadlineMs` (5000–3600000 ms) that the runner supervises the case CLI
-under, and may carry an `outputSchema` file frozen with the same hash record. `prepareRound` validates the roster,
+under, may carry an `outputSchema` file frozen with the same hash record, and
+may carry an optional `stallAbortMs` (same integer window) the runner passes
+through as `--stall-abort-ms`; a lone attributable receipt whose worker
+carries `abortReason: "stall"` settles as the unjudged `timeout` outcome at
+the same decision position as an expired deadline — no oracle, no contract
+check, the roster continues — while a stall receipt that is not lone or not
+attributable follows the existing stop rules. `prepareRound` validates the roster,
 re-verifies the pinned HEAD and the whole-consumption baseline (every built
 module the round executes), preflights the sandbox machinery and each roster
 contract's loadability, and writes the manifest with a human approval request
@@ -662,7 +694,9 @@ worker object is projectable (absent, non-record, or an out-of-enum status
 omits the field, never fabricates it): a per-field projection of the
 run's single receipt worker object — a frozen status enum plus optional
 `code`, `durationMs`, `progressEvents`, `ownedShutdown`, `usage`,
-`failureClass`, `errorSha256`, `signal`, and `lastEventAgeMs`. Unselected
+`failureClass`, `errorSha256`, `signal`, and `lastEventAgeMs`, the note tag
+`instructionNote` when one nonempty tag string is present, and `abortReason`
+only on the stall path. Unselected
 receipt keys (such as the worker `payload`) are ignored, malformed fields are
 dropped individually and never coerced, and `errorSha256` is correlation-only
 — no error text or stderr bytes are retained; zero-valued counters stay as

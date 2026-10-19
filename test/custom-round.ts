@@ -16,8 +16,8 @@ import { PROFILE_IDS } from "../src/config.js";
 import { validateOutputSchema } from "../src/output-schema.js";
 import { validateTask } from "../src/task.js";
 import {
-  envelopePayload, oracleSandboxPolicy, projectAttemptTransports, projectWorkerLifecycle,
-  readWorkerLifecycleJournal, superviseCli, type WorkerLifecycleEvidence
+  envelopePayload, INSTRUCTION_NOTE_PATTERN, oracleSandboxPolicy, projectAttemptTransports,
+  projectWorkerLifecycle, readWorkerLifecycleJournal, superviseCli, type WorkerLifecycleEvidence
 } from "./live-acceptance.js";
 
 export type CheckOutcome =
@@ -255,6 +255,7 @@ export type RosterCase = {
   grading: RosterGrading;
   files: RosterFiles;
   outputSchema?: string;
+  stallAbortMs?: number;
 };
 
 export type Roster = {
@@ -416,10 +417,11 @@ const validateRoster = async (rosterPath: string): Promise<Roster> => {
   for (const raw of rawCases) {
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) rosterFail("every roster case must be an object");
     const item = raw as Record<string, unknown>;
-    // outputSchema is the one optional case key: a case either carries it or
-    // omits it, and anything beyond the base set is still refused.
+    // outputSchema and stallAbortMs are the optional case keys: a case either
+    // carries each or omits it, and anything beyond the base set is refused.
     const caseKeys = ["id", "kind", "scope", "task", "transport", "deadlineMs", "root", "allowedChanges", "allowedProfiles", "grading", "files"];
     if (item.outputSchema !== undefined) caseKeys.push("outputSchema");
+    if (item.stallAbortMs !== undefined) caseKeys.push("stallAbortMs");
     expectExactKeys(item, caseKeys, "case");
     const id = item.id;
     if (typeof id !== "string" || id === "") rosterFail("case id must be a nonempty string");
@@ -445,6 +447,13 @@ const validateRoster = async (rosterPath: string): Promise<Roster> => {
     if (typeof deadlineMs !== "number" || !Number.isInteger(deadlineMs)
       || deadlineMs < 5000 || deadlineMs > 3_600_000) {
       rosterFail(where + " deadlineMs must be an integer between 5000 and 3600000");
+    }
+    // TS-4: the opt-in stall-abort threshold rides the case with the same
+    // integer window as its deadline, frozen with the manifest.
+    const stallAbortMs = item.stallAbortMs;
+    if (stallAbortMs !== undefined && (typeof stallAbortMs !== "number" || !Number.isInteger(stallAbortMs)
+      || stallAbortMs < 5000 || stallAbortMs > 3_600_000)) {
+      rosterFail(where + " stallAbortMs must be an integer between 5000 and 3600000");
     }
     const root = item.root;
     if (typeof root !== "string" || root === "") rosterFail(where + " root must be a nonempty string");
@@ -642,7 +651,8 @@ export async function prepareRound(
       grading: item.grading,
       tree: Object.fromEntries(tree),
       files,
-      outputSchema
+      outputSchema,
+      ...(item.stallAbortMs !== undefined ? { stallAbortMs: item.stallAbortMs } : {})
     });
   }
   const manifest = {
@@ -680,6 +690,7 @@ type RoundCase = {
   tree: Record<string, string>;
   files: { role: string; path: string; sha256: string; dev: number; ino: number }[];
   outputSchema?: { path: string; sha256: string; dev: number; ino: number };
+  stallAbortMs?: number;
 };
 
 type RoundManifest = {
@@ -735,7 +746,10 @@ const parseRoundManifest = (bytes: Buffer): RoundManifest | null => {
         || !Object.values(item.tree).every(v => typeof v === "string")
         || (item.outputSchema !== undefined
           && (typeof item.outputSchema?.path !== "string" || typeof item.outputSchema?.sha256 !== "string"
-            || !Number.isInteger(item.outputSchema?.dev) || !Number.isInteger(item.outputSchema?.ino)))) return null;
+            || !Number.isInteger(item.outputSchema?.dev) || !Number.isInteger(item.outputSchema?.ino)))
+        || (item.stallAbortMs !== undefined
+          && (typeof item.stallAbortMs !== "number" || !Number.isInteger(item.stallAbortMs)
+            || item.stallAbortMs < 5000 || item.stallAbortMs > 3_600_000))) return null;
     }
     return value;
   } catch {
@@ -869,6 +883,8 @@ export type WorkerReceiptEvidence = Readonly<{
   errorSha256?: string;
   signal?: "SIGINT" | "SIGTERM" | "SIGKILL";
   lastEventAgeMs?: number;
+  instructionNote?: string;
+  abortReason?: "stall";
 }>;
 
 const WORKER_STATUSES = new Set(["not-started", "completed", "failed", "cancelled"]);
@@ -906,8 +922,11 @@ export function projectWorkerReceipt(worker: unknown): WorkerReceiptEvidence | u
     errorSha256?: string;
     signal?: NonNullable<WorkerReceiptEvidence["signal"]>;
     lastEventAgeMs?: number;
+    instructionNote?: string;
+    abortReason?: NonNullable<WorkerReceiptEvidence["abortReason"]>;
   } = { status: record.status as WorkerReceiptEvidence["status"], usage: workerUsageEvidence(record.usage) };
-  const { code, durationMs, progressEvents, ownedShutdown, failureClass, errorSha256, signal, lastEventAgeMs } = record;
+  const { code, durationMs, progressEvents, ownedShutdown, failureClass, errorSha256, signal, lastEventAgeMs,
+    instructionNote, abortReason } = record;
   // Zeros are observations, not placeholders: a run that decoded no frames
   // keeps its progressEvents: 0 — distinguishable from an absent count, the
   // distinction spec §4's adjudication leans on.
@@ -929,6 +948,13 @@ export function projectWorkerReceipt(worker: unknown): WorkerReceiptEvidence | u
   if (typeof lastEventAgeMs === "number" && Number.isSafeInteger(lastEventAgeMs) && lastEventAgeMs >= 0) {
     projection.lastEventAgeMs = lastEventAgeMs;
   }
+  // The fixed note's version tag and the stall watchdog's reason ride the
+  // same per-field whitelist: a tag matching the versioned shape and the
+  // stall enum only.
+  if (typeof instructionNote === "string" && INSTRUCTION_NOTE_PATTERN.test(instructionNote)) {
+    projection.instructionNote = instructionNote;
+  }
+  if (abortReason === "stall") projection.abortReason = abortReason;
   return projection;
 }
 
@@ -1153,13 +1179,17 @@ async function runGatedRound(
     // SC-1: the schema rides the CLI flag from its frozen path; the CLI's own
     // input boundary re-validates and stages the bytes into the managed home.
     const schemaArgs = item.outputSchema === undefined ? [] : ["--output-schema", item.outputSchema.path];
+    // TS-4: the frozen stall-abort threshold rides the CLI flag — the same
+    // opt-in watchdog the flag defines for a direct run.
+    const stallArgs = item.stallAbortMs === undefined ? [] : ["--stall-abort-ms", String(item.stallAbortMs)];
     const taskFileEntry = item.files.find(file => file.role === "taskFile");
     const supervision = item.transport === "arg"
-      ? { file: process.execPath, args: [CLI_PATH, "run", "--project", item.root.canonical, "--lifecycle", ...writeArgs, ...schemaArgs, "--", item.task] }
+      ? { file: process.execPath, args: [CLI_PATH, "run", "--project", item.root.canonical, "--lifecycle", ...writeArgs, ...schemaArgs, ...stallArgs, "--", item.task] }
       : {
           file: "/bin/sh",
           args: ["-c", ["exec", shQuote(process.execPath), shQuote(CLI_PATH), "run",
             "--project", shQuote(item.root.canonical), "--lifecycle", ...writeArgs.map(shQuote), ...schemaArgs.map(shQuote),
+            ...stallArgs.map(shQuote),
             "<", shQuote(taskFileEntry === undefined ? "" : taskFileEntry.path)].join(" ")]
         };
     // DL-1: each case runs under its own frozen deadline — monotonic clock
@@ -1239,12 +1269,16 @@ async function runGatedRound(
     // Transport policy is evidence, never a gate: the same bounded shared
     // projection as the live harness, off the journal's CLI-written attempts.
     const attemptTransports = projectAttemptTransports(journal?.attempts);
+    // TS-4: a stall-aborted lone attributable receipt is the watchdog's
+    // unjudged stop — the same class as a wall-clock timeout, never graded.
+    const stallAborted = workerFailure !== undefined && workerFailure.status !== "not-started"
+      && workerFailure.abortReason === "stall";
     // A wall-clock timeout is an unjudged case outcome, not a stop (spec
     // §3.3): it sits below the receipt and stop-class gates so their evidence
     // is still collected, and nothing may be graded off a half-written state,
     // so a timed-out case never reaches grading or the contract check — the
     // timeout record below replaces the graded one after the settled-tree gate.
-    let passed = !observation.timedOut
+    let passed = !observation.timedOut && !stallAborted
       && observation.exitCode === 0
       && gradeOutput(item.grading.mode, observation.stdout.toString("utf8"), item.grading.expected);
     // A legal profile outside the case's declared allowance is an engineering
@@ -1349,8 +1383,10 @@ async function runGatedRound(
     // within the gate, so it is recorded unjudged — the supervisor's exit code
     // and duration, the journal attribution, the cancelled worker's projection,
     // and no oracle input (nothing was judged) — and the roster continues. The
-    // case counts as non-pass in the exit tally.
-    if (observation.timedOut) {
+    // case counts as non-pass in the exit tally. A stall-aborted receipt joins
+    // this class: the watchdog stopped the run inside its own budget, so the
+    // case is unjudged the same way a wall-clock timeout is.
+    if (observation.timedOut || stallAborted) {
       try {
         await appendEvidence({
           phase: "case", caseId: item.id, outcome: "timeout",

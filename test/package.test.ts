@@ -212,6 +212,24 @@ test("the packed distribution installs offline and serves the project entry end 
     for (const retired of activityRetired) {
       assert.ok(!installedSkill.includes(retired), "packed skill must not claim retired activity wording: " + retired);
     }
+    // The worker-boundary contract: hermetic HOME scope with its residuals,
+    // the fixed sandbox-semantics note and its version tag, and the opt-in
+    // stall-abort semantics — README and skill stay aligned on all of these.
+    const boundaryFragments = [
+      "`HOME`, `ZDOTDIR`, and `CODEX_HOME`",
+      "empty managed home instead of the host's",
+      "closes default discovery paths, not the host filesystem boundary",
+      "`sandbox-semantics-v1`",
+      "the bare consumer task",
+      "--stall-abort-ms <ms>",
+      "never stall-aborts",
+      "an optional `stallAbortMs`",
+      "the unjudged `timeout` outcome"
+    ];
+    for (const fragment of boundaryFragments) {
+      assert.ok(readme.includes(fragment), "packed README must state the worker boundary contract: " + fragment);
+      assert.ok(installedSkill.includes(fragment), "packed skill must state the worker boundary contract: " + fragment);
+    }
     assert.equal((await readdir(join(installed, "dist", "src"))).includes("cli.js"), true);
     const bin = join(consumer, "node_modules", ".bin", "turnhelm");
     await readFile(bin); // pnpm created the bin link.

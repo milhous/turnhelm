@@ -105,6 +105,18 @@ classifier and child cannot see session context. Input is limited to
   reports one fixed diagnostic line,
   `turnhelm: worker-activity`, on stderr; started and updated items report
   none.
+- `--stall-abort-ms <ms>` (opt-in, integer 5000–3600000) arms a stall
+  watchdog inside the run: once at least one frame has decoded, no terminal
+  event has arrived, and no further frame decodes for the given span, the
+  runner records one `stall-abort` lifecycle event and drives the existing
+  owned TERM→KILL shutdown ladder unchanged. The run settles as a cancelled
+  run does and the receipt adds `abortReason: "stall"` beside the existing
+  `ownedShutdown`/`progressEvents`/`lastEventAgeMs` observations; the CLI
+  exit follows the ordinary worker-exit rules (typically 143, or 137 after
+  the grace), with no stall-specific normalization. A run with zero decoded
+  frames never stall-aborts — absent evidence is unknown, and a
+  silent-from-birth worker stays under the ordinary deadline. It is a
+  parent-observed action record, never a liveness or causation claim.
 - Successful classification selects among `fast`, `balanced`, `deep`, `frontier`,
   `frontier_xhigh`, `frontier_max`. Maximum effort is an ordinary automatic
   selection; no bypass, max flag, or extra stage exists. A run launches at most
@@ -135,30 +147,42 @@ The full task goes to the classifier: remove secrets and consider residency,
 cost, and consent first. Keep keys out of prompts/logs/diffs/config. The child's
 initial environment omits `LAYA_API_KEY`, `TYPESAFE_API_KEY`,
 `TURNHELM_ALLOW_HOSTED_JEV`, legacy `TURNHELM_CONFIG`, and the
-startup-file keys `BASH_ENV`/`ENV`, and redirects
-`ZDOTDIR` to the managed `.turnhelm` root so a zsh descendant does not source
-the host `~/.zshenv` (a missing startup file there is zsh's skip state). This
-is still not host filesystem secret isolation: other shells' startup files,
-absolute reads of host files, or a key exported by another mechanism remain
-outside this boundary. Do not read key values or change authentication/shell
-settings to make a check pass.
+startup-file keys `BASH_ENV`/`ENV`, and redirects `HOME`, `ZDOTDIR`, and `CODEX_HOME` to the run's managed
+per-run home, so a worker shell or descendant
+that resolves startup files, agent-skill directories, or dotfiles through
+`$HOME` finds the run's empty managed home instead of the host's (a write-mode
+task that must create commits now needs the identity stated in the task; a
+worker's registry-authenticated installs must arrive through the task's own
+inputs). This is still not host filesystem secret isolation: explicit override
+variables (`XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL`, `NPM_CONFIG_USERCONFIG`),
+system-level startup files outside any home, absolute reads of host files, or
+a key exported by another mechanism remain outside this boundary. Do not read
+key values or change authentication/shell settings to make a check pass.
 
 Every run also builds a worker instruction boundary on the codex side: a fresh
 per-run `CODEX_HOME` plus `--ignore-user-config --ignore-rules --ephemeral`,
 suppressing the ambient codex channels rooted in `CODEX_HOME` and the user
 profile (config.toml, profiles, `.rules`, the home's `AGENTS.md`, hooks, MCP
 servers, sessions); the remaining instruction surface is the task, the cwd
-project tree, and Turnhelm's argv. The managed home is initialized with only
+project tree, and Turnhelm's argv — plus one fixed sandbox-semantics note
+(version tag `sandbox-semantics-v1`) the runner appends after the task on the
+worker's stdin; the classifier and the routes journal still see
+the bare consumer task, and executed-worker receipts carry `instructionNote:
+"sandbox-semantics-v1"` as a mechanism attestation, not a claim the worker
+obeyed the note. The managed home is initialized with only
 the staged output schema and,
 when a source exists, a symlink to the parent `auth.json` (never copied;
 codex itself may add scratch there);
 executed-worker receipts carry `codexHomeManaged: true` as a mechanism
 attestation, not an isolation claim. A run with no discoverable credential
 (no `auth.json` at the parent-derived source, no exported `OPENAI_API_KEY`)
-is refused before classification. Enforced ≠ exhaustive: `$HOME/.agents/skills`
-discovery, managed/admin hook layers outside `CODEX_HOME`, other shells'
-startup files, and a project `AGENTS.override.md` remain residuals outside
-this boundary — documented, not closed.
+is refused before classification. Enforced ≠ exhaustive: explicit override
+variables such as `XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL`, or
+`NPM_CONFIG_USERCONFIG`, system-level startup files outside any home,
+managed/admin hook layers outside `CODEX_HOME`, a project
+`AGENTS.override.md`, and absolute reads of host files by an authorized worker
+remain residuals outside this boundary — documented, not closed. Hermetic
+`HOME` closes default discovery paths, not the host filesystem boundary.
 
 ## Interpret results
 
@@ -328,7 +352,13 @@ data-only JSON roster: nothing executable is trusted from it, and every
 referenced file is hashed into a frozen manifest as data, alongside a per-case
 snapshot of the whole consumer tree. Each roster case carries a required
 integer `deadlineMs` (5000–3600000 ms) that the runner supervises the case CLI
-under, and may carry an `outputSchema` file frozen with the same hash record.
+under, may carry an `outputSchema` file frozen with the same hash record, and
+may carry an optional `stallAbortMs` (same integer window) the runner passes
+through as `--stall-abort-ms`; a lone attributable receipt whose worker
+carries `abortReason: "stall"` settles as the unjudged `timeout` outcome at
+the same decision position as an expired deadline — no oracle, no contract
+check, the roster continues — while a stall receipt that is not lone or not
+attributable follows the existing stop rules.
 `prepareRound` validates the roster,
 re-verifies the pinned HEAD and the whole-consumption baseline (every built
 module the round executes), preflights the sandbox machinery and each roster

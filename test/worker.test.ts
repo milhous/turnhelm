@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { PROFILE_IDS, type ProfileId, type ProjectConfig } from "../src/config.js";
 import type { TaskDecision } from "../src/route.js";
-import { buildWorkerArgs, subprocessEnvironment, workerEnvironment } from "../src/codex.js";
+import { buildWorkerArgs, SANDBOX_SEMANTICS_NOTE, subprocessEnvironment, workerEnvironment } from "../src/codex.js";
 import { MAX_EVENT_BYTES } from "../src/codex-events.js";
 import { executableFixture } from "./executable-fixture.js";
 import { fixtureConfig } from "./fixtures.js";
@@ -40,8 +40,10 @@ fs.writeFileSync(path.join(here, "argv.json"), JSON.stringify(process.argv.slice
 fs.writeFileSync(path.join(here, "cwd.txt"), process.cwd());
 fs.writeFileSync(path.join(here, "env.json"), JSON.stringify({
   PATH: process.env.PATH,
+  HOME: process.env.HOME,
   CODEX_HOME: process.env.CODEX_HOME,
   ZDOTDIR: process.env.ZDOTDIR,
+  XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
   TURNHELM_MANAGED_CHILD: process.env.TURNHELM_MANAGED_CHILD,
   LAYA_API_KEY: Object.hasOwn(process.env, "LAYA_API_KEY"),
   TYPESAFE_API_KEY: Object.hasOwn(process.env, "TYPESAFE_API_KEY"),
@@ -60,7 +62,7 @@ const finish = body => {
 
 const stubbornChild = `process.on('SIGTERM', function () {}); setInterval(function () {}, 500);`;
 
-type Gate = "abort-ready" | "abort-received" | "epipe-received" | "abort-then-epipe" | "abort-diag-late" | "abort-after-shutdown";
+type Gate = "abort-ready" | "abort-received" | "epipe-received" | "abort-then-epipe" | "abort-diag-late" | "abort-after-shutdown" | "abort-after-frame";
 
 type OutputMode = "stdout" | "blocker" | "abort-in-write" | "abort-late-error" | "throw" | "accepted-delay" | "accepted-error" | "accepted-stall";
 
@@ -92,6 +94,7 @@ type WorkerScenario = {
   auth?: boolean;
   schemaBytes?: string;
   poisonTmpdir?: boolean;
+  stallAbortMs?: number;
 };
 
 type Recorded = {
@@ -126,6 +129,8 @@ type Recorded = {
   progressEvents?: number;
   lastEventAgeMs?: number;
   codexHomeManaged?: boolean;
+  instructionNote?: string;
+  abortReason?: string;
 };
 
 async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ recorded: Recorded; stdout: string; stderr: string; directory: string }> {
@@ -350,6 +355,14 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
       }
       if (!gateController.signal.aborted) throw new Error("fake worker never became ready");
     };` : ""}
+    ${scenario.gate === "abort-after-frame" ? `
+    const waitFramed = async () => {
+      for (let i = 0; i < 3000 && !gateController.signal.aborted; i++) {
+        try { await access(${JSON.stringify(join(directory, "framed"))}); return; } catch { /* poll until the fake emitted its frame. */ }
+        await gateSleep(10);
+      }
+      if (!gateController.signal.aborted) throw new Error("fake worker never emitted its frame marker");
+    };` : ""}
     try {
       const running = executeWorker(decision, ${scenario.taskRepeat !== undefined ? `"x".repeat(${scenario.taskRepeat})` : JSON.stringify(scenario.task ?? "the original task")}, {
         executable: "codex",
@@ -359,10 +372,12 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
         env: process.env,
         signal: controller.signal,
         output,
-        ...(diagSink ? { diagnostics: diagSink } : {})
+        ...(diagSink ? { diagnostics: diagSink } : {}),
+        ${scenario.stallAbortMs !== undefined ? `stallAbortMs: ${scenario.stallAbortMs},` : ""}
       }).finally(stopObservation);
       ${scenario.gate && scenario.gate !== "abort-after-shutdown" ? "await Promise.race([running, (async () => {" : ""}
       ${scenario.gate === "abort-ready" ? "await waitReady(); if (!gateController.signal.aborted) controller.abort();" : ""}
+      ${scenario.gate === "abort-after-frame" ? "await waitFramed(); if (!gateController.signal.aborted) controller.abort();" : ""}
       ${scenario.gate === "abort-received" ? "while (received < 1 && !gateController.signal.aborted) await gateSleep(10); if (!gateController.signal.aborted) controller.abort();" : ""}
       ${scenario.gate === "abort-diag-late" ? `
       while (diagWrites < 1 && !gateController.signal.aborted) await gateSleep(10);
@@ -519,7 +534,7 @@ test("worker children do not inherit coverage instrumentation across the boundar
   try {
     // Negative: across the boundary the child observes nothing (not even "").
     assert.equal(
-      await run(workerEnvironment({ PATH: process.env.PATH ?? "", NODE_V8_COVERAGE: sentinel }, "/consumer/root", "/managed/home")),
+      await run(workerEnvironment({ PATH: process.env.PATH ?? "", NODE_V8_COVERAGE: sentinel }, "/managed/home")),
       "absent");
     // Positive controls: an explicit own property still forwards; and an env
     // lacking the key — the measured harness spawn shape (CG-AC-02) — still
@@ -534,10 +549,12 @@ test("worker children do not inherit coverage instrumentation across the boundar
 });
 
 test("worker environment additionally marks the managed child", () => {
-  const env = workerEnvironment({ TYPESAFE_API_KEY: "TEST_JEV_SENTINEL", CODEX_HOME: "/tmp/codex" }, "/consumer/root", "/managed/home");
+  const env = workerEnvironment({ TYPESAFE_API_KEY: "TEST_JEV_SENTINEL", CODEX_HOME: "/tmp/codex", HOME: "/tmp/host-home" }, "/managed/home");
   assert.equal(env.TURNHELM_MANAGED_CHILD, "1");
-  assert.equal(env.ZDOTDIR, join("/consumer/root", ".turnhelm"),
-    "the managed child's zsh lookup redirects to the turnhelm-owned root");
+  assert.equal(env.HOME, "/managed/home",
+    "the managed child's HOME-derived discovery resolves inside the managed home");
+  assert.equal(env.ZDOTDIR, "/managed/home",
+    "the managed child's zsh lookup redirects to the managed home, never a host ZDOTDIR");
   assert.equal(env.TYPESAFE_API_KEY, undefined);
   assert.equal(env.CODEX_HOME, "/managed/home",
     "the managed home overrides any inherited CODEX_HOME value");
@@ -554,7 +571,10 @@ finish(() => emit({ type: "turn.completed" }));
   assert.equal(JSON.parse(await fakeFile(directory, "parent-canary-present.json")), false);
   const observedEnv = JSON.parse(await fakeFile(directory, "env.json")) as Record<string, string | boolean>;
   assert.equal(observedEnv.PATH, directory);
-  assert.equal(observedEnv.ZDOTDIR, join(directory, "root", ".turnhelm"));
+  assert.equal(observedEnv.HOME, observedEnv.CODEX_HOME,
+    "HOME is the run's managed home, closing HOME-derived host dotfile discovery");
+  assert.equal(observedEnv.ZDOTDIR, observedEnv.CODEX_HOME,
+    "the zsh lookup redirects to the managed home, never the host or project root");
   assert.equal(observedEnv.TURNHELM_MANAGED_CHILD, "1");
   assert.equal(observedEnv.LAYA_API_KEY, false);
   assert.equal(observedEnv.TYPESAFE_API_KEY, false);
@@ -563,6 +583,39 @@ finish(() => emit({ type: "turn.completed" }));
   assert.equal(dirname(String(observedEnv.CODEX_HOME)), join(directory, "tmp"),
     "CODEX_HOME is a fresh managed home under tmpdir(), never the inherited value");
   assert.match(basename(String(observedEnv.CODEX_HOME)), /^turnhelm-worker-/);
+});
+
+test("hermetic HOME closes host dotfile discovery while other env passes through", { timeout: 30_000 }, async t => {
+  // The hostile host home carries dotfiles on the claimed-closed discovery
+  // paths; the worker must resolve them inside the managed home instead.
+  const hostileHome = await mkdtemp(join(tmpdir(), "turnhelm-hostile-home-"));
+  t.after(() => rm(hostileHome, { recursive: true, force: true }));
+  await mkdir(join(hostileHome, ".config", "fish"), { recursive: true });
+  await mkdir(join(hostileHome, ".agents"), { recursive: true });
+  await writeFile(join(hostileHome, ".gitconfig"), "[user]\nname = HOST_IDENTITY\n");
+  const { recorded, directory } = await runWorker(t, {
+    parentEnv: { HOME: hostileHome, XDG_CONFIG_HOME: "/tmp/host-xdg-override" },
+    script: `
+fs.writeFileSync(path.join(here, "home-resolution.json"), JSON.stringify({
+  home: process.env.HOME,
+  gitconfig: require("node:fs").existsSync(path.join(process.env.HOME ?? "", ".gitconfig")),
+  agentsDir: require("node:fs").existsSync(path.join(process.env.HOME ?? "", ".agents")),
+  xdg: process.env.XDG_CONFIG_HOME
+}));
+finish(() => emit({ type: "turn.completed" }));
+`
+  });
+  assert.equal(recorded.status, "completed");
+  const resolution = JSON.parse(await fakeFile(directory, "home-resolution.json")) as {
+    home: string; gitconfig: boolean; agentsDir: boolean; xdg: string;
+  };
+  assert.equal(dirname(resolution.home), join(directory, "tmp"),
+    "HOME is a fresh managed home under tmpdir(), never the hostile host home");
+  assert.equal(resolution.gitconfig, false, "the host .gitconfig is not reachable through $HOME");
+  assert.equal(resolution.agentsDir, false, "the host $HOME/.agents discovery path finds nothing");
+  // Scoped closure only: explicit override variables keep passing through as
+  // documented residuals — the redirect does not scrub the environment.
+  assert.equal(resolution.xdg, "/tmp/host-xdg-override");
 });
 
 test("a surviving descendant keeps the stripped key set and managed marker after leader exit", { timeout: 30_000 }, async t => {
@@ -579,7 +632,7 @@ test("a surviving descendant keeps the stripped key set and managed marker after
     parentEnv: { HOME: home, BASH_ENV: "/tmp/host-bashenv", ENV: "/tmp/host-shenv" },
     script: `
 const KEYS = ["LAYA_API_KEY", "TYPESAFE_API_KEY", "TURNHELM_ALLOW_HOSTED_JEV", "TURNHELM_CONFIG",
-  "BASH_ENV", "ENV", "TURNHELM_MANAGED_CHILD", "CODEX_HOME", "ZDOTDIR"];
+  "BASH_ENV", "ENV", "TURNHELM_MANAGED_CHILD", "CODEX_HOME", "ZDOTDIR", "HOME"];
 fs.writeFileSync(path.join(here, "leader.json"), JSON.stringify({ pid: process.pid, codexHome: process.env.CODEX_HOME }));
 const descendantSource = [
   'const fs = require("node:fs");',
@@ -634,8 +687,10 @@ descendant.unref();
     }
     assert.equal(sample.TURNHELM_MANAGED_CHILD, "1", name + " sample: the managed-child marker persists");
     assert.equal(sample.CODEX_HOME, leader.codexHome, name + " sample: the managed home is the leader's");
-    assert.equal(sample.ZDOTDIR, join(directory, "root", ".turnhelm"),
-      name + " sample: the zsh lookup stays redirected to the turnhelm-owned root");
+    assert.equal(sample.ZDOTDIR, leader.codexHome,
+      name + " sample: the zsh lookup stays redirected to the managed home");
+    assert.equal(sample.HOME, leader.codexHome,
+      name + " sample: HOME-derived discovery stays inside the managed home");
   }
 });
 
@@ -730,13 +785,16 @@ finish(() => {
     tailWrites: 0,
     ownedShutdown: true,
     codexHomeManaged: true,
+    instructionNote: "sandbox-semantics-v1",
     payload: { mode: "unstructured" }
   });
   assert.ok(code === 0 || (code === 143 && signal === "SIGTERM"),
     "voluntary exit zero or the ladder's TERM, saw " + code + "/" + String(signal));
   assert.equal(await fakeFile(directory, "argv.json"), JSON.stringify(buildWorkerArgs(decision("balanced"), true)));
   assert.equal(await fakeFile(directory, "cwd.txt"), await realpath(join(directory, "root")));
-  assert.equal(await fakeFile(directory, "task.txt"), task);
+  // The worker instruction is byte-exact task + fixed note; validation saw
+  // the bare task only.
+  assert.equal(await fakeFile(directory, "task.txt"), task + "\n\n" + SANDBOX_SEMANTICS_NOTE);
   assert.equal(await fakeFile(directory, "runs"), "1");
   const env = JSON.parse(await fakeFile(directory, "env.json")) as Record<string, string | boolean>;
   assert.equal(env.TURNHELM_MANAGED_CHILD, "1");
@@ -749,6 +807,100 @@ finish(() => {
   assert.equal(env.PATH, directory);
   assert.ok(stdout.includes("worker result\n"));
   assert.equal(stderr, "");
+});
+
+test("the stall watchdog aborts a silent worker after the first decoded frame", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    stallAbortMs: 300,
+    script: `
+finish(() => {
+  emit({ type: "item.started", item: { type: "reasoning" } });
+  setInterval(() => {}, 500);
+});
+`
+  });
+  assert.equal(recorded.status, "cancelled");
+  assert.equal(recorded.abortReason, "stall");
+  assert.equal(recorded.ownedShutdown, true);
+  assert.equal(recorded.progressEvents, 1);
+  assert.ok(recorded.lastEventAgeMs !== undefined && recorded.lastEventAgeMs >= 300,
+    "the stall age is at least the threshold, saw " + String(recorded.lastEventAgeMs));
+  assert.equal(recorded.signal, "SIGTERM");
+  assert.equal(recorded.code, 143);
+});
+
+test("a worker with zero decoded frames never stall-aborts", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    stallAbortMs: 300,
+    gate: "abort-ready",
+    script: `
+finish(() => {
+  setTimeout(() => { ready(); setInterval(() => {}, 500); }, 700);
+});
+`
+  });
+  assert.equal(recorded.status, "cancelled");
+  assert.equal(recorded.abortReason, undefined, "no decoded frame is unknown evidence, never stall evidence");
+  assert.equal(recorded.ownedShutdown, true);
+});
+
+test("a later decoded frame extends the stall deadline", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    stallAbortMs: 500,
+    script: `
+finish(() => {
+  // Every gap stays under the 500ms threshold while the cumulative run
+  // crosses it twice over — only a per-frame re-arm survives this.
+  let frames = 0;
+  const tick = () => {
+    frames += 1;
+    emit({ type: "item.updated", item: { type: "reasoning", status: "in_progress" } });
+    if (frames < 4) setTimeout(tick, 400);
+    else {
+      emit({ type: "turn.completed", usage: { input_tokens: 3 } });
+      process.exit(0);
+    }
+  };
+  setTimeout(tick, 400);
+});
+`
+  });
+  assert.equal(recorded.status, "completed", "each sub-threshold gap re-arms the deadline");
+  assert.equal(recorded.abortReason, undefined);
+  assert.equal(recorded.progressEvents, 5);
+});
+
+test("the watchdog never fires after the terminal event decided the run", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    stallAbortMs: 300,
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "done" } });
+  emit({ type: "turn.completed", usage: { input_tokens: 3 } });
+  setInterval(() => {}, 500);
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(recorded.abortReason, undefined, "a decided run is not stall-abortable");
+  assert.equal(recorded.ownedShutdown, true);
+});
+
+test("a caller signal during armed silence outranks the watchdog", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    stallAbortMs: 5000,
+    gate: "abort-after-frame",
+    script: `
+finish(() => {
+  emit({ type: "item.started", item: { type: "reasoning" } });
+  fs.writeFileSync(path.join(here, "framed"), "1");
+  setInterval(() => {}, 500);
+});
+`
+  });
+  assert.equal(recorded.status, "cancelled");
+  assert.equal(recorded.abortReason, undefined, "the caller's abort records no stall reason");
+  assert.equal(recorded.ownedShutdown, true);
 });
 
 test("worker executes under a fresh managed CODEX_HOME holding only staged contents", { timeout: 30_000 }, async t => {
@@ -1346,6 +1498,29 @@ finish(() => {
   assert.equal(recorded.ownedShutdown, true);
   assert.equal(recorded.failureClass, "stream-disconnected");
   assert.ok((recorded.durationMs ?? 0) >= 4900, "the deadline waits the full grace before escalating, saw " + String(recorded.durationMs));
+});
+
+test("a reported failure is terminal for the stall watchdog even at the floor value", { timeout: 30_000 }, async t => {
+  // turn.failed is a terminal frame: at stallAbortMs 5000 — exactly the
+  // failure-grace deadline — the watchdog must not preempt the failure
+  // ladder and reclassify an explicitly failed worker as a stall.
+  const { recorded } = await runWorker(t, {
+    settlementGuardMs: 9000,
+    stallAbortMs: 5000,
+    script: `
+finish(() => {
+  emit({ type: "turn.failed", message: "stream disconnected before completion" });
+  setInterval(() => {}, 500);
+});
+`
+  });
+  assert.equal(recorded.status, "failed", "the reported failure keeps its class");
+  assert.equal(recorded.error, "worker");
+  assert.equal(recorded.failureClass, "stream-disconnected");
+  assert.equal(recorded.abortReason, undefined, "no stall reason rides a run the worker already failed");
+  assert.equal(recorded.ownedShutdown, true);
+  assert.equal(recorded.code, 143);
+  assert.equal(recorded.signal, "SIGTERM");
 });
 
 test("failure deadline expiry escalates an exited leader whose descendant holds inherited stdio", { timeout: 30_000 }, async t => {
@@ -2700,6 +2875,35 @@ test("the lifecycle journal outlives an outer kill before settlement", { timeout
   assert.ok(kinds.includes("spawned"), "spawned is journaled before the kill");
   assert.ok(kinds.includes("event"), "the decoded event is journaled for this CLI pid");
   assert.ok(!kinds.includes("settle"), "a killed run journals no settlement");
+});
+
+test("the stall-abort flag drives the owned ladder and lands on the receipt timeline", { timeout: 30_000 }, async t => {
+  const { root, spawnCli } = await stageLifecycleCli(t, "stall");
+  const child = spawnCli(["--lifecycle", "--stall-abort-ms", "5000"]);
+  child.stdin?.end();
+  const run = await collectRun(child);
+  // The ladder's TERM ends the stalled fake; workerExit keeps the observed 143.
+  assert.equal(run.code, 143);
+  const worker = receiptOf(run.stderr).worker as Record<string, unknown> as {
+    status: string; abortReason?: string; ownedShutdown: boolean; signal?: string; progressEvents: number;
+    lifecycle?: { events: { kind: string }[]; overflow: boolean };
+  };
+  assert.equal(worker.status, "cancelled");
+  assert.equal(worker.abortReason, "stall");
+  assert.equal(worker.ownedShutdown, true);
+  assert.equal(worker.signal, "SIGTERM");
+  assert.equal(worker.progressEvents, 1);
+  const kinds = (worker.lifecycle?.events ?? []).map(event => event.kind);
+  assert.ok(kinds.includes("stall-abort"), "the stall is on the timeline");
+  assert.ok(kinds.indexOf("stall-abort") < kinds.indexOf("shutdown-term"),
+    "the stall record precedes the ladder");
+  assert.equal(kinds.at(-1), "settle");
+  assert.ok(!kinds.includes("abort"), "no caller abort happened");
+  // The stalled fake dies by the ladder; clean up any straggler defensively.
+  const workerPid = Number(await readFile(join(root, "stalled-worker.pid"), "utf8").catch(() => ""));
+  if (Number.isInteger(workerPid) && workerPid > 0) {
+    try { process.kill(workerPid, "SIGKILL"); } catch { /* the ladder already took it */ }
+  }
 });
 
 test("an event flood trips the overflow marker without losing the settlement tail", { timeout: 30_000 }, async t => {

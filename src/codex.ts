@@ -28,6 +28,13 @@ export type WorkerResult = Readonly<{
   // per-run managed CODEX_HOME destroyed at settlement. An attestation of that
   // mechanism, never a universal instruction-isolation claim.
   codexHomeManaged?: true;
+  // The version tag of the fixed sandbox-semantics note, present iff the note
+  // was appended to the written instruction. A mechanism attestation in the
+  // same honesty class as codexHomeManaged — never a claim the worker obeyed.
+  instructionNote?: string;
+  // Present iff the opt-in stall watchdog fired: decoded-frame silence met
+  // the caller's threshold and the owned shutdown ladder ended the run.
+  abortReason?: "stall";
   failureClass?: FailureClass;
   errorSha256?: string;
   // PE-1: the emission classifier's bounded, content-free projection, attached
@@ -40,6 +47,14 @@ export type WorkerResult = Readonly<{
   // milestones only; thread correlation is deliberately absent.
   lifecycle?: Readonly<{ events: readonly LifecycleEvent[]; overflow: boolean }>;
 }>;
+
+// The fixed runner note appended to every worker instruction after validation:
+// task + "\n\n" + this note. Frozen wording (spec §3.2, version tag
+// sandbox-semantics-v1) — a change is a new version tag, never a silent edit.
+// It claims only what the runner controls and always yields to read
+// restrictions the task itself states. The classifier and routes.jsonl still
+// see the bare task; receipts carry the tag, never this prose.
+export const SANDBOX_SEMANTICS_NOTE = "Sandbox semantics (fixed runner note, not from the requester): a read-only sandbox denies writes, not reads — read-only mode itself never prohibits reading. A workspace-write sandbox additionally permits writes inside the workspace. Attempt to read the files the task requires as inputs, using your available tools, before answering — always respecting any read restrictions the task itself states. Distinguish an actually failed read attempt from a tool you do not have, and report a read as denied only when a real read attempt failed.";
 
 export function buildWorkerArgs(decision: TaskDecision, write: boolean, schemaPath?: string): string[] {
   return ["exec", "--ephemeral", "--json",
@@ -74,18 +89,24 @@ export function subprocessEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv
   return copy;
 }
 
-export function workerEnvironment(env: NodeJS.ProcessEnv, root: string, homeDir: string): NodeJS.ProcessEnv {
+export function workerEnvironment(env: NodeJS.ProcessEnv, homeDir: string): NodeJS.ProcessEnv {
   return {
     ...subprocessEnvironment(env),
     TURNHELM_MANAGED_CHILD: "1",
     // WB-2: the worker's CODEX_HOME is this run's managed home; whatever the
     // parent carried is overridden and never reaches the child.
     CODEX_HOME: homeDir,
+    // HOME-derived discovery (startup files, $HOME/.agents, dotfiles) resolves
+    // inside the managed home and dies with the run. Scoped closure only:
+    // explicit override variables (XDG_*, GIT_CONFIG_GLOBAL, …) and system
+    // files still pass through as documented residuals.
+    HOME: homeDir,
     // zsh sources $ZDOTDIR/.zshenv even non-interactively, falling back to HOME,
     // which let host startup files re-export stripped keys into worker
-    // descendants. Pointing ZDOTDIR at the managed root keeps those files out;
-    // a missing startup file there is zsh's skip state.
-    ZDOTDIR: join(root, ".turnhelm")
+    // descendants. Pointing ZDOTDIR at the managed home keeps those files out;
+    // a missing startup file there is zsh's skip state, and a host-exported
+    // ZDOTDIR must not win over the redirect.
+    ZDOTDIR: homeDir
   };
 }
 
@@ -188,6 +209,7 @@ export function executeWorker(
     output: NodeJS.WritableStream;
     diagnostics?: NodeJS.WritableStream;
     lifecycle?: LifecycleRecorder;
+    stallAbortMs?: number;
   }
 ): Promise<WorkerResult> {
   const started = performance.now();
@@ -213,7 +235,7 @@ export function executeWorker(
           cwd: options.root,
           detached: true,
           stdio: ["pipe", "pipe", "pipe"],
-          env: workerEnvironment(options.env, options.root, managedHome)
+          env: workerEnvironment(options.env, managedHome)
         });
       } catch {
         return undefined;
@@ -243,11 +265,14 @@ export function executeWorker(
     let lastEventAt: number | undefined;
     let usage: WorkerUsage | undefined;
     let inputDelivered = false;
+    let noteAppended = false;
     let childCode: number | null = null;
     let childSignal: NodeJS.Signals | null = null;
     let closed = false;
     let finished = false;
     let ownedShutdown = false;
+    let stallAbort = false;
+    let stallTimer: NodeJS.Timeout | undefined;
     let failureClass: FailureClass | undefined;
     let failureHash: string | undefined;
     let failureDeadline: NodeJS.Timeout | undefined;
@@ -306,6 +331,7 @@ export function executeWorker(
       // group's discharge, so the managed home — and only it — goes now.
       destroyWorkerHome(managedHome);
       clearFailureDeadline();
+      if (stallTimer !== undefined) { clearTimeout(stallTimer); stallTimer = undefined; }
       options.signal?.removeEventListener("abort", onAbort);
       // With writes still in flight the listeners stay attached (they detach
       // from the last write callback); cancellation may settle despite them.
@@ -315,7 +341,7 @@ export function executeWorker(
       let status: WorkerResult["status"];
       let error: WorkerResult["error"];
       if (failure !== undefined) { status = "failed"; error = failure; }
-      else if (cancelled) { status = "cancelled"; error = undefined; }
+      else if (cancelled || stallAbort) { status = "cancelled"; error = undefined; }
       else if (!inputDelivered) { status = "failed"; error = "stdin"; }
       else if (!completedEligible()) { status = "failed"; error = "worker"; }
       else { status = "completed"; error = undefined; }
@@ -325,9 +351,11 @@ export function executeWorker(
         durationMs: Math.round(performance.now() - started),
         progressEvents,
         usageScope: "unverified"
-      } as { code: number; status: WorkerResult["status"]; durationMs: number; progressEvents: number; usageScope: "unverified"; ownedShutdown: boolean; codexHomeManaged?: true; usage?: WorkerUsage; error?: WorkerResult["error"]; signal?: "SIGINT" | "SIGTERM" | "SIGKILL"; failureClass?: FailureClass; errorSha256?: string; lastEventAgeMs?: number; payload?: WorkerResult["payload"]; lifecycle?: WorkerResult["lifecycle"] };
+      } as { code: number; status: WorkerResult["status"]; durationMs: number; progressEvents: number; usageScope: "unverified"; ownedShutdown: boolean; codexHomeManaged?: true; instructionNote?: string; abortReason?: "stall"; usage?: WorkerUsage; error?: WorkerResult["error"]; signal?: "SIGINT" | "SIGTERM" | "SIGKILL"; failureClass?: FailureClass; errorSha256?: string; lastEventAgeMs?: number; payload?: WorkerResult["payload"]; lifecycle?: WorkerResult["lifecycle"] };
       result.ownedShutdown = ownedShutdown;
       result.codexHomeManaged = true;
+      if (noteAppended) result.instructionNote = "sandbox-semantics-v1";
+      if (stallAbort) result.abortReason = "stall";
       if (lastEventAt !== undefined) result.lastEventAgeMs = Math.round(performance.now() - lastEventAt);
       if (usage) result.usage = usage;
       if (error) result.error = error;
@@ -387,7 +415,7 @@ export function executeWorker(
     // flushed write — unless cancellation resolves the run.
     const settle = (): void => {
       if (!closed || finished || !shutdownDischarged || cancelDrainWait !== undefined) return;
-      if ((pendingWrites.message !== 0 || pendingWrites.diag !== 0) && !cancelled) return;
+      if ((pendingWrites.message !== 0 || pendingWrites.diag !== 0) && !cancelled && !stallAbort) return;
       // The never-decided catch-all emission; a decided run already emitted.
       if (emitFinalMessage()) return; // The accepted write must flush (or fail) before the run finishes.
       finish();
@@ -469,12 +497,32 @@ export function executeWorker(
     // made recordFailure a no-op. An already-delivered operator abort outranks
     // a failure registered after it (spec TS-6).
     const recordOutputFailure = (): void => {
-      if (failure !== undefined || finished || cancelled) return;
+      if (failure !== undefined || finished || cancelled || stallAbort) return;
       failure = "output";
       beginShutdown();
     };
 
     const onAbort = (): void => { cancelled = true; options.lifecycle?.record("abort"); beginShutdown(); settle(); };
+    // The opt-in stall watchdog: armed at the first decoded frame and re-armed
+    // by every later one, it fires only while the run is still undecided and
+    // silent — a caller abort or a terminal event (a decided run or a
+    // reported failure, which owns the failure-grace deadline) always keeps
+    // precedence.
+    const onStallAbort = (): void => {
+      stallTimer = undefined;
+      if (finished || shutdownStarted || decided || cancelled || stickyFailed) return;
+      stallAbort = true;
+      options.lifecycle?.record("stall-abort");
+      beginShutdown();
+      settle();
+    };
+    const armStallWatchdog = (): void => {
+      if (options.stallAbortMs === undefined || finished || shutdownStarted || decided || stickyFailed) return;
+      // One timer object for the whole run (spec §3.5): a pending timer
+      // re-arms in place, a fired one (undefined) is created fresh.
+      if (stallTimer === undefined) stallTimer = setTimeout(onStallAbort, options.stallAbortMs);
+      else stallTimer.refresh();
+    };
     const onOutputError = (): void => failSink("message");
 
     // Listener lifetime must cover our accepted bytes: while any write this
@@ -709,6 +757,7 @@ export function executeWorker(
         }
         progressEvents += 1;
         lastEventAt = performance.now();
+        armStallWatchdog();
         options.lifecycle?.record("event", event.kind === "activity"
           ? { eventKind: "activity", itemKind: event.itemKind, itemPhase: event.itemPhase,
               ...(event.itemStatus === undefined ? {} : { itemStatus: event.itemStatus }),
@@ -727,7 +776,11 @@ export function executeWorker(
       recordFailure("spawn");
     } else {
       stdin.on("error", () => { recordFailure("stdin"); });
-      stdin.end(task, (error?: Error | null) => { if (!error) { inputDelivered = true; options.lifecycle?.record("stdin-delivered"); tryDecide(); } });
+      // The fixed note joins the instruction here, after validation — the
+      // classifier and journal saw the bare task above. noteAppended is the
+      // append fact; delivery success stays inputDelivered's separate story.
+      noteAppended = true;
+      stdin.end(task + "\n\n" + SANDBOX_SEMANTICS_NOTE, (error?: Error | null) => { if (!error) { inputDelivered = true; options.lifecycle?.record("stdin-delivered"); tryDecide(); } });
       stderr.on("error", () => { /* Drained and discarded; never stalls stdout. */ });
       stderr.resume();
       stdout.on("data", (chunk: Buffer) => {

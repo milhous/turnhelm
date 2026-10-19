@@ -119,7 +119,7 @@ export type AttemptTransportEvidence =
 export type SafeEvidence =
   | Readonly<{ phase: "prepared"; suite: LiveSuite; manifestSha256: string; startedAt: string }>
   | Readonly<{ phase: "reserved"; caseId: string; worker: number; backends: readonly AcceptanceBackend[] }>
-  | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number; attemptTransports?: AttemptTransportEvidence; workerUsage?: WorkerUsageEvidence; workerFailure?: WorkerFailureEvidence; workerProgress?: WorkerProgressEvidence; workerLifecycle?: WorkerLifecycleEvidence }>
+  | Readonly<{ phase: "observed"; caseId: string; backend: AcceptanceBackend | "invalid"; profileId: string; rootMatches: boolean | "unknown"; exitCode: number | null; durationMs: number; attempts: number; attemptTransports?: AttemptTransportEvidence; workerUsage?: WorkerUsageEvidence; workerFailure?: WorkerFailureEvidence; workerProgress?: WorkerProgressEvidence; workerLifecycle?: WorkerLifecycleEvidence; instructionNote?: string }>
   | Readonly<{ phase: "verified"; caseId: string; verdict: "pass" | "fail" | "timeout"; policy: "match" | "mismatch" | "not-applicable"; checks: Readonly<Record<string, boolean>>; oracleInput?: OracleInputEvidence }>
   | Readonly<{ phase: "completed"; outcome: "pass" | "policy-mismatch"; cases: number; policyMatches: number; policyMismatches: number }>
   | Readonly<{ phase: "completed"; outcome: "pass" | "fail"; cases: number; failed: number; timedOut: number }>
@@ -1110,7 +1110,12 @@ const projectWorkerProgress = (value: unknown): WorkerProgressEvidence | undefin
 // The recorder's frozen kind taxonomy, hand-copied like FAILURE_SIGNALS: a
 // kind outside it is not lifecycle evidence and drops the projection.
 const LIFECYCLE_KINDS: ReadonlySet<string> = new Set(["spawned", "stdin-delivered", "event", "completion", "failure",
-  "abort", "shutdown-term", "shutdown-kill", "shutdown-discharged", "stdout-end", "close", "settle"]);
+  "abort", "stall-abort", "shutdown-term", "shutdown-kill", "shutdown-discharged", "stdout-end", "close", "settle"]);
+
+// The fixed note's version-tag shape (spec §3.2), hand-copied the same way:
+// any version number matches — the tag is versioned, never silently edited —
+// while worker prose in the field drops.
+export const INSTRUCTION_NOTE_PATTERN = /^sandbox-semantics-v\d+$/;
 
 // The recorder's frozen detail vocabulary, same hand-copied discipline as the
 // kinds — and every value is validated against the vocabulary it came from:
@@ -1343,7 +1348,12 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
         ...(raw.workerUsage !== undefined ? { workerUsage: projectWorkerUsage(raw.workerUsage) } : {}),
         ...(workerFailure !== undefined ? { workerFailure } : {}),
         ...(workerProgress !== undefined ? { workerProgress } : {}),
-        ...(workerLifecycle !== undefined ? { workerLifecycle } : {})
+        ...(workerLifecycle !== undefined ? { workerLifecycle } : {}),
+        // The fixed note's version tag (spec §3.2), as-is when it matches the
+        // tag shape — the stall watchdog's abortReason, by contrast,
+        // is not live-acceptance evidence and never enters.
+        ...(typeof raw.instructionNote === "string" && INSTRUCTION_NOTE_PATTERN.test(raw.instructionNote)
+          ? { instructionNote: raw.instructionNote } : {})
       };
     }
     case "verified": {
@@ -2108,6 +2118,13 @@ export async function executeAcceptance(
           }
           const claimedRoot = receiptFrame !== null && typeof receiptFrame.root === "string" ? receiptFrame.root : null;
           const rootOk = claimedRoot !== null && await realpath(claimedRoot).catch(() => "") === item.root;
+          // The fixed note's version tag rides every executed worker's
+          // observation — completed, failed, or cancelled alike; a worker that
+          // never ran carries no tag, and nothing beyond the tag string is
+          // extracted from the receipt's worker object here.
+          const instructionNote = worker !== null && worker.status !== "not-started"
+            && typeof worker.instructionNote === "string" && INSTRUCTION_NOTE_PATTERN.test(worker.instructionNote)
+            ? worker.instructionNote : undefined;
           observation = {
             phase: "observed", caseId: item.id, backend, profileId, rootMatches,
             exitCode: supervision.exitCode, durationMs: supervision.durationMs, attempts,
@@ -2118,7 +2135,8 @@ export async function executeAcceptance(
             workerUsage: projectWorkerUsage(worker?.usage),
             ...(workerFailure !== undefined ? { workerFailure } : {}),
             ...(workerProgress !== undefined ? { workerProgress } : {}),
-            ...(workerLifecycle !== undefined ? { workerLifecycle } : {})
+            ...(workerLifecycle !== undefined ? { workerLifecycle } : {}),
+            ...(instructionNote !== undefined ? { instructionNote } : {})
           };
 
           // The observation is persisted before any fallible verification read
