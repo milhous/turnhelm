@@ -69,22 +69,32 @@ boundary only.
 source:
 
 ```
-AWS_CONFIG_FILE, AWS_SHARED_CREDENTIALS_FILE, DOCKER_CONFIG, DOCKER_CONTEXT, DOCKER_HOST,
-GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM, KUBECONFIG, NPM_CONFIG_USERCONFIG, SSH_AUTH_SOCK,
-XDG_CACHE_HOME, XDG_CONFIG_HOME, XDG_DATA_HOME, XDG_RUNTIME_DIR, XDG_STATE_HOME
+AWS_CONFIG_FILE, AWS_SHARED_CREDENTIALS_FILE, AWS_WEB_IDENTITY_TOKEN_FILE, DOCKER_CERT_PATH,
+DOCKER_CONFIG, DOCKER_CONTEXT, DOCKER_HOST, GIT_CONFIG, GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM,
+KUBECONFIG, NPM_CONFIG_GLOBALCONFIG, NPM_CONFIG_USERCONFIG, SSH_AUTH_SOCK, XDG_CACHE_HOME,
+XDG_CONFIG_DIRS, XDG_CONFIG_HOME, XDG_DATA_DIRS, XDG_DATA_HOME, XDG_RUNTIME_DIR, XDG_STATE_HOME
 ```
 
-Principle, stated once in the code comment: a key is on the list iff its value is a host
+One case rule: `NPM_CONFIG_USERCONFIG` matches case-insensitively (`npm_config_userconfig`,
+`Npm_Config_UserConfig`, …), because npm documents case-insensitive environment configuration and
+lowercase forms work inside worker scripts. No other key has a case rule — every other entry is
+scrubbed under its exact frozen spelling only.
+
+Admission principle, stated once in the code comment: a key is on the list iff its value is a host
 **data/config/credential discovery pointer** (it redirects a tool's default file discovery away
-from the managed home: the `XDG_*`, `GIT_CONFIG_*`, `NPM_CONFIG_USERCONFIG`, `DOCKER_CONFIG`,
-`AWS_*`, `KUBECONFIG` families) or an **action-capable pointer** (its value names a socket or
-endpoint whose use authenticates or controls host resources without reading a file:
-`SSH_AUTH_SOCK`, `DOCKER_HOST`, `DOCKER_CONTEXT`). Program pointers (`PATH`, `SHELL`, …) are
-deliberately not on the list; nor is `OPENAI_API_KEY`, which is the worker's intended credential.
-The list is exhaustive by construction — no pattern matching, no partial match, no key outside the
-list is ever touched, and adding or removing a key is a source change that bumps the version tag
-below. Deletion semantics match the existing credential strip (own-property delete; the managed
-overrides `HOME`/`ZDOTDIR`/`CODEX_HOME`/`TURNHELM_MANAGED_CHILD` still win as today).
+from the managed home: the `XDG_*`, `GIT_CONFIG*`, `NPM_CONFIG_*`, `DOCKER_*`, `AWS_*`,
+`KUBECONFIG` families, including directory-search forms like `XDG_CONFIG_DIRS`/`XDG_DATA_DIRS`
+and indirect selectors like `DOCKER_CONTEXT`, which names the context whose stored endpoint and
+credentials docker uses) or an **action-capable pointer** (its value names a socket or endpoint
+whose use authenticates or controls host resources without reading a file: `SSH_AUTH_SOCK`,
+`DOCKER_HOST`). Program pointers (`PATH`, `SHELL`, …) are deliberately not on the list; nor is
+`OPENAI_API_KEY`, which is the worker's intended credential. The principle guides admission; the
+frozen list is the contract. No pattern matching, no partial match, no prefix rule, and no key
+outside the list is ever touched — unlisted pointer variables (including forms a tool might read
+but this list does not name, such as `AWS_CA_BUNDLE`) remain documented residuals, and adding or
+removing a key is a source change that bumps the version tag below. Deletion semantics match the
+existing credential strip (own-property delete; `NODE_V8_COVERAGE` keeps its explicit `undefined`;
+the managed overrides `HOME`/`ZDOTDIR`/`CODEX_HOME`/`TURNHELM_MANAGED_CHILD` still win as today).
 
 Behavior change, documented rather than mitigated: a worker that needs host configuration or
 credentials reachable only through these pointers must receive them through the task's own inputs —
@@ -96,22 +106,33 @@ boundary itself remain documented residuals — the sandbox owns those, not the 
 
 ### 3.2 Boundary-generation attestation
 
-The worker result gains `envBoundary: "host-pointers-v1"`, present iff the run's worker environment
-was built with the §3.1 scrub — a mechanism attestation in the `codexHomeManaged`/`instructionNote`
-honesty class, never a claim that a descendant failed to re-import anything. The tag shape is
-`^host-pointers-v\d+$`; a generation change (list edit) is a new tag, never a silent edit — the
-same discipline as `sandbox-semantics-v1`. If the tag is absent, the scrub generation is not
-attested; nothing is inferred from absence.
+The worker result gains `envBoundary: "host-pointers-v1"`, attached on exactly the result paths
+`instructionNote` is attached on — the executed-worker construction — and absent wherever
+`instructionNote` is absent: a not-started worker (routing failure), a pre-execution abort, a
+managed-home failure, and a spawn failure before instruction delivery carry neither field. This
+parity is the presence rule; the existing `noteAppended` path decides both. The value is validated
+as an exact whole-string literal — the current generation `host-pointers-v1` and nothing else, no
+shape pattern — because a shape like `^host-pointers-v\d+$` is unbounded in length and, in
+JavaScript, `$` also accepts a trailing line terminator. A generation change (list edit) is a new
+literal and a new test, never a silent edit — the same discipline as `sandbox-semantics-v1`, with
+a stricter acceptance rule. The attestation is mechanism evidence in the
+`codexHomeManaged`/`instructionNote` honesty class, never a claim that a descendant failed to
+re-import anything; if the tag is absent, the scrub generation is not attested and nothing is
+inferred from absence.
 
 ### 3.3 Evidence projections
 
 The tag rides the same three surfaces `instructionNote` rides, with the same per-field discipline
-(absent, malformed, or out-of-pattern values drop the field; never coerce, never fabricate):
+(absent, malformed, or non-matching values drop the field alone; never coerce, never fabricate),
+and with the exact-literal acceptance of §3.2: the CLI receipt carries it on the worker object;
 custom-round's `projectWorkerReceipt` whitelist admits `envBoundary` beside `instructionNote`;
-standard acceptance's observed record gains one optional bounded `envBoundary` field for every
-executed worker regardless of status; the CLI receipt carries it on the worker object. Routes and
-journal schemas, sealed-archive shapes, and every existing projection are otherwise unchanged; no
-historical record is regraded or rewritten.
+standard acceptance carries it on the observed record for every executed worker regardless of
+status — through **both** of its stages, the observed-record construction from the receipt and the
+`sanitizeEvidence` persistence filter, so the field cannot appear in an observation only to be
+lost at persistence. Routes and sealed-archive shapes are otherwise unchanged; no historical
+record is regraded or rewritten. The CLI-owned journals (`.turnhelm/routes.jsonl`,
+`.turnhelm/lifecycle.jsonl`) gain no new key; the evidence ledgers of the two harnesses carry the
+field as part of their existing record shapes.
 
 ### 3.4 Privacy, performance, and interpretation
 
@@ -136,11 +157,11 @@ cover all connected consumers in one contract:
 | --- | --- |
 | `src/codex.ts` | The frozen §3.1 list + principle comment; deletions in `workerEnvironment`; `envBoundary` on `WorkerResult` set iff the scrub ran |
 | `src/cli.ts` | `envBoundary` wired through the explicit receipt construction; nothing else |
-| `test/worker.test.ts` | Hostile-pointer fixtures: every listed key exported by a hostile host is absent in the worker env and in a surviving descendant; unlisted variables (including `PATH`, `SHELL`, `OPENAI_API_KEY`, an unlisted `XDG_`-prefixed key if any exists) still pass through; parent process env unchanged; the existing XDG-passthrough assertion is updated, not deleted; `subprocessEnvironment`/preflight paths unchanged |
-| `test/cli.test.ts` | The receipt carries `envBoundary: "host-pointers-v1"` on every executed-worker path |
-| `test/custom-round.ts` | `projectWorkerReceipt` whitelist admits the tag (pattern-validated, drops malformed/out-of-pattern alone) |
-| `test/live-acceptance.ts` | Observed record gains the optional bounded `envBoundary` field for completed, failed, and cancelled workers alike |
-| `test/custom-round.test.ts`, `test/live-acceptance.test.ts`, `test/codex.test.ts` | Whitelist round-trips incl. malformed tags; projection drop rules |
+| `test/worker.test.ts` | Hostile-pointer fixtures: every listed key exported by a hostile host is absent in the worker env and in a surviving descendant, with lowercase-only and mixed-case `npm_config_userconfig` fixtures alongside the uppercase form; unlisted variables (including `PATH`, `SHELL`, `TMPDIR`, `OPENAI_API_KEY`, `NODE_OPTIONS`, an unlisted `XDG_`-suffixed sentinel, and an unlisted `AWS_`-prefixed key) still pass through; parent process env unchanged; the existing XDG-passthrough assertion is updated, not deleted; `subprocessEnvironment`/preflight paths unchanged |
+| `test/cli.test.ts` | The receipt carries `envBoundary: "host-pointers-v1"` on every executed-worker path, and carries neither `envBoundary` nor `instructionNote` on the not-started and pre-execution-failure paths |
+| `test/custom-round.ts` | `projectWorkerReceipt` whitelist admits the tag (exact-literal validated, drops non-matching values alone) |
+| `test/live-acceptance.ts` | Observed record gains the optional `envBoundary` field for completed, failed, and cancelled workers alike, carried through both the observed-record construction and `sanitizeEvidence` |
+| `test/custom-round.test.ts`, `test/live-acceptance.test.ts`, `test/codex.test.ts` | Whitelist round-trips including non-matching, oversized, and trailing-newline tag values; projection drop rules; early-path presence parity with `instructionNote` |
 | `README.md`, `.agents/skills/turnhelm-routing/SKILL.md` (+ `.claude` mirror) | Boundary passages rewritten: the override-variable residual list shrinks to system files/hooks/override-file/absolute-read residuals; the consequence class (in-task inputs) stated; tag named |
 | `test/package.test.ts`, `test/init.test.ts` | Update only packaged-documentation assertions genuinely changed |
 
@@ -156,20 +177,28 @@ All criteria are offline; fake workers make no real provider request.
 1. **Scrub contract:** for every key of the frozen list, a hostile host exporting that key (with a
    plausible value, e.g. a planted socket path or config path) produces a worker environment where
    the key is absent — checked both on the built env object and through a real spawned worker that
-   dumps its env; a surviving descendant re-sampling after leader exit sees the same absence.
+   dumps its env; `NPM_CONFIG_USERCONFIG` is additionally tested in lowercase-only and mixed-case
+   forms (both absent); a surviving descendant re-sampling after leader exit sees the same
+   absence.
 2. **Precision:** unlisted variables keep passing through exactly as today — including `PATH`,
-   `SHELL`, `TMPDIR`, `OPENAI_API_KEY`, `NODE_OPTIONS`, and at least one unlisted `XDG_`-suffixed
-   key (e.g. a hypothetical `XDG_SENTINEL`) — and the parent CLI process environment is unchanged
-   by a run. The managed overrides (`HOME`, `ZDOTDIR`, `CODEX_HOME`, `TURNHELM_MANAGED_CHILD`) and
-   the existing `subprocessEnvironment` strips behave identically to the baseline.
-3. **Attestation:** the receipt carries `envBoundary: "host-pointers-v1"` on completed, failed, and
-   cancelled workers alike; custom-round retains it through `projectWorkerReceipt` and drops
-   malformed or out-of-pattern values alone; standard acceptance retains it on the observed record
-   for every executed worker; unselected keys keep being ignored per each projector's existing
-   rules.
+   `SHELL`, `TMPDIR`, `OPENAI_API_KEY`, `NODE_OPTIONS`, an unlisted `XDG_`-suffixed sentinel
+   (e.g. a hypothetical `XDG_SENTINEL`), an unlisted `AWS_`-prefixed key, and a case variant of a
+   key that has no case rule (e.g. `ssh_auth_sock`, which stays present) — and the parent CLI
+   process environment is unchanged by a run. The managed overrides (`HOME`, `ZDOTDIR`,
+   `CODEX_HOME`, `TURNHELM_MANAGED_CHILD`) and the existing `subprocessEnvironment` strips behave
+   identically to the baseline.
+3. **Attestation:** the receipt carries `envBoundary: "host-pointers-v1"` on completed, failed,
+   and cancelled workers alike, and carries neither `envBoundary` nor `instructionNote` on the
+   not-started, pre-execution-abort, managed-home-failure, and spawn-failure paths (presence
+   parity with `instructionNote`); custom-round retains the tag through `projectWorkerReceipt`
+   and drops non-matching values — oversized and trailing-newline forms included — alone;
+   standard acceptance retains it on the observed record for every executed worker through both
+   the observed-record construction and `sanitizeEvidence`; unselected keys keep being ignored
+   per each projector's existing rules.
 4. **No scope creep:** `subprocessEnvironment` output is unchanged (its `preflight` callers
-   unaffected); no new config field, CLI flag, manifest axis, or journal key exists; `git grep`
-   finds the list exactly once in `src/`.
+   unaffected); no new config field, CLI flag, or manifest axis exists, and no new key enters the
+   CLI-owned journals (`.turnhelm/routes.jsonl`, `.turnhelm/lifecycle.jsonl`); `git grep` finds
+   the list exactly once in `src/`.
 5. **Privacy canaries:** no environment value, path string, or socket path beyond the fixed tag
    reaches journals, projections, or diagnostics; existing redaction surfaces unchanged.
 6. **Regression commands:** build/typecheck, focused suites, full `pnpm test`, stock
@@ -195,6 +224,25 @@ historical cases.
 
 ## 7. Self-review record
 
-Independent review: native `gpt-6-astra/high` worker through the local routing harness, per the
-established acceptance procedure. Review loop status: **open** — this section records each round's
-verdict and dispositions as the loop runs; the loop closes at ACCEPT or is escalated to the user.
+Independent review: native `gpt-6-astra/high` worker through the local routing harness (Laya
+classifier, direct transport; read-only sandbox; receipt byte-retained at the review root).
+Review loop status: **open**.
+
+First-round review against spec commit `3e46dce`. Verdict: **PROBLEMS — 2 Important, 3 Minor**.
+The review confirmed the three `instructionNote` surfaces, the own-property deletion semantics,
+the worker-only scope (`subprocessEnvironment`/preflight untouched), and judged the scrub itself
+"worthwhile, inexpensive reduction of ambient configuration and credential discovery, without
+proving isolation". All five findings were verified against the code and accepted:
+
+| Review finding | Disposition in this revision |
+| --- | --- |
+| npm reads environment configuration case-insensitively; `npm_config_userconfig` would survive an exact-case scrub | §3.1 gains one case rule for that key only, tested in lowercase and mixed case (§4, §5.1) |
+| The list omitted in-family keys (`XDG_CONFIG_DIRS`, `XDG_DATA_DIRS`, `GIT_CONFIG`, `NPM_CONFIG_GLOBALCONFIG`, `DOCKER_CERT_PATH`, `AWS_WEB_IDENTITY_TOKEN_FILE`) and misclassified `DOCKER_CONTEXT` | All six added; `DOCKER_CONTEXT` reclassified as an indirect selector; and the contract narrowed to the reviewer's second option: the principle guides admission, the frozen list is the contract, unlisted pointers stay documented residuals (§3.1) |
+| A tag shape `^host-pointers-v\d+$` is length-unbounded and JavaScript's `$` accepts a trailing line terminator | §3.2/§3.3/§5.3 move to exact whole-string literal acceptance of the current generation; oversized and trailing-newline values are drop cases. The pre-existing `instructionNote` pattern keeps its shape rule — changing it is outside this contract and named as a deliberate non-change |
+| Attestation presence was undefined on early paths (pre-abort, managed-home failure, spawn failure) vs §5's executed-worker tests only | §3.2 fixes the presence rule as parity with `instructionNote`'s attachment paths; §4/§5.3 require explicit presence/absence tests on those paths |
+| "No new journal key" contradicted evidence-ledger retention; standard acceptance has two stages | §3.3/§5.4 scope the prohibition to the CLI-owned journals and name both standard-acceptance stages (observed-record construction and `sanitizeEvidence`) |
+| Over-engineering challenge: the tag duplicates HEAD/baseline binding; prefer existing identities | Retained: receipts are the durable consumer-facing evidence surface, and campaign boundary aggregates read attestations from receipts (`retainedSandboxNoteAttestations` idiom) without re-deriving from source hashes; the exact-literal rule answers the boundedness half of the challenge |
+
+No native worker/provider test request was made beyond the review worker itself. These reviews
+narrow the design; they do not establish a task-failure cause, change any historical grade, or
+authorize implementation.
