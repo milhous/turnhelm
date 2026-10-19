@@ -32,6 +32,9 @@ export type WorkerResult = Readonly<{
   // was appended to the written instruction. A mechanism attestation in the
   // same honesty class as codexHomeManaged — never a claim the worker obeyed.
   instructionNote?: string;
+  // Present iff the opt-in stall watchdog fired: decoded-frame silence met
+  // the caller's threshold and the owned shutdown ladder ended the run.
+  abortReason?: "stall";
   failureClass?: FailureClass;
   errorSha256?: string;
   // PE-1: the emission classifier's bounded, content-free projection, attached
@@ -206,6 +209,7 @@ export function executeWorker(
     output: NodeJS.WritableStream;
     diagnostics?: NodeJS.WritableStream;
     lifecycle?: LifecycleRecorder;
+    stallAbortMs?: number;
   }
 ): Promise<WorkerResult> {
   const started = performance.now();
@@ -267,6 +271,8 @@ export function executeWorker(
     let closed = false;
     let finished = false;
     let ownedShutdown = false;
+    let stallAbort = false;
+    let stallTimer: NodeJS.Timeout | undefined;
     let failureClass: FailureClass | undefined;
     let failureHash: string | undefined;
     let failureDeadline: NodeJS.Timeout | undefined;
@@ -325,6 +331,7 @@ export function executeWorker(
       // group's discharge, so the managed home — and only it — goes now.
       destroyWorkerHome(managedHome);
       clearFailureDeadline();
+      if (stallTimer !== undefined) { clearTimeout(stallTimer); stallTimer = undefined; }
       options.signal?.removeEventListener("abort", onAbort);
       // With writes still in flight the listeners stay attached (they detach
       // from the last write callback); cancellation may settle despite them.
@@ -334,7 +341,7 @@ export function executeWorker(
       let status: WorkerResult["status"];
       let error: WorkerResult["error"];
       if (failure !== undefined) { status = "failed"; error = failure; }
-      else if (cancelled) { status = "cancelled"; error = undefined; }
+      else if (cancelled || stallAbort) { status = "cancelled"; error = undefined; }
       else if (!inputDelivered) { status = "failed"; error = "stdin"; }
       else if (!completedEligible()) { status = "failed"; error = "worker"; }
       else { status = "completed"; error = undefined; }
@@ -344,10 +351,11 @@ export function executeWorker(
         durationMs: Math.round(performance.now() - started),
         progressEvents,
         usageScope: "unverified"
-      } as { code: number; status: WorkerResult["status"]; durationMs: number; progressEvents: number; usageScope: "unverified"; ownedShutdown: boolean; codexHomeManaged?: true; instructionNote?: string; usage?: WorkerUsage; error?: WorkerResult["error"]; signal?: "SIGINT" | "SIGTERM" | "SIGKILL"; failureClass?: FailureClass; errorSha256?: string; lastEventAgeMs?: number; payload?: WorkerResult["payload"]; lifecycle?: WorkerResult["lifecycle"] };
+      } as { code: number; status: WorkerResult["status"]; durationMs: number; progressEvents: number; usageScope: "unverified"; ownedShutdown: boolean; codexHomeManaged?: true; instructionNote?: string; abortReason?: "stall"; usage?: WorkerUsage; error?: WorkerResult["error"]; signal?: "SIGINT" | "SIGTERM" | "SIGKILL"; failureClass?: FailureClass; errorSha256?: string; lastEventAgeMs?: number; payload?: WorkerResult["payload"]; lifecycle?: WorkerResult["lifecycle"] };
       result.ownedShutdown = ownedShutdown;
       result.codexHomeManaged = true;
       if (noteAppended) result.instructionNote = "sandbox-semantics-v1";
+      if (stallAbort) result.abortReason = "stall";
       if (lastEventAt !== undefined) result.lastEventAgeMs = Math.round(performance.now() - lastEventAt);
       if (usage) result.usage = usage;
       if (error) result.error = error;
@@ -407,7 +415,7 @@ export function executeWorker(
     // flushed write — unless cancellation resolves the run.
     const settle = (): void => {
       if (!closed || finished || !shutdownDischarged || cancelDrainWait !== undefined) return;
-      if ((pendingWrites.message !== 0 || pendingWrites.diag !== 0) && !cancelled) return;
+      if ((pendingWrites.message !== 0 || pendingWrites.diag !== 0) && !cancelled && !stallAbort) return;
       // The never-decided catch-all emission; a decided run already emitted.
       if (emitFinalMessage()) return; // The accepted write must flush (or fail) before the run finishes.
       finish();
@@ -489,12 +497,28 @@ export function executeWorker(
     // made recordFailure a no-op. An already-delivered operator abort outranks
     // a failure registered after it (spec TS-6).
     const recordOutputFailure = (): void => {
-      if (failure !== undefined || finished || cancelled) return;
+      if (failure !== undefined || finished || cancelled || stallAbort) return;
       failure = "output";
       beginShutdown();
     };
 
     const onAbort = (): void => { cancelled = true; options.lifecycle?.record("abort"); beginShutdown(); settle(); };
+    // The opt-in stall watchdog: armed at the first decoded frame and re-armed
+    // by every later one, it fires only while the run is still undecided and
+    // silent — a caller abort or a terminal event always keeps precedence.
+    const onStallAbort = (): void => {
+      stallTimer = undefined;
+      if (finished || shutdownStarted || decided || cancelled) return;
+      stallAbort = true;
+      options.lifecycle?.record("stall-abort");
+      beginShutdown();
+      settle();
+    };
+    const armStallWatchdog = (): void => {
+      if (options.stallAbortMs === undefined || finished || shutdownStarted || decided) return;
+      if (stallTimer !== undefined) clearTimeout(stallTimer);
+      stallTimer = setTimeout(onStallAbort, options.stallAbortMs);
+    };
     const onOutputError = (): void => failSink("message");
 
     // Listener lifetime must cover our accepted bytes: while any write this
@@ -729,6 +753,7 @@ export function executeWorker(
         }
         progressEvents += 1;
         lastEventAt = performance.now();
+        armStallWatchdog();
         options.lifecycle?.record("event", event.kind === "activity"
           ? { eventKind: "activity", itemKind: event.itemKind, itemPhase: event.itemPhase,
               ...(event.itemStatus === undefined ? {} : { itemStatus: event.itemStatus }),

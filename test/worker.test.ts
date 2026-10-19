@@ -62,7 +62,7 @@ const finish = body => {
 
 const stubbornChild = `process.on('SIGTERM', function () {}); setInterval(function () {}, 500);`;
 
-type Gate = "abort-ready" | "abort-received" | "epipe-received" | "abort-then-epipe" | "abort-diag-late" | "abort-after-shutdown";
+type Gate = "abort-ready" | "abort-received" | "epipe-received" | "abort-then-epipe" | "abort-diag-late" | "abort-after-shutdown" | "abort-after-frame";
 
 type OutputMode = "stdout" | "blocker" | "abort-in-write" | "abort-late-error" | "throw" | "accepted-delay" | "accepted-error" | "accepted-stall";
 
@@ -94,6 +94,7 @@ type WorkerScenario = {
   auth?: boolean;
   schemaBytes?: string;
   poisonTmpdir?: boolean;
+  stallAbortMs?: number;
 };
 
 type Recorded = {
@@ -129,6 +130,7 @@ type Recorded = {
   lastEventAgeMs?: number;
   codexHomeManaged?: boolean;
   instructionNote?: string;
+  abortReason?: string;
 };
 
 async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ recorded: Recorded; stdout: string; stderr: string; directory: string }> {
@@ -353,6 +355,14 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
       }
       if (!gateController.signal.aborted) throw new Error("fake worker never became ready");
     };` : ""}
+    ${scenario.gate === "abort-after-frame" ? `
+    const waitFramed = async () => {
+      for (let i = 0; i < 3000 && !gateController.signal.aborted; i++) {
+        try { await access(${JSON.stringify(join(directory, "framed"))}); return; } catch { /* poll until the fake emitted its frame. */ }
+        await gateSleep(10);
+      }
+      if (!gateController.signal.aborted) throw new Error("fake worker never emitted its frame marker");
+    };` : ""}
     try {
       const running = executeWorker(decision, ${scenario.taskRepeat !== undefined ? `"x".repeat(${scenario.taskRepeat})` : JSON.stringify(scenario.task ?? "the original task")}, {
         executable: "codex",
@@ -362,10 +372,12 @@ async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ re
         env: process.env,
         signal: controller.signal,
         output,
-        ...(diagSink ? { diagnostics: diagSink } : {})
+        ...(diagSink ? { diagnostics: diagSink } : {}),
+        ${scenario.stallAbortMs !== undefined ? `stallAbortMs: ${scenario.stallAbortMs},` : ""}
       }).finally(stopObservation);
       ${scenario.gate && scenario.gate !== "abort-after-shutdown" ? "await Promise.race([running, (async () => {" : ""}
       ${scenario.gate === "abort-ready" ? "await waitReady(); if (!gateController.signal.aborted) controller.abort();" : ""}
+      ${scenario.gate === "abort-after-frame" ? "await waitFramed(); if (!gateController.signal.aborted) controller.abort();" : ""}
       ${scenario.gate === "abort-received" ? "while (received < 1 && !gateController.signal.aborted) await gateSleep(10); if (!gateController.signal.aborted) controller.abort();" : ""}
       ${scenario.gate === "abort-diag-late" ? `
       while (diagWrites < 1 && !gateController.signal.aborted) await gateSleep(10);
@@ -795,6 +807,100 @@ finish(() => {
   assert.equal(env.PATH, directory);
   assert.ok(stdout.includes("worker result\n"));
   assert.equal(stderr, "");
+});
+
+test("the stall watchdog aborts a silent worker after the first decoded frame", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    stallAbortMs: 300,
+    script: `
+finish(() => {
+  emit({ type: "item.started", item: { type: "reasoning" } });
+  setInterval(() => {}, 500);
+});
+`
+  });
+  assert.equal(recorded.status, "cancelled");
+  assert.equal(recorded.abortReason, "stall");
+  assert.equal(recorded.ownedShutdown, true);
+  assert.equal(recorded.progressEvents, 1);
+  assert.ok(recorded.lastEventAgeMs !== undefined && recorded.lastEventAgeMs >= 300,
+    "the stall age is at least the threshold, saw " + String(recorded.lastEventAgeMs));
+  assert.equal(recorded.signal, "SIGTERM");
+  assert.equal(recorded.code, 143);
+});
+
+test("a worker with zero decoded frames never stall-aborts", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    stallAbortMs: 300,
+    gate: "abort-ready",
+    script: `
+finish(() => {
+  setTimeout(() => { ready(); setInterval(() => {}, 500); }, 700);
+});
+`
+  });
+  assert.equal(recorded.status, "cancelled");
+  assert.equal(recorded.abortReason, undefined, "no decoded frame is unknown evidence, never stall evidence");
+  assert.equal(recorded.ownedShutdown, true);
+});
+
+test("a later decoded frame extends the stall deadline", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    stallAbortMs: 500,
+    script: `
+finish(() => {
+  // Every gap stays under the 500ms threshold while the cumulative run
+  // crosses it twice over — only a per-frame re-arm survives this.
+  let frames = 0;
+  const tick = () => {
+    frames += 1;
+    emit({ type: "item.updated", item: { type: "reasoning", status: "in_progress" } });
+    if (frames < 4) setTimeout(tick, 400);
+    else {
+      emit({ type: "turn.completed", usage: { input_tokens: 3 } });
+      process.exit(0);
+    }
+  };
+  setTimeout(tick, 400);
+});
+`
+  });
+  assert.equal(recorded.status, "completed", "each sub-threshold gap re-arms the deadline");
+  assert.equal(recorded.abortReason, undefined);
+  assert.equal(recorded.progressEvents, 5);
+});
+
+test("the watchdog never fires after the terminal event decided the run", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    stallAbortMs: 300,
+    script: `
+finish(() => {
+  emit({ type: "item.completed", item: { type: "agent_message", text: "done" } });
+  emit({ type: "turn.completed", usage: { input_tokens: 3 } });
+  setInterval(() => {}, 500);
+});
+`
+  });
+  assert.equal(recorded.status, "completed");
+  assert.equal(recorded.abortReason, undefined, "a decided run is not stall-abortable");
+  assert.equal(recorded.ownedShutdown, true);
+});
+
+test("a caller signal during armed silence outranks the watchdog", { timeout: 30_000 }, async t => {
+  const { recorded } = await runWorker(t, {
+    stallAbortMs: 5000,
+    gate: "abort-after-frame",
+    script: `
+finish(() => {
+  emit({ type: "item.started", item: { type: "reasoning" } });
+  fs.writeFileSync(path.join(here, "framed"), "1");
+  setInterval(() => {}, 500);
+});
+`
+  });
+  assert.equal(recorded.status, "cancelled");
+  assert.equal(recorded.abortReason, undefined, "the caller's abort records no stall reason");
+  assert.equal(recorded.ownedShutdown, true);
 });
 
 test("worker executes under a fresh managed CODEX_HOME holding only staged contents", { timeout: 30_000 }, async t => {
@@ -2746,6 +2852,35 @@ test("the lifecycle journal outlives an outer kill before settlement", { timeout
   assert.ok(kinds.includes("spawned"), "spawned is journaled before the kill");
   assert.ok(kinds.includes("event"), "the decoded event is journaled for this CLI pid");
   assert.ok(!kinds.includes("settle"), "a killed run journals no settlement");
+});
+
+test("the stall-abort flag drives the owned ladder and lands on the receipt timeline", { timeout: 30_000 }, async t => {
+  const { root, spawnCli } = await stageLifecycleCli(t, "stall");
+  const child = spawnCli(["--lifecycle", "--stall-abort-ms", "5000"]);
+  child.stdin?.end();
+  const run = await collectRun(child);
+  // The ladder's TERM ends the stalled fake; workerExit keeps the observed 143.
+  assert.equal(run.code, 143);
+  const worker = receiptOf(run.stderr).worker as Record<string, unknown> as {
+    status: string; abortReason?: string; ownedShutdown: boolean; signal?: string; progressEvents: number;
+    lifecycle?: { events: { kind: string }[]; overflow: boolean };
+  };
+  assert.equal(worker.status, "cancelled");
+  assert.equal(worker.abortReason, "stall");
+  assert.equal(worker.ownedShutdown, true);
+  assert.equal(worker.signal, "SIGTERM");
+  assert.equal(worker.progressEvents, 1);
+  const kinds = (worker.lifecycle?.events ?? []).map(event => event.kind);
+  assert.ok(kinds.includes("stall-abort"), "the stall is on the timeline");
+  assert.ok(kinds.indexOf("stall-abort") < kinds.indexOf("shutdown-term"),
+    "the stall record precedes the ladder");
+  assert.equal(kinds.at(-1), "settle");
+  assert.ok(!kinds.includes("abort"), "no caller abort happened");
+  // The stalled fake dies by the ladder; clean up any straggler defensively.
+  const workerPid = Number(await readFile(join(root, "stalled-worker.pid"), "utf8").catch(() => ""));
+  if (Number.isInteger(workerPid) && workerPid > 0) {
+    try { process.kill(workerPid, "SIGKILL"); } catch { /* the ladder already took it */ }
+  }
 });
 
 test("an event flood trips the overflow marker without losing the settlement tail", { timeout: 30_000 }, async t => {

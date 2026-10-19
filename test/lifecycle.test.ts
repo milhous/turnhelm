@@ -45,3 +45,17 @@ test("ring keeps the head, the tail, and an overflow marker", () => {
   assert.equal(exact.snapshot().overflow, false, "exactly 64 events is not overflow");
   assert.equal(exact.snapshot().events.length, LIFECYCLE_CAPACITY);
 });
+
+test("a stall-abort event rides the ring and the append sink like any lifecycle kind", () => {
+  const persisted: LifecycleEvent[] = [];
+  const recorder = new LifecycleRecorder(event => persisted.push(event));
+  recorder.record("spawned", { pid: 4242 });
+  recorder.record("event", { eventKind: "item.started" });
+  recorder.record("stall-abort");
+  recorder.record("shutdown-term");
+  recorder.record("settle", { status: "cancelled" });
+  const snapshot = recorder.snapshot();
+  assert.deepEqual(snapshot.events.map(event => event.kind),
+    ["spawned", "event", "stall-abort", "shutdown-term", "settle"]);
+  assert.deepEqual(persisted.at(-1), snapshot.events.at(-1), "the sink sees the settled tail");
+});

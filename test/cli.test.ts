@@ -831,6 +831,37 @@ test("a task piped on stdin reaches the worker byte-exact with the fixed note", 
   assert.equal(worker.instructionNote, "sandbox-semantics-v1");
 });
 
+test("the stall-abort flag validates strictly", async t => {
+  const f = await fixture(t);
+  for (const args of [
+    ["--stall-abort-ms"],                                  // value is the task: non-integer
+    ["--stall-abort-ms="],                                 // empty =-form value
+    ["--stall-abort-ms", "abc"],                           // non-integer
+    ["--stall-abort-ms", "4999"],                          // below range
+    ["--stall-abort-ms", "3600001"],                       // above range
+    ["--stall-abort-ms", "5000", "--stall-abort-ms", "6000"], // duplicate
+    ["--stall-abort-ms", "5000.5"]                         // non-integer
+  ]) {
+    const result = await f.run(["run", ...args, TASK], { input: "" });
+    assert.equal(result.code, 2, JSON.stringify(args) + " must be a usage error");
+    assert.equal(f.requests.length, 0);
+  }
+  // A trailing flag with nothing after it is the missing-value form.
+  const trailing = await f.run(["run", TASK, "--stall-abort-ms"], { input: "" });
+  assert.equal(trailing.code, 2);
+});
+
+test("a valid stall-abort value arms without firing on a prompt worker", async t => {
+  const f = await fixture(t);
+  const result = await f.run(["run", "--stall-abort-ms", "5000", TASK], { input: "" });
+  assert.equal(result.code, 0);
+  const worker = parseReceipt(result.stderr).worker as { status: string; abortReason?: string };
+  assert.equal(worker.status, "completed");
+  assert.equal(worker.abortReason, undefined);
+  const eqForm = await f.run(["run", "--stall-abort-ms=5000", TASK], { input: "" });
+  assert.equal(eqForm.code, 0);
+});
+
 test("empty closed stdin without a positional task is a usage error", async t => {
   const f = await fixture(t);
   const result = await f.run(["run"], { input: "" });

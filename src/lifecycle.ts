@@ -6,7 +6,7 @@
 // settled; the settle event is recorded last and always survives in the tail.
 
 export type LifecycleKind = "spawned" | "stdin-delivered" | "event" | "completion" | "failure"
-  | "abort" | "shutdown-term" | "shutdown-kill" | "shutdown-discharged" | "stdout-end" | "close" | "settle";
+  | "abort" | "stall-abort" | "shutdown-term" | "shutdown-kill" | "shutdown-discharged" | "stdout-end" | "close" | "settle";
 
 import type { WorkerActivity } from "./codex-events.js";
 
