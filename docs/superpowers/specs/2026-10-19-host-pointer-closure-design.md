@@ -75,10 +75,11 @@ KUBECONFIG, NPM_CONFIG_GLOBALCONFIG, NPM_CONFIG_USERCONFIG, SSH_AUTH_SOCK, XDG_C
 XDG_CONFIG_DIRS, XDG_CONFIG_HOME, XDG_DATA_DIRS, XDG_DATA_HOME, XDG_RUNTIME_DIR, XDG_STATE_HOME
 ```
 
-One case rule: `NPM_CONFIG_USERCONFIG` matches case-insensitively (`npm_config_userconfig`,
-`Npm_Config_UserConfig`, …), because npm documents case-insensitive environment configuration and
-lowercase forms work inside worker scripts. No other key has a case rule — every other entry is
-scrubbed under its exact frozen spelling only.
+One case rule: the two npm keys — `NPM_CONFIG_USERCONFIG` and `NPM_CONFIG_GLOBALCONFIG` — match
+their key names case-insensitively (`npm_config_userconfig`, `Npm_Config_GlobalConfig`, …), because
+npm documents case-insensitive environment configuration for both settings and lowercase forms work
+inside worker scripts. No other key has a case rule — every other entry is scrubbed under its exact
+frozen spelling only.
 
 Admission principle, stated once in the code comment: a key is on the list iff its value is a host
 **data/config/credential discovery pointer** (it redirects a tool's default file discovery away
@@ -106,19 +107,23 @@ boundary itself remain documented residuals — the sandbox owns those, not the 
 
 ### 3.2 Boundary-generation attestation
 
-The worker result gains `envBoundary: "host-pointers-v1"`, attached on exactly the result paths
-`instructionNote` is attached on — the executed-worker construction — and absent wherever
-`instructionNote` is absent: a not-started worker (routing failure), a pre-execution abort, a
-managed-home failure, and a spawn failure before instruction delivery carry neither field. This
-parity is the presence rule; the existing `noteAppended` path decides both. The value is validated
-as an exact whole-string literal — the current generation `host-pointers-v1` and nothing else, no
-shape pattern — because a shape like `^host-pointers-v\d+$` is unbounded in length and, in
-JavaScript, `$` also accepts a trailing line terminator. A generation change (list edit) is a new
-literal and a new test, never a silent edit — the same discipline as `sandbox-semantics-v1`, with
-a stricter acceptance rule. The attestation is mechanism evidence in the
-`codexHomeManaged`/`instructionNote` honesty class, never a claim that a descendant failed to
-re-import anything; if the tag is absent, the scrub generation is not attested and nothing is
-inferred from absence.
+The worker result gains `envBoundary: "host-pointers-v1"`, attached under **exactly the same
+conditional as `instructionNote`** — the single `noteAppended` site on the shared result
+construction, both fields assigned together. The presence rule is that co-location, with its
+observable consequences stated honestly: the tag is present on completed, failed, and cancelled
+runs whose instruction write began — including an **asynchronous** spawn failure (for example
+ENOENT with pipes present), where `noteAppended` is already true — and absent on a not-started
+worker (routing failure), a pre-execution abort, a managed-home failure, and a **synchronous**
+spawn fault, which return before the shared construction. The tag is therefore an attestation of
+the instruction-delivery path having started under this boundary generation, not of spawn success
+— the same honesty class `instructionNote` already has. The value is validated as an exact
+whole-string literal — the current generation `host-pointers-v1` and nothing else, no shape
+pattern — because a shape like `^host-pointers-v\d+$` is unbounded in length and, in JavaScript,
+`$` also accepts a trailing line terminator. A generation change (list edit) is a new literal and
+a new test, never a silent edit — the same discipline as `sandbox-semantics-v1`, with a stricter
+acceptance rule. The attestation is mechanism evidence in the `codexHomeManaged`/`instructionNote`
+honesty class, never a claim that a descendant failed to re-import anything; if the tag is absent,
+the scrub generation is not attested and nothing is inferred from absence.
 
 ### 3.3 Evidence projections
 
@@ -136,10 +141,11 @@ field as part of their existing record shapes.
 
 ### 3.4 Privacy, performance, and interpretation
 
-The scrub is fifteen own-property deletions on an object built once per spawn — constant cost, no
-allocation beyond the existing copy, no new I/O, dependency, persistent state, or network
-operation. No environment value is ever logged, hashed, or retained: the receipt carries the
-generation tag only.
+The scrub is twenty-one exact-name deletions plus a case-insensitive name check for the two npm
+keys, applied to the environment copy `workerEnvironment` already builds once per spawn — one
+bounded pass whose cost is linear in the key count of that copy, adding no second copy, no I/O,
+no dependency, no persistent state, and no network operation. No environment value is ever logged,
+hashed, or retained: the receipt carries the generation tag only.
 
 Interpretation fences: the scrub changes what the worker environment contains, not what a
 descendant does; the attestation is mechanism evidence, not obedience; closing env pointers does
@@ -155,14 +161,14 @@ cover all connected consumers in one contract:
 
 | Surface | Required responsibility |
 | --- | --- |
-| `src/codex.ts` | The frozen §3.1 list + principle comment; deletions in `workerEnvironment`; `envBoundary` on `WorkerResult` set iff the scrub ran |
+| `src/codex.ts` | The frozen §3.1 list + principle comment; deletions in `workerEnvironment`; `envBoundary` assigned beside `instructionNote` under the same `noteAppended` conditional |
 | `src/cli.ts` | `envBoundary` wired through the explicit receipt construction; nothing else |
-| `test/worker.test.ts` | Hostile-pointer fixtures: every listed key exported by a hostile host is absent in the worker env and in a surviving descendant, with lowercase-only and mixed-case `npm_config_userconfig` fixtures alongside the uppercase form; unlisted variables (including `PATH`, `SHELL`, `TMPDIR`, `OPENAI_API_KEY`, `NODE_OPTIONS`, an unlisted `XDG_`-suffixed sentinel, and an unlisted `AWS_`-prefixed key) still pass through; parent process env unchanged; the existing XDG-passthrough assertion is updated, not deleted; `subprocessEnvironment`/preflight paths unchanged |
-| `test/cli.test.ts` | The receipt carries `envBoundary: "host-pointers-v1"` on every executed-worker path, and carries neither `envBoundary` nor `instructionNote` on the not-started and pre-execution-failure paths |
+| `test/worker.test.ts` | Hostile-pointer fixtures: every listed key exported by a hostile host is absent in the worker env and in a surviving descendant, with lowercase, mixed-case, and simultaneous case-variant fixtures for both npm keys; unlisted variables (including `PATH`, `SHELL`, `TMPDIR`, `OPENAI_API_KEY`, `NODE_OPTIONS`, an unlisted `XDG_`-suffixed sentinel, and an unlisted `AWS_`-prefixed key) still pass through; parent process env unchanged; the existing XDG-passthrough assertion is updated, not deleted; `subprocessEnvironment`/preflight paths unchanged |
+| `test/cli.test.ts` | The receipt carries `envBoundary: "host-pointers-v1"` on every executed-worker path and on the asynchronous spawn-failure path, and carries neither `envBoundary` nor `instructionNote` on the not-started, pre-execution-abort, and synchronous-spawn-fault paths |
 | `test/custom-round.ts` | `projectWorkerReceipt` whitelist admits the tag (exact-literal validated, drops non-matching values alone) |
 | `test/live-acceptance.ts` | Observed record gains the optional `envBoundary` field for completed, failed, and cancelled workers alike, carried through both the observed-record construction and `sanitizeEvidence` |
 | `test/custom-round.test.ts`, `test/live-acceptance.test.ts`, `test/codex.test.ts` | Whitelist round-trips including non-matching, oversized, and trailing-newline tag values; projection drop rules; early-path presence parity with `instructionNote` |
-| `README.md`, `.agents/skills/turnhelm-routing/SKILL.md` (+ `.claude` mirror) | Boundary passages rewritten: the override-variable residual list shrinks to system files/hooks/override-file/absolute-read residuals; the consequence class (in-task inputs) stated; tag named |
+| `README.md`, `.agents/skills/turnhelm-routing/SKILL.md` (+ `.claude` mirror) | Boundary passages rewritten: the listed host-pointer variables are scrubbed (list and tag named), and the residual list **retains unlisted environment pointers** (e.g. `AWS_CA_BUNDLE`) beside system files, hooks, `AGENTS.override.md`, and absolute reads — the docs must not imply exhaustive environment-pointer closure; the consequence class (in-task inputs) stated |
 | `test/package.test.ts`, `test/init.test.ts` | Update only packaged-documentation assertions genuinely changed |
 
 Use synthetic fixtures inside existing test helpers. No compatibility adapter, migration, config
@@ -177,9 +183,9 @@ All criteria are offline; fake workers make no real provider request.
 1. **Scrub contract:** for every key of the frozen list, a hostile host exporting that key (with a
    plausible value, e.g. a planted socket path or config path) produces a worker environment where
    the key is absent — checked both on the built env object and through a real spawned worker that
-   dumps its env; `NPM_CONFIG_USERCONFIG` is additionally tested in lowercase-only and mixed-case
-   forms (both absent); a surviving descendant re-sampling after leader exit sees the same
-   absence.
+   dumps its env; both npm keys are additionally tested in lowercase-only, mixed-case, and
+   simultaneous variants (all absent); a surviving descendant re-sampling after leader exit sees
+   the same absence.
 2. **Precision:** unlisted variables keep passing through exactly as today — including `PATH`,
    `SHELL`, `TMPDIR`, `OPENAI_API_KEY`, `NODE_OPTIONS`, an unlisted `XDG_`-suffixed sentinel
    (e.g. a hypothetical `XDG_SENTINEL`), an unlisted `AWS_`-prefixed key, and a case variant of a
@@ -188,13 +194,14 @@ All criteria are offline; fake workers make no real provider request.
    `CODEX_HOME`, `TURNHELM_MANAGED_CHILD`) and the existing `subprocessEnvironment` strips behave
    identically to the baseline.
 3. **Attestation:** the receipt carries `envBoundary: "host-pointers-v1"` on completed, failed,
-   and cancelled workers alike, and carries neither `envBoundary` nor `instructionNote` on the
-   not-started, pre-execution-abort, managed-home-failure, and spawn-failure paths (presence
-   parity with `instructionNote`); custom-round retains the tag through `projectWorkerReceipt`
-   and drops non-matching values — oversized and trailing-newline forms included — alone;
-   standard acceptance retains it on the observed record for every executed worker through both
-   the observed-record construction and `sanitizeEvidence`; unselected keys keep being ignored
-   per each projector's existing rules.
+   and cancelled workers alike — and, matching `instructionNote`'s existing behavior, on an
+   **asynchronous** spawn failure (ENOENT with pipes present), while carrying neither field on
+   the not-started, pre-execution-abort, managed-home-failure, and **synchronous**-spawn-fault
+   paths; both spawn-failure flavors are pinned explicitly; custom-round retains the tag through
+   `projectWorkerReceipt` and drops non-matching values — oversized and trailing-newline forms
+   included — alone; standard acceptance retains it on the observed record for every executed
+   worker through both the observed-record construction and `sanitizeEvidence`; unselected keys
+   keep being ignored per each projector's existing rules.
 4. **No scope creep:** `subprocessEnvironment` output is unchanged (its `preflight` callers
    unaffected); no new config field, CLI flag, or manifest axis exists, and no new key enters the
    CLI-owned journals (`.turnhelm/routes.jsonl`, `.turnhelm/lifecycle.jsonl`); `git grep` finds
@@ -246,3 +253,16 @@ proving isolation". All five findings were verified against the code and accepte
 No native worker/provider test request was made beyond the review worker itself. These reviews
 narrow the design; they do not establish a task-failure cause, change any historical grade, or
 authorize implementation.
+
+Second-round review against the revised spec. Verdict: **PROBLEMS — 2 Important, 2 Minor**; the
+notes confirmed the round-1 dispositions (casing for `USERCONFIG`, the six added keys, the
+exact-literal tag, journal ownership, both standard-acceptance stages) and found no
+over-engineering in the attestation. All four findings were verified against the code and
+accepted:
+
+| Review finding | Disposition in this revision |
+| --- | --- |
+| npm applies case-insensitive environment configuration to both settings; `npm_config_globalconfig` survived the USERCONFIG-only case rule | §3.1 extends the case rule to both npm keys; §4/§5.1 test lowercase, mixed-case, and simultaneous variants of both |
+| `noteAppended` becomes true when the stdio pipes exist, before asynchronous spawn success is known — an ENOENT spawn still attaches `instructionNote` at settlement, so "absent on spawn failures" was wrong for the async flavor (reviewer reproduced this in Node) | §3.2 redefines presence as co-location with `instructionNote` under the single `noteAppended` conditional and states both consequences honestly: present on an asynchronous spawn failure, absent on a synchronous spawn fault; §4/§5.3 pin both flavors explicitly |
+| §3.4 still said "fifteen own-property deletions … no allocation beyond the existing copy" after the list grew to 21 names plus case matching | §3.4 rewritten: twenty-one exact-name deletions plus the bounded npm case check, one pass linear in the copied key count, no second copy |
+| The README/skill row implied exhaustive environment-pointer closure, contradicting §3.1's retained unlisted-pointer residual (`AWS_CA_BUNDLE`) | §4's documentation row now requires the boundary passages to retain the unlisted-pointer residual explicitly beside system files, hooks, `AGENTS.override.md`, and absolute reads |
