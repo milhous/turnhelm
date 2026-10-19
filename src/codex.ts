@@ -89,8 +89,43 @@ export function subprocessEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv
   return copy;
 }
 
+// Host-pointer scrub (boundary generation host-pointers-v1): a key belongs
+// here iff its value is a host data/config/credential discovery pointer (it
+// redirects a tool's default file discovery away from the managed home — the
+// XDG_*, GIT_CONFIG*, NPM_CONFIG_*, DOCKER_*, AWS_* file keys, KUBECONFIG,
+// including directory-search forms and indirect selectors like DOCKER_CONTEXT)
+// or an action-capable pointer (its value names a socket or endpoint whose use
+// authenticates or controls host resources: SSH_AUTH_SOCK, DOCKER_HOST).
+// Program pointers (PATH, SHELL, …) and OPENAI_API_KEY are deliberately not
+// here; unlisted pointers (e.g. AWS_CA_BUNDLE) remain documented residuals.
+// The principle guides admission; this frozen list is the contract — adding
+// or removing a key is a source change that bumps the envBoundary tag.
+const HOST_POINTER_KEYS: readonly string[] = [
+  "AWS_CONFIG_FILE",
+  "AWS_SHARED_CREDENTIALS_FILE",
+  "AWS_WEB_IDENTITY_TOKEN_FILE",
+  "DOCKER_CERT_PATH",
+  "DOCKER_CONFIG",
+  "DOCKER_CONTEXT",
+  "DOCKER_HOST",
+  "GIT_CONFIG",
+  "GIT_CONFIG_GLOBAL",
+  "GIT_CONFIG_SYSTEM",
+  "KUBECONFIG",
+  "NPM_CONFIG_GLOBALCONFIG",
+  "NPM_CONFIG_USERCONFIG",
+  "SSH_AUTH_SOCK",
+  "XDG_CACHE_HOME",
+  "XDG_CONFIG_DIRS",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_DIRS",
+  "XDG_DATA_HOME",
+  "XDG_RUNTIME_DIR",
+  "XDG_STATE_HOME"
+];
+
 export function workerEnvironment(env: NodeJS.ProcessEnv, homeDir: string): NodeJS.ProcessEnv {
-  return {
+  const copy: NodeJS.ProcessEnv = {
     ...subprocessEnvironment(env),
     TURNHELM_MANAGED_CHILD: "1",
     // WB-2: the worker's CODEX_HOME is this run's managed home; whatever the
@@ -98,8 +133,7 @@ export function workerEnvironment(env: NodeJS.ProcessEnv, homeDir: string): Node
     CODEX_HOME: homeDir,
     // HOME-derived discovery (startup files, $HOME/.agents, dotfiles) resolves
     // inside the managed home and dies with the run. Scoped closure only:
-    // explicit override variables (XDG_*, GIT_CONFIG_GLOBAL, …) and system
-    // files still pass through as documented residuals.
+    // system files outside any home remain documented residuals.
     HOME: homeDir,
     // zsh sources $ZDOTDIR/.zshenv even non-interactively, falling back to HOME,
     // which let host startup files re-export stripped keys into worker
@@ -108,6 +142,14 @@ export function workerEnvironment(env: NodeJS.ProcessEnv, homeDir: string): Node
     // ZDOTDIR must not win over the redirect.
     ZDOTDIR: homeDir
   };
+  for (const key of HOST_POINTER_KEYS) delete copy[key];
+  // npm documents case-insensitive environment configuration for both npmrc
+  // settings, so the two npm keys are the only ones with a case rule.
+  for (const key of Object.keys(copy)) {
+    const lowered = key.toLowerCase();
+    if (lowered === "npm_config_userconfig" || lowered === "npm_config_globalconfig") delete copy[key];
+  }
+  return copy;
 }
 
 // WB-2: the parent-derived credential source — the parent's CODEX_HOME when
