@@ -518,8 +518,10 @@ export function executeWorker(
     };
     const armStallWatchdog = (): void => {
       if (options.stallAbortMs === undefined || finished || shutdownStarted || decided || stickyFailed) return;
-      if (stallTimer !== undefined) clearTimeout(stallTimer);
-      stallTimer = setTimeout(onStallAbort, options.stallAbortMs);
+      // One timer object for the whole run (spec §3.5): a pending timer
+      // re-arms in place, a fired one (undefined) is created fresh.
+      if (stallTimer === undefined) stallTimer = setTimeout(onStallAbort, options.stallAbortMs);
+      else stallTimer.refresh();
     };
     const onOutputError = (): void => failSink("message");
 
