@@ -279,6 +279,9 @@ const runCommand = async (root: string, write: boolean, positionalTask: string |
       if (worker.lastEventAgeMs !== undefined) workerReceipt.lastEventAgeMs = worker.lastEventAgeMs;
       // WB-4: the managed-home attestation rides executed-worker receipts only.
       if (worker.codexHomeManaged === true) workerReceipt.codexHomeManaged = true;
+      // The fixed note's version tag rides the same executed-worker paths;
+      // absent means no note was appended (spec §3.2).
+      if (worker.instructionNote !== undefined) workerReceipt.instructionNote = worker.instructionNote;
       if (worker.signal !== undefined) workerReceipt.signal = worker.signal;
       if (worker.failureClass !== undefined) workerReceipt.failureClass = worker.failureClass;
       if (worker.errorSha256 !== undefined) workerReceipt.errorSha256 = worker.errorSha256;

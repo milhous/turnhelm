@@ -28,6 +28,10 @@ export type WorkerResult = Readonly<{
   // per-run managed CODEX_HOME destroyed at settlement. An attestation of that
   // mechanism, never a universal instruction-isolation claim.
   codexHomeManaged?: true;
+  // The version tag of the fixed sandbox-semantics note, present iff the note
+  // was appended to the written instruction. A mechanism attestation in the
+  // same honesty class as codexHomeManaged — never a claim the worker obeyed.
+  instructionNote?: string;
   failureClass?: FailureClass;
   errorSha256?: string;
   // PE-1: the emission classifier's bounded, content-free projection, attached
@@ -40,6 +44,14 @@ export type WorkerResult = Readonly<{
   // milestones only; thread correlation is deliberately absent.
   lifecycle?: Readonly<{ events: readonly LifecycleEvent[]; overflow: boolean }>;
 }>;
+
+// The fixed runner note appended to every worker instruction after validation:
+// task + "\n\n" + this note. Frozen wording (spec §3.2, version tag
+// sandbox-semantics-v1) — a change is a new version tag, never a silent edit.
+// It claims only what the runner controls and always yields to read
+// restrictions the task itself states. The classifier and routes.jsonl still
+// see the bare task; receipts carry the tag, never this prose.
+export const SANDBOX_SEMANTICS_NOTE = "Sandbox semantics (fixed runner note, not from the requester): a read-only sandbox denies writes, not reads — read-only mode itself never prohibits reading. A workspace-write sandbox additionally permits writes inside the workspace. Attempt to read the files the task requires as inputs, using your available tools, before answering — always respecting any read restrictions the task itself states. Distinguish an actually failed read attempt from a tool you do not have, and report a read as denied only when a real read attempt failed.";
 
 export function buildWorkerArgs(decision: TaskDecision, write: boolean, schemaPath?: string): string[] {
   return ["exec", "--ephemeral", "--json",
@@ -249,6 +261,7 @@ export function executeWorker(
     let lastEventAt: number | undefined;
     let usage: WorkerUsage | undefined;
     let inputDelivered = false;
+    let noteAppended = false;
     let childCode: number | null = null;
     let childSignal: NodeJS.Signals | null = null;
     let closed = false;
@@ -331,9 +344,10 @@ export function executeWorker(
         durationMs: Math.round(performance.now() - started),
         progressEvents,
         usageScope: "unverified"
-      } as { code: number; status: WorkerResult["status"]; durationMs: number; progressEvents: number; usageScope: "unverified"; ownedShutdown: boolean; codexHomeManaged?: true; usage?: WorkerUsage; error?: WorkerResult["error"]; signal?: "SIGINT" | "SIGTERM" | "SIGKILL"; failureClass?: FailureClass; errorSha256?: string; lastEventAgeMs?: number; payload?: WorkerResult["payload"]; lifecycle?: WorkerResult["lifecycle"] };
+      } as { code: number; status: WorkerResult["status"]; durationMs: number; progressEvents: number; usageScope: "unverified"; ownedShutdown: boolean; codexHomeManaged?: true; instructionNote?: string; usage?: WorkerUsage; error?: WorkerResult["error"]; signal?: "SIGINT" | "SIGTERM" | "SIGKILL"; failureClass?: FailureClass; errorSha256?: string; lastEventAgeMs?: number; payload?: WorkerResult["payload"]; lifecycle?: WorkerResult["lifecycle"] };
       result.ownedShutdown = ownedShutdown;
       result.codexHomeManaged = true;
+      if (noteAppended) result.instructionNote = "sandbox-semantics-v1";
       if (lastEventAt !== undefined) result.lastEventAgeMs = Math.round(performance.now() - lastEventAt);
       if (usage) result.usage = usage;
       if (error) result.error = error;
@@ -733,7 +747,11 @@ export function executeWorker(
       recordFailure("spawn");
     } else {
       stdin.on("error", () => { recordFailure("stdin"); });
-      stdin.end(task, (error?: Error | null) => { if (!error) { inputDelivered = true; options.lifecycle?.record("stdin-delivered"); tryDecide(); } });
+      // The fixed note joins the instruction here, after validation — the
+      // classifier and journal saw the bare task above. noteAppended is the
+      // append fact; delivery success stays inputDelivered's separate story.
+      noteAppended = true;
+      stdin.end(task + "\n\n" + SANDBOX_SEMANTICS_NOTE, (error?: Error | null) => { if (!error) { inputDelivered = true; options.lifecycle?.record("stdin-delivered"); tryDecide(); } });
       stderr.on("error", () => { /* Drained and discarded; never stalls stdout. */ });
       stderr.resume();
       stdout.on("data", (chunk: Buffer) => {

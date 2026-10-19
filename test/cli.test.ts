@@ -1,7 +1,9 @@
+import { SANDBOX_SEMANTICS_NOTE } from "../src/codex.js";
 import { executableFixture } from "./executable-fixture.js";
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -464,7 +466,13 @@ test("run routes once, executes one read-only worker, and emits one accurate rec
   assert.deepEqual(records.argv, ["exec", "--ephemeral", "--json", "--ignore-user-config", "--ignore-rules", "--sandbox", "read-only",
     "--config", "agents.enabled=false", "--model", "gpt-6.1-sol", "--config", 'model_reasoning_effort="medium"', "-"]);
   assert.equal(records.cwd, realpathSync(f.root));
-  assert.equal(records.task, TASK);
+  // The worker instruction is byte-exact task + fixed note (argument transport).
+  assert.equal(records.task, TASK + "\n\n" + SANDBOX_SEMANTICS_NOTE);
+  // The journal's task identity still describes the bare consumer task.
+  const journal = JSON.parse(await readFile(join(f.root, ".turnhelm", "routes.jsonl"), "utf8")) as
+    { taskSha256: string; taskBytes: number };
+  assert.equal(journal.taskSha256, createHash("sha256").update(TASK).digest("hex"));
+  assert.equal(journal.taskBytes, Buffer.byteLength(TASK));
   for (const key of ["LAYA_API_KEY", "TYPESAFE_API_KEY", "TURNHELM_CONFIG", "TURNHELM_ALLOW_HOSTED_JEV"]) {
     assert.equal(key in records.env, false, key + " must be stripped from the worker");
   }
@@ -486,7 +494,7 @@ test("run routes once, executes one read-only worker, and emits one accurate rec
   assert.deepEqual(routing.requestCounts, { laya: 1, jev: 0 });
   assert.deepEqual(receipt.selection, { backend: "laya", profileId: "balanced", model: "gpt-6.1-sol", effort: "medium" });
   const worker = receipt.worker as { status: string; code: number; durationMs: number; usage?: Record<string, number>;
-    payload?: { mode: string; trailerBytes?: number } };
+    payload?: { mode: string; trailerBytes?: number }; instructionNote?: string };
   assert.equal(worker.status, "completed");
   // The terminal event starts the owned ladder; the fake's voluntary exit
   // races the TERM, and the observed code is never a status input (TS-8).
@@ -494,15 +502,19 @@ test("run routes once, executes one read-only worker, and emits one accurate rec
   assert.equal(typeof worker.durationMs, "number");
   assert.deepEqual(worker.usage, { input_tokens: 11, output_tokens: 7 });
   assert.deepEqual(worker.payload, { mode: "unstructured" });
+  // The receipt carries the note's version tag, never its prose.
+  assert.equal(worker.instructionNote, "sandbox-semantics-v1");
   // WB-4: the executed-worker receipt key set, with the managed-home
   // attestation, pinned exactly — modulo the voluntary-exit/TERM race that
   // conditionally adds "signal" (the code pin above allows both outcomes).
   assert.deepEqual(Object.keys(receipt.worker as object).sort().filter(key => key !== "signal"),
-    ["code", "codexHomeManaged", "durationMs",
+    ["code", "codexHomeManaged", "durationMs", "instructionNote",
       "lastEventAgeMs", "ownedShutdown", "payload", "progressEvents", "status", "usage"]);
   assert.equal(receipt.classifierUsage, "unreported");
   assert.equal(receipt.wholeRunUsageScope, "unverified");
   assert.equal(JSON.stringify(receipt).includes(TASK), false, "the receipt never carries task text");
+  assert.equal(JSON.stringify(receipt).includes("Sandbox semantics"), false,
+    "the receipt carries the tag, never the note prose");
   assert.equal(records.runs, 1);
 });
 
@@ -783,7 +795,7 @@ test("-- permits a single option-like task token", async t => {
   const f = await fixture(t);
   const result = await f.run(["run", "--", "--write"], { input: "" });
   assert.equal(result.code, 0);
-  assert.equal((await workerRecords(f)).task, "--write");
+  assert.equal((await workerRecords(f)).task, "--write\n\n" + SANDBOX_SEMANTICS_NOTE);
 });
 
 for (const args of [
@@ -804,6 +816,19 @@ test("nonempty piped input plus a positional task is a usage error", async t => 
   const result = await f.run(["run", TASK], { input: "Piped second task." });
   assert.equal(result.code, 2);
   assert.equal(f.requests.length, 0);
+});
+
+test("a task piped on stdin reaches the worker byte-exact with the fixed note", async t => {
+  const f = await fixture(t);
+  const result = await f.run(["run"], { input: TASK });
+  assert.equal(result.code, 0);
+  // Stdin transport: the worker still receives task + fixed note, and the
+  // classifier alone saw the bare task.
+  assert.equal(f.requests.length, 1);
+  assert.equal((JSON.parse(f.requests[0].body) as { state: string }).state, TASK);
+  assert.equal(await workerRecords(f).then(records => records.task), TASK + "\n\n" + SANDBOX_SEMANTICS_NOTE);
+  const worker = parseReceipt(result.stderr).worker as { instructionNote?: string };
+  assert.equal(worker.instructionNote, "sandbox-semantics-v1");
 });
 
 test("empty closed stdin without a positional task is a usage error", async t => {
@@ -876,6 +901,7 @@ test("a worker terminal failure fails the run despite exit zero", async t => {
     usage: "unreported",
     ownedShutdown: false,
     codexHomeManaged: true,
+    instructionNote: "sandbox-semantics-v1",
     failureClass: "unknown"
   });
 });
@@ -970,7 +996,8 @@ test("a completed run without usage reports it explicitly unreported", async t =
     usage: "unreported",
     payload: { mode: "unstructured" },
     ownedShutdown: true,
-    codexHomeManaged: true
+    codexHomeManaged: true,
+    instructionNote: "sandbox-semantics-v1"
   });
   assert.ok(code === 0 || (code === 143 && signal === "SIGTERM"),
     "voluntary exit zero or the ladder's TERM, saw " + code + "/" + String(signal));
@@ -987,7 +1014,7 @@ test("a completed run settles at the terminal event with an unchanged receipt sh
   const worker = receipt.worker as Record<string, unknown>;
   // The key set is pinned exactly: terminal-event settlement adds no field (TS-7).
   assert.deepEqual(Object.keys(worker).sort(),
-    ["code", "codexHomeManaged", "durationMs", "lastEventAgeMs", "ownedShutdown", "payload", "progressEvents", "signal", "status", "usage"]);
+    ["code", "codexHomeManaged", "durationMs", "instructionNote", "lastEventAgeMs", "ownedShutdown", "payload", "progressEvents", "signal", "status", "usage"]);
   assert.equal(worker.status, "completed");
   assert.equal(worker.ownedShutdown, true, "the terminal event starts the owned ladder");
   assert.equal(worker.signal, "SIGTERM");
@@ -1029,6 +1056,7 @@ for (const [name, expectedCode] of [["SIGINT", 130], ["SIGTERM", 143]] as const)
       // Cancellation runs the parent-owned ladder; the worker dies by our TERM.
       ownedShutdown: true,
       codexHomeManaged: true,
+      instructionNote: "sandbox-semantics-v1",
       signal: "SIGTERM"
     });
     assert.equal((await workerRecords(f)).runs, 1);

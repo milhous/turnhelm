@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { PROFILE_IDS, type ProfileId, type ProjectConfig } from "../src/config.js";
 import type { TaskDecision } from "../src/route.js";
-import { buildWorkerArgs, subprocessEnvironment, workerEnvironment } from "../src/codex.js";
+import { buildWorkerArgs, SANDBOX_SEMANTICS_NOTE, subprocessEnvironment, workerEnvironment } from "../src/codex.js";
 import { MAX_EVENT_BYTES } from "../src/codex-events.js";
 import { executableFixture } from "./executable-fixture.js";
 import { fixtureConfig } from "./fixtures.js";
@@ -128,6 +128,7 @@ type Recorded = {
   progressEvents?: number;
   lastEventAgeMs?: number;
   codexHomeManaged?: boolean;
+  instructionNote?: string;
 };
 
 async function runWorker(t: TestContext, scenario: WorkerScenario): Promise<{ recorded: Recorded; stdout: string; stderr: string; directory: string }> {
@@ -772,13 +773,16 @@ finish(() => {
     tailWrites: 0,
     ownedShutdown: true,
     codexHomeManaged: true,
+    instructionNote: "sandbox-semantics-v1",
     payload: { mode: "unstructured" }
   });
   assert.ok(code === 0 || (code === 143 && signal === "SIGTERM"),
     "voluntary exit zero or the ladder's TERM, saw " + code + "/" + String(signal));
   assert.equal(await fakeFile(directory, "argv.json"), JSON.stringify(buildWorkerArgs(decision("balanced"), true)));
   assert.equal(await fakeFile(directory, "cwd.txt"), await realpath(join(directory, "root")));
-  assert.equal(await fakeFile(directory, "task.txt"), task);
+  // The worker instruction is byte-exact task + fixed note; validation saw
+  // the bare task only.
+  assert.equal(await fakeFile(directory, "task.txt"), task + "\n\n" + SANDBOX_SEMANTICS_NOTE);
   assert.equal(await fakeFile(directory, "runs"), "1");
   const env = JSON.parse(await fakeFile(directory, "env.json")) as Record<string, string | boolean>;
   assert.equal(env.TURNHELM_MANAGED_CHILD, "1");
