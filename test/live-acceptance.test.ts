@@ -1601,12 +1601,18 @@ test("the observed record retains the note tag and drops the stall reason and un
     rootMatches: true, exitCode: 0, durationMs: 5, attempts: 1,
     instructionNote: ""
   } as unknown as SafeEvidence);
+  await appendEvidence(run, {
+    phase: "observed", caseId: "jev-default-readonly", backend: "jev", profileId: "default",
+    rootMatches: true, exitCode: 0, durationMs: 5, attempts: 1,
+    instructionNote: "sandbox-semantics-prose-canary"
+  } as unknown as SafeEvidence);
   const lines = (await readFile(run.evidencePath, "utf8")).trim().split("\n").map(line => JSON.parse(line));
   assert.equal(lines[0].instructionNote, "sandbox-semantics-v1", "the version tag is retained as-is");
   assert.ok(!Object.hasOwn(lines[0], "abortReason"), "the stall reason is not live-acceptance evidence");
   assert.ok(!Object.hasOwn(lines[0], "noteProse"), "an unknown neighbor of the note drops");
   assert.ok(!JSON.stringify(lines[0]).includes(CANARY), "no prose rides the note field");
   assert.ok(!Object.hasOwn(lines[1], "instructionNote"), "an empty tag drops alone");
+  assert.ok(!Object.hasOwn(lines[2], "instructionNote"), "an out-of-shape tag drops alone");
 });
 
 test("executed workers retain the note tag in observed records, not-started never does", { timeout: 120_000 }, async t => {

@@ -1531,6 +1531,8 @@ const FULL_PROJECTION = {
 test("a full worker object projects every whitelisted field and ignores unselected receipt keys", () => {
   assert.deepEqual(projectWorkerReceipt(FULL_WORKER), FULL_PROJECTION,
     "the projection is exactly the whitelist — the payload key never reaches it");
+  assert.equal(projectWorkerReceipt({ ...FULL_WORKER, instructionNote: "sandbox-semantics-v2" })?.instructionNote,
+    "sandbox-semantics-v2", "a future note version still matches the tag shape");
 });
 
 test("a not-started worker projects exactly what it legitimately carries", () => {
@@ -1563,6 +1565,8 @@ test("a malformed field drops alone; the rest of the projection survives", () =>
     "a non-string instructionNote drops alone");
   assert.deepEqual(projectWorkerReceipt({ ...FULL_WORKER, instructionNote: "" }), without("instructionNote"),
     "an empty instructionNote drops alone");
+  assert.deepEqual(projectWorkerReceipt({ ...FULL_WORKER, instructionNote: "worker-prose" }), without("instructionNote"),
+    "an out-of-shape instructionNote drops alone");
   assert.deepEqual(projectWorkerReceipt({ ...FULL_WORKER, abortReason: "bored" }), without("abortReason"),
     "an out-of-enum abortReason drops alone");
   assert.deepEqual(

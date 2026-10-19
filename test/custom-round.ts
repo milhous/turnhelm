@@ -16,8 +16,8 @@ import { PROFILE_IDS } from "../src/config.js";
 import { validateOutputSchema } from "../src/output-schema.js";
 import { validateTask } from "../src/task.js";
 import {
-  envelopePayload, oracleSandboxPolicy, projectAttemptTransports, projectWorkerLifecycle,
-  readWorkerLifecycleJournal, superviseCli, type WorkerLifecycleEvidence
+  envelopePayload, INSTRUCTION_NOTE_PATTERN, oracleSandboxPolicy, projectAttemptTransports,
+  projectWorkerLifecycle, readWorkerLifecycleJournal, superviseCli, type WorkerLifecycleEvidence
 } from "./live-acceptance.js";
 
 export type CheckOutcome =
@@ -949,8 +949,11 @@ export function projectWorkerReceipt(worker: unknown): WorkerReceiptEvidence | u
     projection.lastEventAgeMs = lastEventAgeMs;
   }
   // The fixed note's version tag and the stall watchdog's reason ride the
-  // same per-field whitelist: a nonempty tag string and the stall enum only.
-  if (typeof instructionNote === "string" && instructionNote !== "") projection.instructionNote = instructionNote;
+  // same per-field whitelist: a tag matching the versioned shape and the
+  // stall enum only.
+  if (typeof instructionNote === "string" && INSTRUCTION_NOTE_PATTERN.test(instructionNote)) {
+    projection.instructionNote = instructionNote;
+  }
   if (abortReason === "stall") projection.abortReason = abortReason;
   return projection;
 }

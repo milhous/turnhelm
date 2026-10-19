@@ -1112,6 +1112,11 @@ const projectWorkerProgress = (value: unknown): WorkerProgressEvidence | undefin
 const LIFECYCLE_KINDS: ReadonlySet<string> = new Set(["spawned", "stdin-delivered", "event", "completion", "failure",
   "abort", "stall-abort", "shutdown-term", "shutdown-kill", "shutdown-discharged", "stdout-end", "close", "settle"]);
 
+// The fixed note's version-tag shape (spec §3.2), hand-copied the same way:
+// any version number matches — the tag is versioned, never silently edited —
+// while worker prose in the field drops.
+export const INSTRUCTION_NOTE_PATTERN = /^sandbox-semantics-v\d+$/;
+
 // The recorder's frozen detail vocabulary, same hand-copied discipline as the
 // kinds — and every value is validated against the vocabulary it came from:
 // the failure-taxonomy classes plus the four transport causes, the worker
@@ -1344,10 +1349,10 @@ const sanitizeEvidence = (record: SafeEvidence): SafeEvidence => {
         ...(workerFailure !== undefined ? { workerFailure } : {}),
         ...(workerProgress !== undefined ? { workerProgress } : {}),
         ...(workerLifecycle !== undefined ? { workerLifecycle } : {}),
-        // The fixed note's version tag (spec §3.2), as-is when it is one
-        // nonempty string — the stall watchdog's abortReason, by contrast,
+        // The fixed note's version tag (spec §3.2), as-is when it matches the
+        // tag shape — the stall watchdog's abortReason, by contrast,
         // is not live-acceptance evidence and never enters.
-        ...(typeof raw.instructionNote === "string" && raw.instructionNote !== ""
+        ...(typeof raw.instructionNote === "string" && INSTRUCTION_NOTE_PATTERN.test(raw.instructionNote)
           ? { instructionNote: raw.instructionNote } : {})
       };
     }
@@ -2118,7 +2123,7 @@ export async function executeAcceptance(
           // never ran carries no tag, and nothing beyond the tag string is
           // extracted from the receipt's worker object here.
           const instructionNote = worker !== null && worker.status !== "not-started"
-            && typeof worker.instructionNote === "string" && worker.instructionNote !== ""
+            && typeof worker.instructionNote === "string" && INSTRUCTION_NOTE_PATTERN.test(worker.instructionNote)
             ? worker.instructionNote : undefined;
           observation = {
             phase: "observed", caseId: item.id, backend, profileId, rootMatches,
