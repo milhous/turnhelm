@@ -266,3 +266,17 @@ accepted:
 | `noteAppended` becomes true when the stdio pipes exist, before asynchronous spawn success is known — an ENOENT spawn still attaches `instructionNote` at settlement, so "absent on spawn failures" was wrong for the async flavor (reviewer reproduced this in Node) | §3.2 redefines presence as co-location with `instructionNote` under the single `noteAppended` conditional and states both consequences honestly: present on an asynchronous spawn failure, absent on a synchronous spawn fault; §4/§5.3 pin both flavors explicitly |
 | §3.4 still said "fifteen own-property deletions … no allocation beyond the existing copy" after the list grew to 21 names plus case matching | §3.4 rewritten: twenty-one exact-name deletions plus the bounded npm case check, one pass linear in the copied key count, no second copy |
 | The README/skill row implied exhaustive environment-pointer closure, contradicting §3.1's retained unlisted-pointer residual (`AWS_CA_BUNDLE`) | §4's documentation row now requires the boundary passages to retain the unlisted-pointer residual explicitly beside system files, hooks, `AGENTS.override.md`, and absolute reads |
+
+Third-round review against the second revision (`8712d69`). Verdict: **ACCEPT, zero findings** —
+all four round-2 dispositions verified against the baseline code, the existing test helpers, the
+evidence projections, and the private report; the reviewer independently confirmed npm's case
+normalization for both settings from local npm source and reproduced the synchronous-throw versus
+asynchronous-ENOENT-with-pipes distinction with read-only Node probes. No new actionable gap,
+unsupported load-bearing claim, or material over-engineering found. The review loop is closed at
+PROBLEMS(5) → PROBLEMS(4) → ACCEPT(0).
+
+Operational note from this loop: one review run wedged pre-classification because a non-TTY stdin
+that never closes makes `readTask` (`src/task.ts:80`) await stdin EOF even when a positional task
+exists — the enforced "argument or stdin, not both" rule. The run settled correctly on a caller
+SIGINT ("cancelled while waiting for task input"), and relaunching with stdin redirected from
+`/dev/null` behaved normally. Recorded here as an observed interaction, not a spec change.
