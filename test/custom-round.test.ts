@@ -1509,6 +1509,7 @@ const FULL_WORKER = {
   signal: "SIGTERM",
   lastEventAgeMs: 42,
   instructionNote: "sandbox-semantics-v1",
+  envBoundary: "host-pointers-v1",
   abortReason: "stall",
   payload: { mode: "strict" }
 };
@@ -1525,6 +1526,7 @@ const FULL_PROJECTION = {
   signal: "SIGTERM",
   lastEventAgeMs: 42,
   instructionNote: "sandbox-semantics-v1",
+  envBoundary: "host-pointers-v1",
   abortReason: "stall"
 };
 
@@ -1567,6 +1569,17 @@ test("a malformed field drops alone; the rest of the projection survives", () =>
     "an empty instructionNote drops alone");
   assert.deepEqual(projectWorkerReceipt({ ...FULL_WORKER, instructionNote: "worker-prose" }), without("instructionNote"),
     "an out-of-shape instructionNote drops alone");
+  // The boundary tag is the one exact-literal field: unlike instructionNote's
+  // version shape, only today's generation passes — a shape pattern would
+  // also admit a trailing newline (spec §3.2).
+  assert.deepEqual(projectWorkerReceipt({ ...FULL_WORKER, envBoundary: "host-pointers-v2" }), without("envBoundary"),
+    "a future boundary generation drops alone");
+  assert.deepEqual(projectWorkerReceipt({ ...FULL_WORKER, envBoundary: "" }), without("envBoundary"),
+    "an empty envBoundary drops alone");
+  assert.deepEqual(projectWorkerReceipt({ ...FULL_WORKER, envBoundary: "x".repeat(4096) }), without("envBoundary"),
+    "a 4 KiB envBoundary drops alone");
+  assert.deepEqual(projectWorkerReceipt({ ...FULL_WORKER, envBoundary: "host-pointers-v1\n" }), without("envBoundary"),
+    "a trailing-newline envBoundary drops alone");
   assert.deepEqual(projectWorkerReceipt({ ...FULL_WORKER, abortReason: "bored" }), without("abortReason"),
     "an out-of-enum abortReason drops alone");
   assert.deepEqual(
