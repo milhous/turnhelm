@@ -1606,6 +1606,22 @@ test("the observed record retains the note tag and drops the stall reason and un
     rootMatches: true, exitCode: 0, durationMs: 5, attempts: 1,
     instructionNote: "sandbox-semantics-prose-canary"
   } as unknown as SafeEvidence);
+  // The boundary generation is an exact-literal field: today's tag retained,
+  // anything else dropped alone beside a surviving note tag.
+  await appendEvidence(run, {
+    phase: "observed", caseId: "jev-default-readonly", backend: "jev", profileId: "default",
+    rootMatches: true, exitCode: 0, durationMs: 5, attempts: 1,
+    instructionNote: "sandbox-semantics-v1",
+    envBoundary: "host-pointers-v1"
+  } as unknown as SafeEvidence);
+  for (const envBoundary of ["", "host-pointers-v2", "x".repeat(4096), "host-pointers-v1\n"]) {
+    await appendEvidence(run, {
+      phase: "observed", caseId: "jev-default-readonly", backend: "jev", profileId: "default",
+      rootMatches: true, exitCode: 0, durationMs: 5, attempts: 1,
+      instructionNote: "sandbox-semantics-v1",
+      envBoundary
+    } as unknown as SafeEvidence);
+  }
   const lines = (await readFile(run.evidencePath, "utf8")).trim().split("\n").map(line => JSON.parse(line));
   assert.equal(lines[0].instructionNote, "sandbox-semantics-v1", "the version tag is retained as-is");
   assert.ok(!Object.hasOwn(lines[0], "abortReason"), "the stall reason is not live-acceptance evidence");
@@ -1613,30 +1629,45 @@ test("the observed record retains the note tag and drops the stall reason and un
   assert.ok(!JSON.stringify(lines[0]).includes(CANARY), "no prose rides the note field");
   assert.ok(!Object.hasOwn(lines[1], "instructionNote"), "an empty tag drops alone");
   assert.ok(!Object.hasOwn(lines[2], "instructionNote"), "an out-of-shape tag drops alone");
+  assert.equal(lines[3].envBoundary, "host-pointers-v1", "the boundary generation is retained as-is");
+  assert.equal(lines[3].instructionNote, "sandbox-semantics-v1", "the note tag survives beside it");
+  for (const [index, value] of ["", "host-pointers-v2", "x".repeat(4096), "host-pointers-v1\n"].entries()) {
+    assert.ok(!Object.hasOwn(lines[4 + index], "envBoundary"),
+      "the boundary value " + JSON.stringify(value) + " drops alone");
+    assert.equal(lines[4 + index].instructionNote, "sandbox-semantics-v1", "the note tag survives the drop");
+  }
 });
 
 test("executed workers retain the note tag in observed records, not-started never does", { timeout: 120_000 }, async t => {
   const classifier = await startClassifierFixture(t);
   const fakeBin = await writeFakeCodex(t);
-  const noteOf = async (run: { runRoot: string }, caseId: string): Promise<unknown> => {
+  const fieldOf = (field: string) => async (run: { runRoot: string }, caseId: string): Promise<unknown> => {
     const observed = (await readEvidence(run.runRoot)).find(line => line.phase === "observed" && line.caseId === caseId);
-    return (observed as { instructionNote?: unknown } | undefined)?.instructionNote;
+    return (observed as Record<string, unknown> | undefined)?.[field];
   };
+  const noteOf = fieldOf("instructionNote");
+  const boundaryOf = fieldOf("envBoundary");
   // A completing worker: the tag rides the executed-worker receipt.
   const completed = await buildRun(t, "laya", classifier.url, [{ id: "completes", kind: "worker-readonly" }]);
   await executeAcceptance(completed.manifestPath, completed.sha256, { env: workerEnv(fakeBin, "ok-readonly") });
   assert.equal(await noteOf(completed, "completes"), "sandbox-semantics-v1",
     "a completed worker's observed record carries the note tag");
+  assert.equal(await boundaryOf(completed, "completes"), "host-pointers-v1",
+    "a completed worker's observed record carries the boundary generation");
   // A failed worker: the tag rides failure observations too.
   const failed = await buildRun(t, "laya", classifier.url, [{ id: "fails-rated", kind: "worker-readonly" }]);
   await executeAcceptance(failed.manifestPath, failed.sha256, { env: workerEnv(fakeBin, "rate-fail") });
   assert.equal(await noteOf(failed, "fails-rated"), "sandbox-semantics-v1",
     "a failed worker's observed record carries the note tag");
+  assert.equal(await boundaryOf(failed, "fails-rated"), "host-pointers-v1",
+    "a failed worker's observed record carries the boundary generation");
   // A cancelled worker (deadline kill after spawn): still an executed worker.
   const cancelled = await buildRun(t, "laya", classifier.url, [{ id: "times-out", kind: "worker-readonly", deadlineMs: 5000 }]);
   await executeAcceptance(cancelled.manifestPath, cancelled.sha256, { env: workerEnv(fakeBin, "hang") });
   assert.equal(await noteOf(cancelled, "times-out"), "sandbox-semantics-v1",
     "a cancelled worker's observed record carries the note tag");
+  assert.equal(await boundaryOf(cancelled, "times-out"), "host-pointers-v1",
+    "a cancelled worker's observed record carries the boundary generation");
   // A worker that never ran: no tag is fabricated.
   classifier.scripted.push("not-json");
   const notStarted = await buildRun(t, "laya", classifier.url, [{ id: "route-fail", kind: "worker-readonly" }]);
@@ -1644,6 +1675,8 @@ test("executed workers retain the note tag in observed records, not-started neve
   const observed = (await readEvidence(notStarted.runRoot)).find(line => line.phase === "observed");
   assert.ok(!("instructionNote" in (observed as Record<string, unknown>)),
     "a not-started worker carries no note tag");
+  assert.ok(!("envBoundary" in (observed as Record<string, unknown>)),
+    "a not-started worker carries no boundary generation");
 });
 
 test("a hostile journal cannot disturb the receiptless stop record", { timeout: 120_000 }, async t => {
