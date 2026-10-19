@@ -1500,6 +1500,29 @@ finish(() => {
   assert.ok((recorded.durationMs ?? 0) >= 4900, "the deadline waits the full grace before escalating, saw " + String(recorded.durationMs));
 });
 
+test("a reported failure is terminal for the stall watchdog even at the floor value", { timeout: 30_000 }, async t => {
+  // turn.failed is a terminal frame: at stallAbortMs 5000 — exactly the
+  // failure-grace deadline — the watchdog must not preempt the failure
+  // ladder and reclassify an explicitly failed worker as a stall.
+  const { recorded } = await runWorker(t, {
+    settlementGuardMs: 9000,
+    stallAbortMs: 5000,
+    script: `
+finish(() => {
+  emit({ type: "turn.failed", message: "stream disconnected before completion" });
+  setInterval(() => {}, 500);
+});
+`
+  });
+  assert.equal(recorded.status, "failed", "the reported failure keeps its class");
+  assert.equal(recorded.error, "worker");
+  assert.equal(recorded.failureClass, "stream-disconnected");
+  assert.equal(recorded.abortReason, undefined, "no stall reason rides a run the worker already failed");
+  assert.equal(recorded.ownedShutdown, true);
+  assert.equal(recorded.code, 143);
+  assert.equal(recorded.signal, "SIGTERM");
+});
+
 test("failure deadline expiry escalates an exited leader whose descendant holds inherited stdio", { timeout: 30_000 }, async t => {
   const { recorded, directory } = await runWorker(t, {
     settlementGuardMs: 9000,

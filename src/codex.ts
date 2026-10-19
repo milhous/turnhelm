@@ -505,17 +505,19 @@ export function executeWorker(
     const onAbort = (): void => { cancelled = true; options.lifecycle?.record("abort"); beginShutdown(); settle(); };
     // The opt-in stall watchdog: armed at the first decoded frame and re-armed
     // by every later one, it fires only while the run is still undecided and
-    // silent — a caller abort or a terminal event always keeps precedence.
+    // silent — a caller abort or a terminal event (a decided run or a
+    // reported failure, which owns the failure-grace deadline) always keeps
+    // precedence.
     const onStallAbort = (): void => {
       stallTimer = undefined;
-      if (finished || shutdownStarted || decided || cancelled) return;
+      if (finished || shutdownStarted || decided || cancelled || stickyFailed) return;
       stallAbort = true;
       options.lifecycle?.record("stall-abort");
       beginShutdown();
       settle();
     };
     const armStallWatchdog = (): void => {
-      if (options.stallAbortMs === undefined || finished || shutdownStarted || decided) return;
+      if (options.stallAbortMs === undefined || finished || shutdownStarted || decided || stickyFailed) return;
       if (stallTimer !== undefined) clearTimeout(stallTimer);
       stallTimer = setTimeout(onStallAbort, options.stallAbortMs);
     };
